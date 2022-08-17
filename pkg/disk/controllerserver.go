@@ -1089,7 +1089,7 @@ func (cs *controllerServer) ControllerExpandVolume(ctx context.Context, req *csi
 	// do resize
 	resizeDiskRequest := ecs.CreateResizeDiskRequest()
 	resizeDiskRequest.RegionId = GlobalConfigVar.Region
-	resizeDiskRequest.DiskId = disk.DiskName
+	resizeDiskRequest.DiskId = disk.DiskId
 	resizeDiskRequest.NewSize = requests.NewInteger(requestGB)
 	if disk.Category == DiskSSD || disk.Category == DiskEfficiency || disk.Category == DiskESSD {
 		if disk.Status == DiskStatusInuse {
@@ -1101,7 +1101,7 @@ func (cs *controllerServer) ControllerExpandVolume(ctx context.Context, req *csi
 	if err != nil {
 		log.Errorf("ControllerExpandVolume:: resize got error: %s", err.Error())
 		if snapshotEnable {
-			cs.deleteUntagAutoSnapshot(snapshot.SourceVolumeId, diskID)
+			cs.deleteUntagAutoSnapshot(snapshot.SnapshotId, diskID)
 		}
 		return nil, status.Errorf(codes.Internal, "resize disk %s get error: %s", diskID, err.Error())
 	}
