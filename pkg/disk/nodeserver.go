@@ -855,7 +855,7 @@ func (ns *nodeServer) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandV
 	snapshotEnable := volumeExpandAutoSnapshotID != ""
 	defer func() {
 		if snapshotEnable {
-			deleteUntagAutoSnapshot("volumeExpandAutoSnapshotID", diskID)
+			deleteUntagAutoSnapshot(volumeExpandAutoSnapshotID, diskID)
 		}
 	}()
 	devicePath := GetVolumeDeviceName(diskID)
@@ -895,7 +895,7 @@ func (ns *nodeServer) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandV
 	// use resizer to expand volume filesystem
 	mounter := &k8smount.SafeFormatAndMount{Interface: ns.k8smounter, Exec: utilexec.New()}
 	r := k8smount.NewResizeFs(mounter.Exec)
-	ok, err := r.Resize(devicePath, volumePath)
+	ok, err := r.Resize("devicePath", volumePath)
 	if err != nil {
 		log.Errorf("NodeExpandVolume:: Resize Error, volumeId: %s, devicePath: %s, volumePath: %s, err: %s", diskID, devicePath, volumePath, err.Error())
 		if snapshotEnable {
@@ -906,6 +906,10 @@ func (ns *nodeServer) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandV
 	}
 	if !ok {
 		log.Errorf("NodeExpandVolume:: Resize failed, volumeId: %s, devicePath: %s, volumePath: %s", diskID, devicePath, volumePath)
+		if snapshotEnable {
+			log.Warnf("NodeExpandVolume:: Please use the snapshot %s for data recovery。 The retentionDays is %d", volumeExpandAutoSnapshotID, veasp.RetentionDays)
+			snapshotEnable = false
+		}
 		return nil, status.Error(codes.Internal, "Fail to resize volume fs")
 	}
 	diskCapacity, err := getDiskCapacity(volumePath)
