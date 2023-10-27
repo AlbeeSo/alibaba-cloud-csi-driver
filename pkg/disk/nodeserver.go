@@ -895,7 +895,12 @@ func (ns *nodeServer) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandV
 	// use resizer to expand volume filesystem
 	mounter := &k8smount.SafeFormatAndMount{Interface: ns.k8smounter, Exec: utilexec.New()}
 	r := k8smount.NewResizeFs(mounter.Exec)
-	ok, err := r.Resize(devicePath, volumePath)
+	outStr, err := r.GetFsCapacityByDf(devicePath, devicePath)
+	if err != nil {
+		log.Log.Errorf("TEST:: NodeExpandVolume:: GetFsCapacityByDf Error, volumeId: %s, devicePath: %s, volumePath: %s, err: %s", diskID, devicePath, volumePath, err.Error())
+	}
+	log.Log.Infof("TEST:: NodeExpandVolume:: GetFsCapacityByDf before resize2fs output: %s", outStr)
+	ok, err := r.Resize(devicePath, devicePath)
 	if err != nil {
 		log.Log.Errorf("NodeExpandVolume:: Resize Error, volumeId: %s, devicePath: %s, volumePath: %s, err: %s", diskID, devicePath, volumePath, err.Error())
 		if snapshotEnable {
@@ -912,6 +917,12 @@ func (ns *nodeServer) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandV
 		}
 		return nil, status.Error(codes.Internal, "Fail to resize volume fs")
 	}
+	outStr, err = r.GetFsCapacityByDf(devicePath, devicePath)
+	if err != nil {
+		log.Log.Errorf("TEST:: NodeExpandVolume:: GetFsCapacityByDf Error, volumeId: %s, devicePath: %s, volumePath: %s, err: %s", diskID, devicePath, volumePath, err.Error())
+	}
+	log.Log.Infof("TEST:: NodeExpandVolume:: GetFsCapacityByDf after resize2fs output: %s", outStr)
+
 	diskCapacity, err := getDiskCapacity(volumePath)
 	if err != nil {
 		log.Log.Errorf("NodeExpandVolume:: get diskCapacity error %+v", err)
