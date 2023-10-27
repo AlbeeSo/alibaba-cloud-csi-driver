@@ -42,7 +42,7 @@ func NewResizeFs(exec utilexec.Interface) *ResizeFs {
 func (resizefs *ResizeFs) GetFsCapacityByDf(devicePath string, deviceMountPath string) (string, error) {
 	output, err := resizefs.exec.Command("df", devicePath).CombinedOutput()
 	if err == nil {
-		klog.Infof("TEST:: df %s output: %s", devicePath, string(output))
+		klog.Infof("TEST:: df %s output: %s", devicePath, strings.Replace(string(output), "\n", "\t", -1))
 		return string(output), nil
 	}
 
@@ -81,7 +81,7 @@ func (resizefs *ResizeFs) extResize(devicePath string) (bool, error) {
 	output, err := resizefs.exec.Command("resize2fs", devicePath).CombinedOutput()
 	if err == nil {
 		klog.V(2).Infof("Device %s resized successfully", devicePath)
-		klog.Infof("TEST:: Device %s resized successfully, output: %s", devicePath, string(output))
+		klog.Infof("TEST:: Device %s resized successfully, output: %s", devicePath, strings.Replace(string(output), "\n", "\t", -1))
 		return true, nil
 	}
 	resizeError := fmt.Errorf("resize of device %s failed: %v. resize2fs output: %s", devicePath, err, string(output))
@@ -95,7 +95,7 @@ func (resizefs *ResizeFs) xfsResize(deviceMountPath string) (bool, error) {
 
 	if err == nil {
 		klog.V(2).Infof("Device %s resized successfully", deviceMountPath)
-		klog.Infof("TEST:: Device %s resized successfully, output: %s", deviceMountPath, string(output))
+		klog.Infof("TEST:: Device %s resized successfully, output: %s", deviceMountPath, strings.Replace(string(output), "\n", "\t", -1))
 		return true, nil
 	}
 
@@ -109,7 +109,7 @@ func (resizefs *ResizeFs) btrfsResize(deviceMountPath string) (bool, error) {
 
 	if err == nil {
 		klog.V(2).Infof("Device %s resized successfully", deviceMountPath)
-		klog.Infof("TEST:: Device %s resized successfully, output: %s", deviceMountPath, string(output))
+		klog.Infof("TEST:: Device %s resized successfully, output: %s", deviceMountPath, strings.Replace(string(output), "\n", "\t", -1))
 		return true, nil
 	}
 
