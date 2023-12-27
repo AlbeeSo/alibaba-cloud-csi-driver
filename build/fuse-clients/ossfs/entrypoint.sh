@@ -5,13 +5,13 @@ delay_term() {
     while true; do
         if ! kill -0 $INTERNAL_PROCESS_PID 2>/dev/null; then
             echo "ossfs exited. Exiting..."
-            exit 0
+            exit 1
         fi
         if [ ${SIGTERM_DELAY} -le 0 ]; then
             echo "Timeout reached. Sending SIGTERM to ossfs process..."
             kill -TERM "$INTERNAL_PROCESS_PID"
             wait "$INTERNAL_PROCESS_PID"
-            exit 0
+            exit 1
         fi
         sleep 1
         ((SIGTERM_DELAY--))
