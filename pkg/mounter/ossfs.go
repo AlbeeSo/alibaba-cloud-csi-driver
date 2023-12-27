@@ -87,7 +87,7 @@ func (f *fuseOssfs) buildPodSpec(
 			},
 		},
 	}
-	*targetVolume.HostPath.Type = corev1.HostPathDirectory
+	*targetVolume.HostPath.Type = corev1.HostPathDirectoryOrCreate
 	metricsDirVolume := corev1.Volume{
 		Name: "metrics-dir",
 		VolumeSource: corev1.VolumeSource{
