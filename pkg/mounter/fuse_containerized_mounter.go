@@ -189,6 +189,7 @@ type ContainerizedFuseMounter struct {
 func (mounter *ContainerizedFuseMounter) Mount(source string, target string, fstype string, options []string) error {
 	for _, option := range options {
 		if option == "bind" {
+			options = append(options, "make-rslave")
 			return mounter.Interface.Mount(source, target, fstype, options)
 		}
 	}
