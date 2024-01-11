@@ -140,7 +140,7 @@ func (f *fuseOssfs) buildPodSpec(
 	default:
 		return spec, fmt.Errorf("invalid ossfs dbglevel: %q", dbglevel)
 	}
-	bidirectional := corev1.MountPropagationBidirectional
+	bidirectional := corev1.MountPropagationHostToContainer
 	container := corev1.Container{
 		Name:      "fuse-mounter",
 		Image:     f.config.Image,
