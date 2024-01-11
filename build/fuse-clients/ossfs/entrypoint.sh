@@ -26,6 +26,8 @@ sigterm_handler() {
     fi
 }
 trap 'sigterm_handler' SIGTERM
+umount "$TARGET_PATH"
+mkdir -p "$TARGET_PATH"
 ossfs "$@" &
 INTERNAL_PROCESS_PID="$!"
 wait "$INTERNAL_PROCESS_PID"

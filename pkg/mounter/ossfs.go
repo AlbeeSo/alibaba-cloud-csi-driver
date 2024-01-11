@@ -157,7 +157,7 @@ func (f *fuseOssfs) buildPodSpec(
 		VolumeMounts: []corev1.VolumeMount{
 			{
 				Name:             targetVolume.Name,
-				MountPath:        target,
+				MountPath:        getVolumeDir(target),
 				MountPropagation: &bidirectional,
 			}, {
 				Name:      metricsDirVolume.Name,
@@ -195,8 +195,13 @@ func (f *fuseOssfs) buildPodSpec(
 	args = append(args, "-f")
 	container.Args = args
 
+	targetEnv := corev1.EnvVar{}
+	targetEnv.Name = "TARGET_PATH"
+	targetEnv.Value = target
+	container.Env = []corev1.EnvVar{targetEnv}
+
 	spec.Containers = []corev1.Container{container}
-	spec.RestartPolicy = corev1.RestartPolicyOnFailure
+	spec.RestartPolicy = corev1.RestartPolicyAlways
 	spec.NodeName = nodeName
 	spec.HostNetwork = true
 	spec.PriorityClassName = "system-node-critical"

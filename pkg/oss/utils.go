@@ -58,14 +58,8 @@ func GetGlobalMountPath(volumeId string) string {
 	result := sha256.Sum256([]byte(volumeId))
 	volSha := fmt.Sprintf("%x", result)
 
-	globalFileVer1 := filepath.Join(utils.KubeletRootDir, "/plugins/kubernetes.io/csi/pv/", volumeId, "/globalmount")
-	globalFileVer2 := filepath.Join(utils.KubeletRootDir, "/plugins/kubernetes.io/csi/", driverName, volSha, "/globalmount")
+	return filepath.Join("/test", "/plugins/kubernetes.io/csi/", driverName, volSha, "/globalmount")
 
-	if utils.IsFileExisting(globalFileVer1) {
-		return globalFileVer1
-	} else {
-		return globalFileVer2
-	}
 }
 
 // GetRAMRoleOption get command line's ram_role option

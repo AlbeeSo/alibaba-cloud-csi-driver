@@ -189,7 +189,7 @@ type ContainerizedFuseMounter struct {
 func (mounter *ContainerizedFuseMounter) Mount(source string, target string, fstype string, options []string) error {
 	for _, option := range options {
 		if option == "bind" {
-			return mounter.Interface.MountSensitiveWithoutSystemdWithMountFlags(source, target, fstype, options, nil, []string{"--make-rslave"})
+			return mounter.Interface.Mount(source, target, fstype, options)
 		}
 	}
 
@@ -208,6 +208,7 @@ func (mounter *ContainerizedFuseMounter) Mount(source string, target string, fst
 	if notMounted {
 		return errors.New("fuse pod launched but target still not mounted")
 	}
+
 	return nil
 }
 
