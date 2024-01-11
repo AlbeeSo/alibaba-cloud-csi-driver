@@ -72,6 +72,15 @@ func (f *fuseOssfs) addPodMeta(pod *corev1.Pod) {
 	}
 }
 
+func getVolumeDir(dir string) string {
+	s := strings.Split(dir, "/")
+	if len(s) < 2 {
+		return dir
+	}
+	s = s[:len(s)-1]
+	return strings.Join(s, "/")
+}
+
 func (f *fuseOssfs) buildPodSpec(
 	source, target, fstype string, authCfg *AuthConfig, options, mountFlags []string, nodeName, volumeId string,
 ) (spec corev1.PodSpec, _ error) {
@@ -82,7 +91,7 @@ func (f *fuseOssfs) buildPodSpec(
 		Name: "kubelet-dir",
 		VolumeSource: corev1.VolumeSource{
 			HostPath: &corev1.HostPathVolumeSource{
-				Path: target,
+				Path: getVolumeDir(target),
 				Type: new(corev1.HostPathType),
 			},
 		},
@@ -140,7 +149,7 @@ func (f *fuseOssfs) buildPodSpec(
 	default:
 		return spec, fmt.Errorf("invalid ossfs dbglevel: %q", dbglevel)
 	}
-	bidirectional := corev1.MountPropagationHostToContainer
+	bidirectional := corev1.MountPropagationBidirectional
 	container := corev1.Container{
 		Name:      "fuse-mounter",
 		Image:     f.config.Image,
