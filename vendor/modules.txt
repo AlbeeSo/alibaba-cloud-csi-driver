@@ -108,9 +108,10 @@ github.com/emirpasic/gods/utils
 # github.com/evanphx/json-patch v4.9.0+incompatible => github.com/evanphx/json-patch v3.0.0+incompatible
 ## explicit
 github.com/evanphx/json-patch
-# github.com/go-logr/logr v1.2.3
-## explicit; go 1.16
+# github.com/go-logr/logr v1.3.0
+## explicit; go 1.18
 github.com/go-logr/logr
+github.com/go-logr/logr/slogr
 # github.com/go-ping/ping v0.0.0-20201022122018-3977ed72668a
 ## explicit; go 1.14
 github.com/go-ping/ping
@@ -206,6 +207,9 @@ github.com/lestrrat-go/strftime/internal/errors
 # github.com/matttproud/golang_protobuf_extensions v1.0.1
 ## explicit
 github.com/matttproud/golang_protobuf_extensions/pbutil
+# github.com/moby/sys/mountinfo v0.6.2
+## explicit; go 1.16
+github.com/moby/sys/mountinfo
 # github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd
 ## explicit
 github.com/modern-go/concurrent
@@ -263,7 +267,7 @@ github.com/sirupsen/logrus
 # github.com/spf13/pflag v1.0.5 => github.com/spf13/pflag v1.0.3
 ## explicit
 github.com/spf13/pflag
-# github.com/stretchr/testify v1.7.0 => github.com/stretchr/testify v1.3.0
+# github.com/stretchr/testify v1.8.4 => github.com/stretchr/testify v1.3.0
 ## explicit
 github.com/stretchr/testify/assert
 # github.com/tjfoc/gmsm v1.3.2
@@ -719,7 +723,7 @@ k8s.io/client-go/util/workqueue
 # k8s.io/klog v1.0.0 => k8s.io/klog v0.2.0
 ## explicit
 k8s.io/klog
-# k8s.io/klog/v2 v2.80.1
+# k8s.io/klog/v2 v2.110.1
 ## explicit; go 1.13
 k8s.io/klog/v2
 k8s.io/klog/v2/internal/buffer
@@ -727,13 +731,14 @@ k8s.io/klog/v2/internal/clock
 k8s.io/klog/v2/internal/dbg
 k8s.io/klog/v2/internal/serialize
 k8s.io/klog/v2/internal/severity
+k8s.io/klog/v2/internal/sloghandler
 # k8s.io/kube-openapi v0.0.0-20200805222855-6aeccd4b50c6 => k8s.io/kube-openapi v0.0.0-20190306001800-15615b16d372
 ## explicit
 k8s.io/kube-openapi/pkg/util/proto
-# k8s.io/mount-utils v0.21.1
-## explicit; go 1.16
+# k8s.io/mount-utils v0.29.0
+## explicit; go 1.21
 k8s.io/mount-utils
-# k8s.io/utils v0.0.0-20201110183641-67b214c5f920 => k8s.io/utils v0.0.0-20200324210504-a9aa75ae1b89
+# k8s.io/utils v0.0.0-20230726121419-3b25d923346b => k8s.io/utils v0.0.0-20200324210504-a9aa75ae1b89
 ## explicit; go 1.12
 k8s.io/utils/buffer
 k8s.io/utils/exec
