@@ -277,6 +277,7 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	}
 
 	regionID, _ := ns.metadata.Get(metadata.RegionID)
+	var updatedAk bool = false
 	switch opt.AuthType {
 	case mounter.AuthTypeSTS:
 		if opt.FuseType == OssFsType {
@@ -284,6 +285,7 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		} else if opt.FuseType == JindoFsType {
 			mountOptions = append(mountOptions, "fs.oss.provider.endpoint=ECS_ROLE")
 		}
+		opt.AkID, opt.AkSecret = "", ""
 	case mounter.AuthTypeRRSA:
 		if opt.FuseType == OssFsType {
 			if regionID == "" {
@@ -294,6 +296,7 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		} else if opt.FuseType == JindoFsType {
 			return nil, status.Errorf(codes.Internal, "jindo fs do not support RRSA")
 		}
+		opt.AkID, opt.AkSecret = "", ""
 	case mounter.AuthTypeCSS:
 		if opt.FuseType == JindoFsType {
 			return nil, status.Errorf(codes.Internal, "jindo fs do not support CsiSecretStore")
@@ -301,9 +304,12 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	default:
 		if opt.FuseType == OssFsType {
 			// ossfs fuse pod will mount the secret to access credentials
-			err := mounter.SetupOssfsCredentialSecret(ctx, ns.clientset, ns.nodeName, req.VolumeId, opt.Bucket, opt.AkID, opt.AkSecret)
+			updatedAk, err = mounter.SetupOssfsCredentialSecret(ctx, ns.clientset, ns.nodeName, req.VolumeId, opt.Bucket, opt.AkID, opt.AkSecret)
 			if err != nil {
 				return nil, status.Errorf(codes.Internal, "failed to setup ossfs credential secret: %v", err)
+			}
+			if updatedAk {
+				log.Warnf("NodePublishVolume: use new shared path %s as AK has modified")
 			}
 		} else if opt.FuseType == JindoFsType {
 			mountOptions = append(mountOptions, fmt.Sprintf("fs.oss.accessKeyId=%s,fs.oss.accessKeySecret=%s", opt.AkID, opt.AkSecret))
@@ -341,28 +347,36 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	}
 
 	if opt.UseSharedPath {
-		sharedPath := GetGlobalMountPath(req.GetVolumeId())
-		notMnt, err := ossMounter.IsLikelyNotMountPoint(sharedPath)
+		comp, pref := GetGlobalMountPath(req.GetVolumeId(), opt.AkID, opt.AkSecret)
+		compMnt, err := mounter.CheckMountPointIsMounted(ossMounter, comp)
 		if err != nil {
-			if os.IsNotExist(err) {
-				if err := os.MkdirAll(sharedPath, os.ModePerm); err != nil {
-					log.Errorf("NodePublishVolume: mkdir %s: %v", sharedPath, err)
-					return nil, status.Error(codes.Internal, err.Error())
-				}
-				notMnt = true
-			} else if mountutils.IsCorruptedMnt(err) {
-				log.Warnf("Umount corrupted mountpoint %s", sharedPath)
-				err := mountutils.New("").Unmount(sharedPath)
-				if err != nil {
-					return nil, status.Errorf(codes.Internal, "umount corrupted mountpoint %s: %v", sharedPath, err)
-				}
-				notMnt = true
-			} else {
-				log.Errorf("NodePublishVolume: check mountpoint %s: %v", sharedPath, err)
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+		prefMnt, err := mounter.CheckMountPointIsMounted(ossMounter, pref)
+		if err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+		var sharedPath string
+		var mnt bool
+		switch {
+		case prefMnt:
+			sharedPath = pref
+			mnt = true
+		case compMnt && !updatedAk:
+			// use old path as ak is not updated
+			sharedPath = comp
+			mnt = true
+		default:
+			//  (updatedAK && !compMnt) || (!compMnt && !prefMnt) || (compMnt && updatedAK)
+			sharedPath = pref
+			mnt = false
+		}
+		if !mnt {
+			err := os.MkdirAll(sharedPath, os.ModePerm)
+			if err != nil {
+				log.Errorf("NodePublishVolume: mkdir %s: %v", sharedPath, err)
 				return nil, status.Error(codes.Internal, err.Error())
 			}
-		}
-		if notMnt {
 			// serialize node publish operations on the same volume when using sharedpath
 			if lock := ns.sharedPathLock.TryAcquire(req.VolumeId); !lock {
 				log.Errorf("NodePublishVolume: aborted because failed to acquire volume %s lock", req.VolumeId)
@@ -485,7 +499,7 @@ func (ns *nodeServer) NodeUnstageVolume(
 	*csi.NodeUnstageVolumeResponse, error) {
 	log.Infof("NodeUnstageVolume: starting to unmount volume, volumeId: %s, target: %v", req.VolumeId, req.StagingTargetPath)
 	// unmount for sharedPath
-	mountpoint := GetGlobalMountPath(req.VolumeId)
+	mountpoint := req.StagingTargetPath
 	err := ns.cleanupMountPoint(ctx, req.VolumeId, mountpoint)
 	if err != nil {
 		log.Errorf("NodeUnstageVolume: failed to unmount %q: %v", mountpoint, err)

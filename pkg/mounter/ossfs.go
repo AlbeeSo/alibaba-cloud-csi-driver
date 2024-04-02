@@ -206,29 +206,35 @@ func (f *fuseOssfs) buildPodSpec(
 	return
 }
 
-func SetupOssfsCredentialSecret(ctx context.Context, clientset kubernetes.Interface, node, volumeId, bucket, akId, akSecret string) error {
+func GetSecretContent(node, volumeId, bucket, akId, akSecret string) (string, string) {
 	key := fmt.Sprintf("%s.%s", node, volumeId)
 	value := fmt.Sprintf("%s:%s:%s", bucket, akId, akSecret)
-	secretClient := clientset.CoreV1().Secrets(fuseMountNamespace)
+	return key, value
+}
+func SetupOssfsCredentialSecret(ctx context.Context, clientset kubernetes.Interface, node, volumeId, bucket, akId, akSecret string) (bool, error) {
+	var updated bool = false
+	key, value := GetSecretContent(node, volumeId, bucket, akId, akSecret)
+	secretClient := clientset.CoreV1().Secrets(FuseMountNamespace)
 	secret, err := secretClient.Get(ctx, OssfsCredentialSecretName, metav1.GetOptions{})
 	if err != nil {
 		// if secret not found, create it
 		if errors.IsNotFound(err) {
 			secret = new(corev1.Secret)
 			secret.Name = OssfsCredentialSecretName
-			secret.Namespace = fuseMountNamespace
+			secret.Namespace = FuseMountNamespace
 			secret.Data = map[string][]byte{key: []byte(value)}
 			_, err = secretClient.Create(ctx, secret, metav1.CreateOptions{})
 			if err == nil {
 				log.WithField("volumeId", volumeId).Infof("created secret %s to add credentials", OssfsCredentialSecretName)
 			}
-			return err
+			return updated, err
 		}
-		return err
+		return updated, err
 	}
 	if string(secret.Data[key]) == value {
-		return nil
+		return updated, nil
 	}
+	updated = true
 	// patch secret
 	patch := corev1.Secret{
 		Data: map[string][]byte{
@@ -237,18 +243,18 @@ func SetupOssfsCredentialSecret(ctx context.Context, clientset kubernetes.Interf
 	}
 	patchData, err := json.Marshal(patch)
 	if err != nil {
-		return err
+		return updated, err
 	}
 	_, err = secretClient.Patch(ctx, OssfsCredentialSecretName, types.StrategicMergePatchType, patchData, metav1.PatchOptions{})
 	if err == nil {
 		log.WithField("volumeId", volumeId).Infof("patched secret %s", OssfsCredentialSecretName)
 	}
-	return err
+	return updated, err
 }
 
 func CleanupOssfsCredentialSecret(ctx context.Context, clientset kubernetes.Interface, node, volumeId string) error {
-	key := fmt.Sprintf("%s.%s", node, volumeId)
-	secretClient := clientset.CoreV1().Secrets(fuseMountNamespace)
+	key, _ := GetSecretContent(node, volumeId, "", "", "")
+	secretClient := clientset.CoreV1().Secrets(FuseMountNamespace)
 	secret, err := secretClient.Get(ctx, OssfsCredentialSecretName, metav1.GetOptions{})
 	if err != nil {
 		if errors.IsNotFound(err) {
@@ -383,4 +389,23 @@ func buildAuthSpec(nodeName, volumeId, target string, authCfg *AuthConfig,
 		container.VolumeMounts = append(container.VolumeMounts, passwdVolumeMont)
 		*options = append(*options, fmt.Sprintf("passwd_file=%s", filepath.Join(passwdMountDir, passwdFilename)))
 	}
+}
+
+func CheckMountPointIsMounted(ossMounter mountutils.Interface, path string) (bool, error) {
+	notMnt, err := ossMounter.IsLikelyNotMountPoint(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		} else if mountutils.IsCorruptedMnt(err) {
+			log.Warnf("Umount corrupted mountpoint %s", path)
+			err := mountutils.New("").Unmount(path)
+			if err != nil {
+				return false, fmt.Errorf("umount corrupted mountpoint %s: %v", path, err)
+			}
+			return false, nil
+		} else {
+			return false, err
+		}
+	}
+	return !notMnt, nil
 }

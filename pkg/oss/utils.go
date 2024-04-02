@@ -41,19 +41,19 @@ const (
 	RAMRoleResource = "ram/security-credentials/"
 )
 
-func GetGlobalMountPath(volumeId string) string {
-
-	result := sha256.Sum256([]byte(volumeId))
-	volSha := fmt.Sprintf("%x", result)
+func GetGlobalMountPath(volumeId, akId, akSecret string) (compaPath, preferPath string) {
 
 	globalFileVer1 := filepath.Join(utils.KubeletRootDir, "/plugins/kubernetes.io/csi/pv/", volumeId, "/globalmount")
-	globalFileVer2 := filepath.Join(utils.KubeletRootDir, "/plugins/kubernetes.io/csi/", driverName, volSha, "/globalmount")
-
 	if utils.IsFileExisting(globalFileVer1) {
-		return globalFileVer1
-	} else {
-		return globalFileVer2
+		// do not consider ak-update problem
+		return globalFileVer1, globalFileVer1
 	}
+
+	compa := sha256.Sum256([]byte(volumeId))
+	prefer := sha256.Sum256([]byte(volumeId + akId + akSecret))
+	compaPath = filepath.Join(utils.KubeletRootDir, "/plugins/kubernetes.io/csi/", driverName, fmt.Sprintf("%x", compa), "/globalmount")
+	preferPath = filepath.Join(utils.KubeletRootDir, "/plugins/kubernetes.io/csi/", driverName, fmt.Sprintf("%x", prefer), "/globalmount")
+	return
 }
 
 // GetRAMRoleOption get command line's ram_role option

@@ -17,11 +17,15 @@ limitations under the License.
 package oss
 
 import (
+	"crypto/sha256"
+	"fmt"
+	"path/filepath"
 	"reflect"
 	"testing"
 
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/cloud/metadata"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -257,4 +261,22 @@ func Test_setTransmissionProtocol(t *testing.T) {
 			}
 		})
 	}
+}
+
+func Test_GetGlobalMountPath(t *testing.T) {
+	volumeId := "volume123"
+	akId := "ak123"
+
+	compaPath, preferPath := GetGlobalMountPath(volumeId, akId)
+
+	// Verify the compaPath
+	expectedCompa := sha256.Sum256([]byte(volumeId))
+	compaPathExpected := filepath.Join(utils.KubeletRootDir, "/plugins/kubernetes.io/csi/", driverName, fmt.Sprintf("%x", expectedCompa), "/globalmount")
+	assert.Equal(t, compaPathExpected, compaPath)
+
+	// Verify the preferPath
+	expectedPrefer := sha256.Sum256([]byte(volumeId + akId))
+	preferPathExpected := filepath.Join(utils.KubeletRootDir, "/plugins/kubernetes.io/csi/", driverName, fmt.Sprintf("%x", expectedPrefer), "/globalmount")
+	assert.Equal(t, preferPathExpected, preferPath)
+
 }

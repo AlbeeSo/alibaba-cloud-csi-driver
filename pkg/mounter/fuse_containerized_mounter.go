@@ -24,9 +24,11 @@ import (
 	mountutils "k8s.io/mount-utils"
 )
 
-const fuseMountTimeout = time.Second * 30
-const fuseMountNamespace = "kube-system"
-const fuseServieAccountName = "csi-fuse-ossfs"
+const (
+	fuseMountTimeout      = time.Second * 30
+	fuseServieAccountName = "csi-fuse-ossfs"
+	FuseMountNamespace    = "kube-system"
+)
 
 const (
 	FuseTypeLabelKey          = "csi.alibabacloud.com/fuse-type"
@@ -155,7 +157,7 @@ func NewContainerizedFuseMounterFactory(
 	return &ContainerizedFuseMounterFactory{
 		fuseType:  fuseType,
 		nodeName:  nodeName,
-		namespace: fuseMountNamespace,
+		namespace: FuseMountNamespace,
 		client:    client,
 	}
 }
