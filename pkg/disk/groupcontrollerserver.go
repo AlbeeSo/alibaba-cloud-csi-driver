@@ -92,15 +92,22 @@ func (cs *groupControllerServer) CreateVolumeGroupSnapshot(ctx context.Context, 
 		log.Errorf("CreateVolumeGroupSnapshot: driver not support Create volume group snapshot: %v", err)
 		return nil, err
 	}
-	// request limit
+	// still inprogressing
+	if _, ok := GroupSnapshotRequestMap[req.Name]; ok {
+		return nil, status.Errorf(codes.Aborted, "groupSnapshot with the same name: %s is still processing", req.GetName())
+	}
+
 	cur := time.Now().Unix()
+	GroupSnapshotRequestMap[req.Name] = cur
+	defer delete(GroupSnapshotRequestMap, req.GetName())
+
+	// request limit
 	if initTime, ok := SnapshotRequestMap[req.Name]; ok {
 		if cur-initTime < SnapshotRequestInterval {
 			err := fmt.Errorf("CreateVolumeGroupSnapshot: volume group snapshot create request limit %s", req.Name)
 			return nil, err
 		}
 	}
-	SnapshotRequestMap[req.Name] = cur
 
 	// used for snapshot events
 	groupSnapshotName := req.Parameters[common.VolumeGroupSnapshotNameKey]
@@ -146,7 +153,6 @@ func (cs *groupControllerServer) CreateVolumeGroupSnapshot(ctx context.Context, 
 		if groupSnapshot.ReadyToUse {
 			utils.CreateEvent(cs.recorder, ref, v1.EventTypeNormal, snapshotCreatedSuccessfully,
 				fmt.Sprintf("VolumeGroupSnapshot: name: %s, id: %s is ready to use.", req.GetName(), groupSnapshot.GroupSnapshotId))
-			delete(GroupSnapshotRequestMap, req.GetName())
 		}
 		return &csi.CreateVolumeGroupSnapshotResponse{
 			GroupSnapshot: groupSnapshot,
@@ -221,7 +227,6 @@ func (cs *groupControllerServer) CreateVolumeGroupSnapshot(ctx context.Context, 
 	// always IA snapshot, so set readyToUse true immediately
 	groupSnapshot.ReadyToUse = true
 
-	delete(GroupSnapshotRequestMap, req.GetName())
 	str := fmt.Sprintf("CreateVolumeGroupSnapshot:: GroupSnapshot create successful: snapshotName[%s], sourceIds[%v], snapshotId[%s]", req.GetName(), sourceVolumeIds, snapshotResponse.SnapshotGroupId)
 	log.Infof(str)
 	createdGroupSnapshotMap[req.GetName()] = groupSnapshot
