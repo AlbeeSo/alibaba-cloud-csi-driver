@@ -191,32 +191,13 @@ func addAdditionalParams(params map[string]string, fsId string, mpId string) map
 
 func validateCreateVolumeRequest(req *csi.CreateVolumeRequest) error {
 	volCaps := req.GetVolumeCapabilities()
-	if !isValidVolumeCapabilities(volCaps) {
+	if !utils.IsValidVolumeCapabilities(volCaps, volumeCaps) {
 		modes := utils.GetAccessModes(volCaps)
 		stringModes := strings.Join(*modes, ", ")
 		errString := "Volume capabilities " + stringModes + " not supported. Only AccessModes[ReadWriteMany] supported."
 		return status.Error(codes.InvalidArgument, errString)
 	}
 	return nil
-}
-
-func isValidVolumeCapabilities(volCaps []*csi.VolumeCapability) bool {
-	hasSupport := func(cap *csi.VolumeCapability) bool {
-		for _, c := range volumeCaps {
-			if c.GetMode() == cap.AccessMode.GetMode() {
-				return true
-			}
-		}
-		return false
-	}
-
-	foundAll := true
-	for _, c := range volCaps {
-		if !hasSupport(c) {
-			foundAll = false
-		}
-	}
-	return foundAll
 }
 
 func getVolSizeBytes(req *csi.CreateVolumeRequest) (int64, error) {

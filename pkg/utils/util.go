@@ -849,3 +849,25 @@ func GetNvmeDeviceByVolumeID(volumeID string) (device string, err error) {
 	}
 	return "", nil
 }
+
+func IsValidVolumeCapabilities(volCaps []*csi.VolumeCapability, validCaps []csi.VolumeCapability_AccessMode) bool {
+	if len(volCaps) == 0 {
+		return false
+	}
+	hasSupport := func(cap *csi.VolumeCapability) bool {
+		for _, c := range validCaps {
+			if c.GetMode() == cap.AccessMode.GetMode() {
+				return true
+			}
+		}
+		return false
+	}
+
+	foundAll := true
+	for _, c := range volCaps {
+		if !hasSupport(c) {
+			foundAll = false
+		}
+	}
+	return foundAll
+}

@@ -19,6 +19,7 @@ package utils
 import (
 	"testing"
 
+	csi "github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/stretchr/testify/assert"
 	k8smount "k8s.io/mount-utils"
 )
@@ -158,4 +159,87 @@ func TestIsDirTmpfsFalse(t *testing.T) {
 	isTmpfs, err := IsDirTmpfs(mounter, "/some/tmpfs")
 	assert.Nil(t, err)
 	assert.False(t, isTmpfs)
+}
+
+// TestIsValidVolumeCapabilities tests the IsValidVolumeCapabilities function
+func TestIsValidVolumeCapabilities(t *testing.T) {
+	type testCase struct {
+		volCaps     []*csi.VolumeCapability
+		validCaps   []csi.VolumeCapability_AccessMode
+		expectedRes bool
+	}
+
+	tests := []testCase{
+		// Test case 1: Empty volume capabilities should be considered as invalid
+		{
+			volCaps: []*csi.VolumeCapability{},
+			validCaps: []csi.VolumeCapability_AccessMode{
+				csi.VolumeCapability_AccessMode{
+					Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER,
+				}},
+			expectedRes: false,
+		},
+
+		// Test case 2: All volume capabilities match the valid capabilities
+		{
+			volCaps: []*csi.VolumeCapability{
+				{
+					AccessMode: &csi.VolumeCapability_AccessMode{
+						Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY,
+					},
+				},
+				{
+					AccessMode: &csi.VolumeCapability_AccessMode{
+						Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_SINGLE_WRITER,
+					},
+				},
+				{
+					AccessMode: &csi.VolumeCapability_AccessMode{
+						Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY,
+					},
+				},
+			},
+			validCaps: []csi.VolumeCapability_AccessMode{
+				csi.VolumeCapability_AccessMode{
+					Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY,
+				},
+				csi.VolumeCapability_AccessMode{
+					Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_SINGLE_WRITER,
+				},
+				csi.VolumeCapability_AccessMode{
+					Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY,
+				},
+			},
+			expectedRes: true,
+		},
+
+		// Test case 3: Some volume capabilities do not match the valid capabilities
+		{
+			volCaps: []*csi.VolumeCapability{
+				{
+					AccessMode: &csi.VolumeCapability_AccessMode{
+						Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY,
+					},
+				},
+				{
+					AccessMode: &csi.VolumeCapability_AccessMode{
+						Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER,
+					},
+				},
+			},
+			validCaps: []csi.VolumeCapability_AccessMode{
+				csi.VolumeCapability_AccessMode{
+					Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY,
+				},
+			},
+			expectedRes: false,
+		},
+	}
+
+	for _, tc := range tests {
+		res := IsValidVolumeCapabilities(tc.volCaps, tc.validCaps)
+		if res != tc.expectedRes {
+			t.Errorf("For test case with volume capabilities %v and valid capabilities %v, expected result was %v but got %v", tc.volCaps, tc.validCaps, tc.expectedRes, res)
+		}
+	}
 }

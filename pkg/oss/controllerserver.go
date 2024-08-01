@@ -151,12 +151,12 @@ func (cs *controllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVol
 }
 
 func (cs *controllerServer) ControllerUnpublishVolume(ctx context.Context, req *csi.ControllerUnpublishVolumeRequest) (*csi.ControllerUnpublishVolumeResponse, error) {
-	log.Infof("ControllerUnpublishVolume is called, do nothing by now")
+	log.Infof("ControllerUnpublishVolume is called, do nothing now")
 	return &csi.ControllerUnpublishVolumeResponse{}, nil
 }
 
 func (cs *controllerServer) ControllerPublishVolume(ctx context.Context, req *csi.ControllerPublishVolumeRequest) (*csi.ControllerPublishVolumeResponse, error) {
-	log.Infof("ControllerPublishVolume is called, do nothing by now")
+	log.Infof("ControllerPublishVolume is called, do nothing now")
 	return &csi.ControllerPublishVolumeResponse{}, nil
 }
 
