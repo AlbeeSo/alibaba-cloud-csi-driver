@@ -2,6 +2,7 @@ package utils
 
 import (
 	"fmt"
+	"strings"
 )
 
 func setDefault(key string, value string, vc map[string]string) (bool, error) {
@@ -25,6 +26,20 @@ var defaultCreateVolumeParams = map[string]string{
 	KeyTargetType: TargetTypeOSS,
 	KeyTargetRef:  VALUEMUSTHAVE,
 	KeyReadOnly:   "true",
+	// KeyNewDevice:  "false",
+	// KeyNewDeviceCapacity: "20", // set one of KeyNewDeviceCapacity or KeyTargetRef
+}
+
+func GetVolumeHandle(volumeId, targetType string) string {
+	return fmt.Sprintf("%s-%s", volumeId, targetType)
+}
+
+func SplitVolumeHandle(volumeHandle string) (volumeId, targetType string) {
+	lastIdx := strings.LastIndex(volumeHandle, "-")
+	if lastIdx == -1 {
+		return "", ""
+	}
+	return volumeHandle[:lastIdx], volumeHandle[lastIdx+1:]
 }
 
 func ValidateCreateVolumeParams(vc map[string]string) (modified bool, err error) {

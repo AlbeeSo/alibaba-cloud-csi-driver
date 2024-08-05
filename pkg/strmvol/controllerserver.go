@@ -49,10 +49,6 @@ func (cs *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 	if !valid {
 		return nil, status.Errorf(codes.InvalidArgument, err.Error())
 	}
-	if !cs.locks.TryAcquire(req.Name) {
-		return nil, status.Errorf(codes.Aborted, "There is already an operation for volume %s", req.Name)
-	}
-	defer cs.locks.Release(req.Name)
 
 	modified, err := svutils.ValidateCreateVolumeParams(vc)
 	if err != nil {
@@ -62,9 +58,17 @@ func (cs *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 		log.Infof("CreateVolume: parameters have modified to: %v")
 	}
 
+	targetType := vc[svutils.KeyTargetType]
+	volumeId := svutils.GetVolumeHandle(req.GetName(), targetType)
+
+	if !cs.locks.TryAcquire(volumeId) {
+		return nil, status.Errorf(codes.Aborted, "There is already an operation for volume %s", req.Name)
+	}
+	defer cs.locks.Release(volumeId)
+
 	return &csi.CreateVolumeResponse{
 		Volume: &csi.Volume{
-			VolumeId:      req.Name,
+			VolumeId:      volumeId,
 			CapacityBytes: req.GetCapacityRange().RequiredBytes,
 			VolumeContext: vc,
 		},
@@ -81,7 +85,7 @@ func (cs *controllerServer) ControllerUnpublishVolume(ctx context.Context, req *
 	return nil, status.Error(codes.Unimplemented, "")
 }
 func (cs *controllerServer) ControllerExpandVolume(ctx context.Context, req *csi.ControllerExpandVolumeRequest) (*csi.ControllerExpandVolumeResponse, error) {
-	// todo: capacity for new overlaydb device is specified, is it possible to expand it?
+	// todo: capacity for new overlaybd device is specified, is it possible to expand it?
 	return nil, status.Error(codes.Unimplemented, "")
 }
 func (cs *controllerServer) ControllerGetCapabilities(ctx context.Context, req *csi.ControllerGetCapabilitiesRequest) (*csi.ControllerGetCapabilitiesResponse, error) {

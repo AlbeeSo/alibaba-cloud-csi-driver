@@ -34,7 +34,7 @@ func NewDriver(meta *metadata.Metadata, endpoint, serviceType string) *STRMVOL {
 		}
 		s.controllerServer = cs
 	} else {
-		ns, err := newNodeServer()
+		ns, err := newNodeServer(metadata.MustGet(meta, metadata.InstanceID))
 		if err != nil {
 			log.Fatalf("Failed to initialize streaming-volume node service: %v", err)
 		}

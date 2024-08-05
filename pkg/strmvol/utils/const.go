@@ -24,7 +24,7 @@ const (
 
 const (
 	VolumeTypeFastImage = "fastimage"
-	VolumeTypeOverlaydb = "overlaydb"
+	VolumeTypeoverlaybd = "overlaybd"
 )
 
 const (

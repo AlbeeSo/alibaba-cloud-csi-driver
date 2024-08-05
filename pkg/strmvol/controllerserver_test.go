@@ -33,7 +33,7 @@ func Test_CreateVolume(t *testing.T) {
 		},
 	}
 	wantPv := &csi.Volume{
-		VolumeId:      "test-volume",
+		VolumeId:      "test-volume-" + svutils.TargetTypeOSS,
 		CapacityBytes: 1024 * 1024 * 1024,
 		VolumeContext: map[string]string{
 			svutils.KeyVolumeType:          svutils.VolumeTypeFastImage,
