@@ -45,8 +45,8 @@ func (cs *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 	// create a device here if affinity or selector have set
 	log.WithField("request", req).Info("CreateVolume: starting")
 	vc := req.GetParameters()
-	valid, err := utils.CheckRequestArgs(vc)
-	if !valid {
+	err := svutils.ValidateRequest(vc, "")
+	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, err.Error())
 	}
 
@@ -58,8 +58,8 @@ func (cs *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 		log.Infof("CreateVolume: parameters have modified to: %v")
 	}
 
-	targetType := vc[svutils.KeyTargetType]
-	volumeId := svutils.GetVolumeHandle(req.GetName(), targetType)
+	volumeType := vc[svutils.KeyVolumeType]
+	volumeId := svutils.GetVolumeHandle(req.GetName(), volumeType)
 
 	if !cs.locks.TryAcquire(volumeId) {
 		return nil, status.Errorf(codes.Aborted, "There is already an operation for volume %s", req.Name)

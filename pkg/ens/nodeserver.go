@@ -32,8 +32,6 @@ const (
 	MAX_VOLUMES_PERNODE = 15
 	// MkfsOptions tag
 	MKFS_OPTIONS = "mkfsOptions"
-	// NOUUID is xfs fs mount opts
-	NOUUID = "nouuid"
 	// SysConfigTag tag
 	SYS_CONFIG_TAG = "sysConfig"
 	// INPUT_OUTPUT_ERR tag
@@ -434,7 +432,7 @@ func (ns *nodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVol
 	if mnt.FsType != "" {
 		fsType = mnt.FsType
 	}
-	mountOptions := collectMountOptions(fsType, options)
+	mountOptions := utils.CollectMountOptions(fsType, options)
 	if err := ns.mounter.EnsureFolder(targetPath); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
@@ -564,7 +562,7 @@ func (ns *nodeServer) mountDeviceToGlobal(capability *csi.VolumeCapability, volu
 	if mnt.FsType != "" {
 		fsType = mnt.FsType
 	}
-	mountOptions := collectMountOptions(fsType, options)
+	mountOptions := utils.CollectMountOptions(fsType, options)
 	if err := ns.mounter.EnsureFolder(sourcePath); err != nil {
 		return status.Error(codes.Internal, err.Error())
 	}
@@ -589,33 +587,6 @@ func (ns *nodeServer) mountDeviceToGlobal(capability *csi.VolumeCapability, volu
 		}
 	}
 	return nil
-}
-
-// hasMountOption return boolean value indicating whether the slice contains a mount option
-func hasMountOption(options []string, opt string) bool {
-	for _, o := range options {
-		if o == opt {
-			return true
-		}
-	}
-	return false
-}
-
-// collectMountOptions returns array of mount options
-func collectMountOptions(fsType string, mntFlags []string) (options []string) {
-	for _, opt := range mntFlags {
-		if !hasMountOption(options, opt) {
-			options = append(options, opt)
-		}
-	}
-
-	if fsType == "xfs" {
-		if !hasMountOption(options, NOUUID) {
-			options = append(options, NOUUID)
-		}
-	}
-	return
-
 }
 
 func (ns *nodeServer) unmountDuplicateMountPoint(targetPath string) error {

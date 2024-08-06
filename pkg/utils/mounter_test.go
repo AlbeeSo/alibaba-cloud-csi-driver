@@ -44,3 +44,55 @@ func TestMount(t *testing.T) {
 	assert.NotNil(t, err)
 
 }
+
+// Test_hasMountOption tests the hasMountOption function
+func Test_hasMountOption(t *testing.T) {
+	tests := []struct {
+		options []string
+		opt     string
+		want    bool
+	}{
+		{[]string{}, "option", false},
+		{[]string{"option1", "option2", "option3"}, "option2", true},
+		{[]string{"option1", "option2", "option3"}, "option4", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.opt, func(t *testing.T) {
+			got := hasMountOption(tt.options, tt.opt)
+			if got != tt.want {
+				t.Errorf("hasMountOption(%v, %v) = %v, want %v", tt.options, tt.opt, got, tt.want)
+			}
+		})
+	}
+}
+
+// Test_CollectMountOptions tests the CollectMountOptions function
+func Test_CollectMountOptions(t *testing.T) {
+
+	tests := []struct {
+		fsType   string
+		mntFlags []string
+		want     []string
+	}{
+		{FsTypeXFS, []string{}, []string{NOUUID}},
+		{FsTypeXFS, []string{NOUUID}, []string{NOUUID}},
+		{FsTypeXFS, []string{"ro", "rw"}, []string{"ro", "rw", NOUUID}},
+		{"ext4", []string{NOUUID}, []string{NOUUID}},
+		{"ext4", []string{"ro", "rw"}, []string{"ro", "rw"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.fsType, func(t *testing.T) {
+			got := CollectMountOptions(tt.fsType, tt.mntFlags)
+			if len(got) != len(tt.want) {
+				t.Errorf("CollectMountOptions(%v, %v) = %v, want %v", tt.fsType, tt.mntFlags, got, tt.want)
+			}
+			for i, v := range got {
+				if v != tt.want[i] {
+					t.Errorf("CollectMountOptions(%v, %v)[%d] = %v, want %v", tt.fsType, tt.mntFlags, i, v, tt.want[i])
+				}
+			}
+		})
+	}
+}

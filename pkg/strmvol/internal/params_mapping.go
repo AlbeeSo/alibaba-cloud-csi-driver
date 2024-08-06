@@ -25,19 +25,11 @@ const (
 	VolumeType = "io.csi.storage/snapvol.volume.type"
 )
 
-const (
-	ReqVolumeId   = "volumeId"
-	ReqSecretType = "secretType"
-	ReqSecretData = "secretData"
-)
-
 func convertParamValue(vc map[string]string) (params map[string]string) {
 	for key, val := range vc {
 		switch key {
 		case svutils.KeyReadOnly:
 			add2Map(ReadOnly, val, params)
-		case ReqVolumeId:
-			add2Map(VolumeID, val, params)
 		//case svutils.KeyNewDeviceCapacity:
 		//   add2Map(NewDevice, "true", params)
 		//   add2Map(ArtifactRef, "snapshot.volume.base:"+val, params))
@@ -45,10 +37,6 @@ func convertParamValue(vc map[string]string) (params map[string]string) {
 			add2Map(FsType, val, params)
 		case svutils.KeyTargetRef:
 			add2Map(ArtifactRef, val, params)
-		case ReqSecretType:
-			add2Map(SecretType, val, params)
-		case ReqSecretData:
-			add2Map(SecretData, val, params)
 		default:
 			add2Map(key, val, params)
 		}

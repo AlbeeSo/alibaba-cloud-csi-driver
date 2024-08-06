@@ -103,8 +103,6 @@ const (
 	DefaultMaxVolumesPerNode = 15
 	// MaxVolumesPerNodeLimit define limit max ebs one node
 	MaxVolumesPerNodeLimit = 64
-	// NOUUID is xfs fs mount opts
-	NOUUID = "nouuid"
 	// NodeMultiZoneEnable Enable node multi-zone mode
 	NodeMultiZoneEnable = "NODE_MULTI_ZONE_ENABLE"
 
@@ -650,7 +648,7 @@ func (ns *nodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVol
 	if mnt.FsType != "" {
 		fsType = mnt.FsType
 	}
-	mountOptions := collectMountOptions(fsType, options)
+	mountOptions := utils.CollectMountOptions(fsType, options)
 	if err := ns.mounter.EnsureFolder(targetPath); err != nil {
 		return nil, status.Error(defaultErrCode, err.Error())
 	}
@@ -1032,7 +1030,7 @@ func (ns *nodeServer) mountDeviceToGlobal(capability *csi.VolumeCapability, volu
 	if mnt.FsType != "" {
 		fsType = mnt.FsType
 	}
-	mountOptions := collectMountOptions(fsType, options)
+	mountOptions := utils.CollectMountOptions(fsType, options)
 	if err := ns.mounter.EnsureFolder(sourcePath); err != nil {
 		return status.Error(codes.Internal, err.Error())
 	}
@@ -1126,23 +1124,6 @@ func (ns *nodeServer) forceUnmountPath(globalPath string) error {
 		log.Infof("forceUmountPath: umount Global Path %s  successful", globalPath)
 	}
 	return nil
-}
-
-// collectMountOptions returns array of mount options
-func collectMountOptions(fsType string, mntFlags []string) (options []string) {
-	for _, opt := range mntFlags {
-		if !hasMountOption(options, opt) {
-			options = append(options, opt)
-		}
-	}
-
-	if fsType == "xfs" {
-		if !hasMountOption(options, NOUUID) {
-			options = append(options, NOUUID)
-		}
-	}
-	return
-
 }
 
 // func  handle error : event( autoSnapshot ID return) + error

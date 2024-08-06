@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"encoding/base64"
 	"reflect"
 	"testing"
 )
@@ -8,49 +9,38 @@ import (
 func Test_setDefault(t *testing.T) {
 	tests := []struct {
 		name     string
-		key      string
-		value    string
 		vc       map[string]string
 		expected bool
 		wantErr  bool
 	}{
 		{
-			name:     "Key already exists",
-			key:      "existingKey",
-			value:    "existingValue",
-			vc:       map[string]string{"existingKey": "existingValue"},
-			expected: false,
+			name:     "VALUEMUSTHAVE already exists",
+			vc:       map[string]string{KeyTargetRef: "existingValue"},
+			expected: true,
 			wantErr:  false,
 		},
 		{
-			name:     "Value is VALUEMUSTHAVE",
-			key:      "mustHaveKey",
-			value:    VALUEMUSTHAVE,
+			name:     "VALUEMUSTHAVE not exists",
 			vc:       map[string]string{},
 			expected: false,
 			wantErr:  true,
 		},
 		{
-			name:     "Value is VALUEOPTIONAL",
-			key:      "optionalKey",
-			value:    VALUEOPTIONAL,
-			vc:       map[string]string{},
+			name: "all required fields set",
+			vc: map[string]string{
+				KeyVolumeType: VolumeTypeFastImage,
+				KeyFsType:     FsTypeEXT4,
+				KeyTargetRef:  "existingValue",
+				KeyReadOnly:   "true",
+			},
 			expected: false,
-			wantErr:  false,
-		},
-		{
-			name:     "Value is not VALUEMUSTHAVE or VALUEOPTIONAL",
-			key:      "customKey",
-			value:    "customValue",
-			vc:       map[string]string{},
-			expected: true,
 			wantErr:  false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := setDefault(tt.key, tt.value, tt.vc)
+			got, err := setDefault(tt.vc)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("setDefault() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -77,7 +67,6 @@ func Test_ValidateCreateVolumeParams(t *testing.T) {
 				KeySecretName:      "name",
 				KeySecretNamespace: "ns",
 				KeyFsType:          FsTypeEXT4,
-				KeyTargetType:      TargetTypeOSS,
 				KeyTargetRef:       "targetRef",
 				KeyReadOnly:        "true",
 			},
@@ -88,7 +77,6 @@ func Test_ValidateCreateVolumeParams(t *testing.T) {
 				ProvSecretNameKey:      "name",
 				ProvSecretNamespaceKey: "ns",
 				KeyFsType:              FsTypeEXT4,
-				KeyTargetType:          TargetTypeOSS,
 				KeyTargetRef:           "targetRef",
 				KeyReadOnly:            "true",
 			},
@@ -100,7 +88,6 @@ func Test_ValidateCreateVolumeParams(t *testing.T) {
 				KeySecretName:      "akID",
 				KeySecretNamespace: "akSecret",
 				KeyFsType:          FsTypeEXT4,
-				KeyTargetType:      TargetTypeOSS,
 				KeyReadOnly:        "true",
 			},
 			expected: false,
@@ -116,7 +103,6 @@ func Test_ValidateCreateVolumeParams(t *testing.T) {
 			wantVc: map[string]string{
 				KeyVolumeType: VolumeTypeFastImage,
 				KeyFsType:     FsTypeEXT4,
-				KeyTargetType: TargetTypeOSS,
 				KeyTargetRef:  "targetRef",
 				KeyReadOnly:   "true",
 			},
@@ -127,7 +113,6 @@ func Test_ValidateCreateVolumeParams(t *testing.T) {
 				KeyVolumeType:      VolumeTypeFastImage,
 				KeySecretNamespace: "ns",
 				KeyFsType:          FsTypeEXT4,
-				KeyTargetType:      TargetTypeOSS,
 				KeyTargetRef:       "targetRef",
 				KeyReadOnly:        "true",
 			},
@@ -148,6 +133,51 @@ func Test_ValidateCreateVolumeParams(t *testing.T) {
 			}
 			if tt.wantVc != nil && reflect.DeepEqual(tt.vc, tt.wantVc) {
 				t.Errorf("ValidateCreateVolumeParams() vc = %v, expected %v", tt.vc, tt.wantVc)
+			}
+		})
+	}
+}
+
+func Test_ValidateNodePulishVolumeSecrets(t *testing.T) {
+	tests := []struct {
+		secret   map[string]string
+		wantType string
+		wantAuth string
+	}{
+		{
+			secret: map[string]string{
+				SecretAccessKeyId:     "abc123",
+				SecretAccessKeySecret: "def456",
+			},
+			wantType: AliyunAK,
+			wantAuth: base64.StdEncoding.EncodeToString([]byte("abc123:def456")),
+		},
+		{
+			secret: map[string]string{
+				SecretUsername: "user",
+				SecretPassword: "pass",
+			},
+			wantType: DockerAuth,
+			wantAuth: base64.StdEncoding.EncodeToString([]byte("abc123:def456")),
+		},
+		{
+			secret: map[string]string{
+				SecretAccessKeyId: "abc123",
+			},
+			wantType: "",
+			wantAuth: "",
+		},
+		{
+			secret:   map[string]string{},
+			wantType: "",
+			wantAuth: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run("", func(t *testing.T) {
+			if gotType, gotAuth := ValidateNodeStageVolumeSecrets(tt.secret); gotType != tt.wantType || gotAuth != tt.wantAuth {
+				t.Errorf("ValidateNodeStageVolumeSecrets() = %v, %v, want %v, %v", gotType, gotAuth, tt.wantType, tt.wantAuth)
 			}
 		})
 	}

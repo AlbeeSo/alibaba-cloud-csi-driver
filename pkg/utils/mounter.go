@@ -34,6 +34,10 @@ const (
 	procMountsPath = "/proc/mounts"
 	// Number of fields per line in /proc/mounts as per the fstab man page.
 	expectedNumFieldsPerLine = 6
+	// FsTypeXFS is xfs fsType
+	FsTypeXFS = "xfs"
+	// NOUUID is xfs fs mount opts
+	NOUUID = "nouuid"
 )
 
 // MountPoint represents a single line in /proc/mounts or /etc/fstab.
@@ -276,4 +280,31 @@ func IsDirEmpty(name string) (bool, error) {
 		return true, nil
 	}
 	return false, err
+}
+
+// hasMountOption return boolean value indicating whether the slice contains a mount option
+func hasMountOption(options []string, opt string) bool {
+	for _, o := range options {
+		if o == opt {
+			return true
+		}
+	}
+	return false
+}
+
+// CollectMountOptions returns array of mount options
+func CollectMountOptions(fsType string, mntFlags []string) (options []string) {
+	for _, opt := range mntFlags {
+		if !hasMountOption(options, opt) {
+			options = append(options, opt)
+		}
+	}
+
+	if fsType == FsTypeXFS {
+		if !hasMountOption(options, NOUUID) {
+			options = append(options, NOUUID)
+		}
+	}
+	return
+
 }

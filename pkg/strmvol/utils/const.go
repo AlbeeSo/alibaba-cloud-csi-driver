@@ -12,9 +12,20 @@ const (
 	KeySecretName      = "secretName"
 	KeySecretNamespace = "secretNamespace"
 	KeyReadOnly        = "readOnly"
-	KeyTargetType      = "targetType"
 	KeyTargetRef       = "targetRef"
 	KeyFsType          = "fsType"
+)
+
+const (
+	SecretUsername        = "username"
+	SecretPassword        = "password"
+	SecretAccessKeyId     = "accessKeyId"
+	SecretAccessKeySecret = "accessKeySecret"
+)
+
+const (
+	DockerAuth = "dockerAuth"
+	AliyunAK   = "aliyunAK"
 )
 
 const (
@@ -23,14 +34,8 @@ const (
 )
 
 const (
-	VolumeTypeFastImage = "fastimage"
-	VolumeTypeoverlaybd = "overlaybd"
-)
-
-const (
-	TargetTypeSnapshot = "snapshot"
-	TargetTypeOSS      = "OSS"
-	TargetTypeImage    = "image"
+	VolumeTypeFastImage = "alibaba.fastimage"
+	VolumeTypeoverlaybd = "oci.overlaybd"
 )
 
 const (
