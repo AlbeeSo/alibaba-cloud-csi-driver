@@ -88,8 +88,8 @@ func (m *ECSMetadata) Get(key MetadataKey) (string, error) {
 		return m.idDoc.InstanceID, nil
 	case InstanceType:
 		return m.idDoc.InstanceType, nil
-	case AccountID:
-		return m.idDoc.OwnerAccountID, nil
+	//case AccountID:
+	//	return m.idDoc.OwnerAccountID, nil
 	default:
 		return "", ErrUnknownMetadataKey
 	}
@@ -101,7 +101,7 @@ type EcsFetcher struct {
 
 func (f *EcsFetcher) FetchFor(key MetadataKey) (MetadataProvider, error) {
 	switch key {
-	case RegionID, ZoneID, InstanceID, InstanceType, AccountID:
+	case RegionID, ZoneID, InstanceID, InstanceType:
 	default:
 		return nil, ErrUnknownMetadataKey
 	}

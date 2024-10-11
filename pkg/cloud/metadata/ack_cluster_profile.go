@@ -14,7 +14,7 @@ type ProfileMetadata struct {
 
 var MetadataProfileDataKeys = map[MetadataKey]string{
 	ClusterID: "clusterid",
-	AccountID: "uid",
+	//AccountID: "uid",
 }
 
 func NewProfileMetadata(client kubernetes.Interface) (*ProfileMetadata, error) {

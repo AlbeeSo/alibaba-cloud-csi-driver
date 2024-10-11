@@ -6,7 +6,7 @@ type ENVMetadata struct{}
 
 var MetadataEnv = map[MetadataKey]string{
 	RegionID:  "REGION_ID",
-	AccountID: "ALIBABA_CLOUD_ACCOUNT_ID",
+	//AccountID: "ALIBABA_CLOUD_ACCOUNT_ID",
 	ClusterID: "CLUSTER_ID",
 }
 
