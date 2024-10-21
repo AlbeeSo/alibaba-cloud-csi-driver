@@ -934,7 +934,7 @@ func requestAndCreateSnapshotGroup(ecsClient *ecs.Client, params *createGroupSna
 	// Do Snapshot create
 	snapshotResponse, err := ecsClient.CreateSnapshotGroup(createSnapshotGroupRequest)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "failed create groupSnapshot: %v", err)
+		return nil, err
 	}
 	return snapshotResponse, nil
 }
