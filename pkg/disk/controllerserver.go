@@ -739,7 +739,7 @@ func (cs *controllerServer) DeleteSnapshot(ctx context.Context, req *csi.DeleteS
 		var aliErr *alicloudErr.ServerError
 		if errors.As(err, &aliErr) && aliErr.ErrorCode() == SnapshotNotFound {
 			klog.Infof("DeleteSnapshot: Snapshot not exist for expect %s, see as successful", snapshotID)
-			return nil, nil
+			return &csi.DeleteSnapshotResponse{}, nil
 		}
 		klog.Errorf("DeleteSnapshot: fail to delete %s: with RequestId: %s, error: %s", snapshotID, requestId, err.Error())
 		utils.CreateEvent(cs.recorder, ref, v1.EventTypeWarning, snapshotDeleteError, err.Error())
