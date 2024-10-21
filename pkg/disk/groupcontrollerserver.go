@@ -6,7 +6,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
 	alicloudErr "github.com/aliyun/alibaba-cloud-sdk-go/sdk/errors"
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -53,12 +52,6 @@ func NewGroupControllerServer() csi.GroupControllerServer {
 // the map of req.GetName() and csi.VolumeGroupSnapshot
 var createdGroupSnapshotMap = map[string]*csi.VolumeGroupSnapshot{}
 
-// GroupSnapshotRequestMap snapshot request limit
-var GroupSnapshotRequestMap = map[string]int64{}
-
-// GroupSnapshotRequestInterval snapshot request limit
-var GroupSnapshotRequestInterval = int64(10)
-
 func (cs *groupControllerServer) GroupControllerGetCapabilities(ctx context.Context, req *csi.GroupControllerGetCapabilitiesRequest) (*csi.GroupControllerGetCapabilitiesResponse, error) {
 	var caps []*csi.GroupControllerServiceCapability
 	for _, cap := range groupControllerCaps {
@@ -75,14 +68,6 @@ func (cs *groupControllerServer) GroupControllerGetCapabilities(ctx context.Cont
 }
 
 func (cs *groupControllerServer) CreateVolumeGroupSnapshot(ctx context.Context, req *csi.CreateVolumeGroupSnapshotRequest) (*csi.CreateVolumeGroupSnapshotResponse, error) {
-	// request limit
-	cur := time.Now().Unix()
-	if initTime, ok := GroupSnapshotRequestMap[req.GetName()]; ok {
-		if cur-initTime < GroupSnapshotRequestInterval {
-			return nil, status.Errorf(codes.Aborted, "volume group snapshot create request limit %s", req.GetName())
-		}
-	}
-	GroupSnapshotRequestMap[req.GetName()] = cur
 
 	klog.Infof("CreateVolumeGroupSnapshot:: Starting to create volumegroupsnapshot: %+v", req)
 
@@ -117,7 +102,6 @@ func (cs *groupControllerServer) CreateVolumeGroupSnapshot(ctx context.Context, 
 		klog.Infof("CreateVolumeGroupSnapshot:: GroupSnapshot already created: name[%s], sourceIds[%v], status[%v]", req.GetName(), sourceVolumeIds, groupSnapshot.ReadyToUse)
 		if groupSnapshot.ReadyToUse {
 			klog.Infof("VolumeGroupSnapshot: name: %s, id: %s is ready to use.", req.GetName(), groupSnapshot.GroupSnapshotId)
-			delete(GroupSnapshotRequestMap, req.GetName())
 		}
 		return &csi.CreateVolumeGroupSnapshotResponse{
 			GroupSnapshot: groupSnapshot,
