@@ -3,8 +3,6 @@ package disk
 import (
 	"context"
 	"errors"
-	"os"
-	"strconv"
 	"strings"
 
 	alicloudErr "github.com/aliyun/alibaba-cloud-sdk-go/sdk/errors"
@@ -32,16 +30,6 @@ type groupControllerServer struct {
 
 // NewGroupControllerServer is to create controller server
 func NewGroupControllerServer() csi.GroupControllerServer {
-
-	// parse input snapshot request interval
-	intervalStr := os.Getenv(SnapshotRequestTag)
-	if intervalStr != "" {
-		interval, err := strconv.ParseInt(intervalStr, 10, 64)
-		if err != nil {
-			klog.Fatalf("Input SnapshotRequestTag is illegal: %s", intervalStr)
-		}
-		SnapshotRequestInterval = interval
-	}
 
 	c := &groupControllerServer{
 		recorder: utils.NewEventRecorder(),
