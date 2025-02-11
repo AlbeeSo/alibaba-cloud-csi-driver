@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"flag"
 	"fmt"
 	"net"
 	"os"
@@ -10,6 +9,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	flag "github.com/spf13/pflag"
 
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/server"
 	_ "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/server/ossfs"

@@ -17,7 +17,6 @@ limitations under the License.
 package main
 
 import (
-	"flag"
 	"fmt"
 	"net/http"
 	_ "net/http/pprof"
@@ -28,6 +27,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	flag "github.com/spf13/pflag"
 
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/agent"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/cloud/metadata"

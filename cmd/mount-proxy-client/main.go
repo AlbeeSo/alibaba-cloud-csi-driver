@@ -2,9 +2,10 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
 	"fmt"
 	"os"
+
+	flag "github.com/spf13/pflag"
 
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/client"
