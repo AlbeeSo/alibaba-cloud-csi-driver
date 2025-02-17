@@ -8,7 +8,7 @@ import (
 )
 
 type MountHandler interface {
-	Mount(ctx context.Context, req *proxy.MountRequest) error
+	Mount(ctx context.Context, req *proxy.MountRequest, fuseFd int) error
 	Terminate()
 }
 
@@ -18,10 +18,10 @@ func RegisterMountHandler(fstype string, handler MountHandler) {
 	fstypes[fstype] = handler
 }
 
-func handleMountRequest(ctx context.Context, req *proxy.MountRequest) error {
+func handleMountRequest(ctx context.Context, req *proxy.MountRequest, fuseFd int) error {
 	h := fstypes[req.Fstype]
 	if h == nil {
 		return fmt.Errorf("fstype %q not supported", req.Fstype)
 	}
-	return h.Mount(ctx, req)
+	return h.Mount(ctx, req, fuseFd)
 }

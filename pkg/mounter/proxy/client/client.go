@@ -57,7 +57,21 @@ func (c *client) doRequest(req *proxy.Request) (*proxy.Response, error) {
 	socket := int(connf.Fd())
 	defer connf.Close()
 
-	err = unix.Sendmsg(socket, append(data, proxy.MessageEnd), nil, nil, 0)
+	fuseFd, err := unix.Open("/dev/fuse", unix.O_RDWR, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("open /dev/fuse: %w", err)
+	}
+	defer unix.Close(fuseFd)
+
+	// prepare fd option for FUSE
+	err = addFdToMountOption(req, fuseFd)
+	if err != nil {
+		return nil, err
+	}
+
+	// send fd
+	oob := unix.UnixRights(fuseFd)
+	err = unix.Sendmsg(socket, append(data, proxy.MessageEnd), oob, nil, 0)
 	if err != nil {
 		return nil, fmt.Errorf("sendmsg: %w", err)
 	}
@@ -92,4 +106,14 @@ func (c *client) Mount(req *proxy.MountRequest) (*proxy.Response, error) {
 		},
 		Body: req,
 	})
+}
+
+func addFdToMountOption(req *proxy.Request, fd int) error {
+	mountReq, ok := req.Body.(*proxy.MountRequest)
+	if !ok {
+		return errors.New("invalid request body")
+	}
+	mountReq.Options = append(mountReq.Options, fmt.Sprintf("fd=%v", fd))
+	req.Body = mountReq
+	return nil
 }

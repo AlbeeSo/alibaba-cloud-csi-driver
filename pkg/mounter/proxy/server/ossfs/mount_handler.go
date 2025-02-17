@@ -35,7 +35,7 @@ func NewMountHandler() *MountHandler {
 	}
 }
 
-func (h *MountHandler) Mount(ctx context.Context, req *proxy.MountRequest) error {
+func (h *MountHandler) Mount(ctx context.Context, req *proxy.MountRequest, fuseFd int) error {
 	options := req.Options
 
 	// prepare passwd file
