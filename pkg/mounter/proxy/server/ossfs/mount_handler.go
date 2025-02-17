@@ -54,13 +54,20 @@ func (h *MountHandler) Mount(ctx context.Context, req *proxy.MountRequest, fuseF
 		options = append(options, "passwd_file="+passwdFile)
 	}
 
-	args := mount.MakeMountArgs(req.Source, req.Target, "", options)
+	// 1. use /dev/fd/3 as target for ossfs
+	args := mount.MakeMountArgs(req.Source, "/dev/fd/3", "", options)
 	args = append(args, req.MountFlags...)
 	args = append(args, "-f")
 
 	cmd := exec.Command("ossfs", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	// 2. pase fd on /dev/fuse by fuseFd
+	// Notes: Mountproxy client (csi-plugin) opens a fd on /dev/fuse,
+	//        client passes it by unix conn.
+	//        Mountproxy server (ossfs pod) receives it by unix conn,
+	//        server mounts with ossfs with /dev/fd/3 (on /dev/fuse) as target.
+	cmd.ExtraFiles = []*os.File{os.NewFile(uintptr(fuseFd), "/dev/fuse")}
 
 	err := cmd.Start()
 	if err != nil {
@@ -113,6 +120,8 @@ func (h *MountHandler) Mount(ctx context.Context, req *proxy.MountRequest, fuseF
 			return false, nil
 		}
 	})
+	// release to avoid unexpected forking
+	defer syscall.Close(fuseFd)
 
 	if err == nil {
 		return nil

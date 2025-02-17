@@ -22,7 +22,7 @@ func NewProxyMounter(socketPath string, inner mountutils.Interface) *ProxyMounte
 }
 
 func (m *ProxyMounter) MountWithSecrets(source, target, fstype string, options []string, secrets map[string]string) error {
-	dclient := client.NewClient(m.socketPath)
+	dclient := client.NewClient(m.socketPath, m.Interface)
 	resp, err := dclient.Mount(&proxy.MountRequest{
 		Source:  source,
 		Target:  target,

@@ -6,16 +6,20 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy"
 	"golang.org/x/sys/unix"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
+	"k8s.io/mount-utils"
 )
 
 const (
 	// this should be longer than default timeout in server
 	defaultTimeout = time.Second * 35
+	FuseMountType  = "fuse"
 )
 
 type Client interface {
@@ -23,12 +27,14 @@ type Client interface {
 }
 
 type client struct {
+	rawMounter mount.Interface
 	timeout    time.Duration
 	socketPath string
 }
 
-func NewClient(socketPath string) *client {
+func NewClient(socketPath string, rawMounter mount.Interface) *client {
 	return &client{
+		rawMounter: rawMounter,
 		socketPath: socketPath,
 		timeout:    defaultTimeout,
 	}
@@ -57,19 +63,20 @@ func (c *client) doRequest(req *proxy.Request) (*proxy.Response, error) {
 	socket := int(connf.Fd())
 	defer connf.Close()
 
+	// 1. open /dev/fuse as root
 	fuseFd, err := unix.Open("/dev/fuse", unix.O_RDWR, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("open /dev/fuse: %w", err)
 	}
 	defer unix.Close(fuseFd)
 
-	// prepare fd option for FUSE
-	err = addFdToMountOption(req, fuseFd)
+	// 2. mount FUSE filesystem with Fd
+	err = c.mountFuseFilesystemWithFd(req, fuseFd)
 	if err != nil {
 		return nil, err
 	}
 
-	// send fd
+	// 3. send fd with unix conn
 	oob := unix.UnixRights(fuseFd)
 	err = unix.Sendmsg(socket, append(data, proxy.MessageEnd), oob, nil, 0)
 	if err != nil {
@@ -108,12 +115,59 @@ func (c *client) Mount(req *proxy.MountRequest) (*proxy.Response, error) {
 	})
 }
 
-func addFdToMountOption(req *proxy.Request, fd int) error {
+func (c *client) mountFuseFilesystemWithFd(req *proxy.Request, fd int) error {
 	mountReq, ok := req.Body.(*proxy.MountRequest)
 	if !ok {
 		return errors.New("invalid request body")
 	}
-	mountReq.Options = append(mountReq.Options, fmt.Sprintf("fd=%v", fd))
+	// 2.1 split FUSE options
+	// ex: rw,nosuid,nodev,relatime,user_id=0,group_id=0,allow_other
+	fuseOptions, daemonOptions := splitFuseOptions(mountReq.Options)
+	// 2.2 add fd=`fuseFd` option
+	fuseOptions = append(fuseOptions, fmt.Sprintf("fd=%v", fd))
+	err := c.rawMounter.Mount(mountReq.Source, mountReq.Target, FuseMountType, fuseOptions)
+	if err != nil {
+		return fmt.Errorf("failed to mount the fuse filesystem: %w", err)
+	}
+	mountReq.Options = daemonOptions
 	req.Body = mountReq
 	return nil
+}
+
+func splitFuseOptions(options []string) (fuseOptions, daemonOptions []string) {
+	// TODO: need well designed, just for demo here
+	supportedFuseOptionKeys := map[string]struct{}{
+		"exec":         {},
+		"noexec":       {},
+		"atime":        {},
+		"noatime":      {},
+		"sync":         {},
+		"async":        {},
+		"dirsync":      {},
+		"rw":           {},
+		"ro":           {},
+		"nosuid":       {},
+		"nodev":        {},
+		"relatime":     {},
+		"user_id":      {},
+		"group_id":     {},
+		"allow_other":  {},
+		"kernal_cache": {},
+	}
+	optionSet := sets.NewString(options...)
+	for _, o := range options {
+		kv := strings.SplitN(o, "=", 2)
+		if len(kv) == 0 {
+			optionSet.Delete(o)
+			continue
+		}
+		key := kv[0]
+		_, ok := supportedFuseOptionKeys[key]
+		if ok {
+			fuseOptions = append(fuseOptions, o)
+			optionSet.Delete(o)
+		}
+	}
+	daemonOptions = optionSet.List()
+	return
 }

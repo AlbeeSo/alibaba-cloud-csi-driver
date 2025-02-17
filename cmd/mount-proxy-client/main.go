@@ -9,6 +9,7 @@ import (
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/client"
 	"k8s.io/klog/v2"
+	mountutils "k8s.io/mount-utils"
 )
 
 func main() {
@@ -29,7 +30,7 @@ func main() {
 	data, _ := json.MarshalIndent(req, "", "\t")
 	fmt.Println(string(data))
 
-	dclient := client.NewClient(socketPath)
+	dclient := client.NewClient(socketPath, mountutils.New(""))
 	resp, err := dclient.Mount(&req)
 	if err != nil {
 		fmt.Println(err.Error())
