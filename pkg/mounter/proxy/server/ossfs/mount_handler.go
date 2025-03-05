@@ -35,8 +35,39 @@ func NewMountHandler() *MountHandler {
 	}
 }
 
+func (h *MountHandler) runCmd(req *proxy.MountRequest, fuseFd int) (cmd *exec.Cmd, err error) {
+	// 1. use /dev/fd/3 as target for ossfs
+	args := mount.MakeMountArgs(req.Source, "/dev/fd/3", "", req.Options)
+	args = append(args, req.MountFlags...)
+	args = append(args, "-f")
+
+	cmd = exec.Command("ossfs", args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	// 2. pase fd on /dev/fuse by fuseFd
+	// Notes: Mountproxy client (csi-plugin) opens a fd on /dev/fuse,
+	//        client passes it by unix conn.
+	//        Mountproxy server (ossfs pod) receives it by unix conn,
+	//        server mounts with ossfs with /dev/fd/3 (on /dev/fuse) as target.
+	cmd.ExtraFiles = []*os.File{os.NewFile(uintptr(fuseFd), "/dev/fuse")}
+
+	err = cmd.Start()
+	if err != nil {
+		err = fmt.Errorf("start ossfs failed: %w", err)
+		return
+	}
+	klog.InfoS("Started ossfs", "pid", cmd.Process.Pid, "args", cmd.Args)
+	return
+}
+
+func doClean(passwdFile, target string) {
+	if err := os.Remove(passwdFile); err != nil {
+		klog.ErrorS(err, "Remove passwd file", "mountpoint", target, "path", passwdFile)
+	}
+}
+
 func (h *MountHandler) Mount(ctx context.Context, req *proxy.MountRequest, fuseFd int) error {
-	options := req.Options
+	target := req.Target
 
 	// prepare passwd file
 	var passwdFile string
@@ -51,52 +82,57 @@ func (h *MountHandler) Mount(ctx context.Context, req *proxy.MountRequest, fuseF
 			return err
 		}
 		klog.V(4).InfoS("created ossfs passwd file", "path", passwdFile)
-		options = append(options, "passwd_file="+passwdFile)
+		req.Options = append(req.Options, "passwd_file="+passwdFile)
 	}
 
-	// 1. use /dev/fd/3 as target for ossfs
-	args := mount.MakeMountArgs(req.Source, "/dev/fd/3", "", options)
-	args = append(args, req.MountFlags...)
-	args = append(args, "-f")
-
-	cmd := exec.Command("ossfs", args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	// 2. pase fd on /dev/fuse by fuseFd
-	// Notes: Mountproxy client (csi-plugin) opens a fd on /dev/fuse,
-	//        client passes it by unix conn.
-	//        Mountproxy server (ossfs pod) receives it by unix conn,
-	//        server mounts with ossfs with /dev/fd/3 (on /dev/fuse) as target.
-	cmd.ExtraFiles = []*os.File{os.NewFile(uintptr(fuseFd), "/dev/fuse")}
-
-	err := cmd.Start()
+	cmd, err := h.runCmd(req, fuseFd)
 	if err != nil {
-		return fmt.Errorf("start ossfs failed: %w", err)
+		return err
 	}
-
-	target := req.Target
-	pid := cmd.Process.Pid
-	klog.InfoS("Started ossfs", "pid", pid, "args", args)
 
 	ossfsExited := make(chan error, 1)
+	h.wg.Add(1)
 	go func() {
-		h.wg.Add(1)
 		defer h.wg.Done()
+		// release to avoid unexpected forking
+		defer syscall.Close(fuseFd)
 
-		h.pids.Store(pid, cmd)
-		defer h.pids.Delete(pid)
+		for {
 
-		err := cmd.Wait()
-		if err != nil {
-			klog.ErrorS(err, "ossfs exited with error", "mountpoint", target, "pid", pid)
-		} else {
-			klog.InfoS("ossfs exited", "mountpoint", target, "pid", pid)
+			pid := cmd.Process.Pid
+			h.pids.Store(pid, cmd)
+
+			err = cmd.Wait()
+			if err != nil {
+				klog.ErrorS(err, "ossfs exited with error", "mountpoint", target, "pid", pid, "errorCode", cmd.ProcessState.ExitCode())
+			} else {
+				klog.InfoS("ossfs exited", "mountpoint", target, "pid", pid)
+			}
+			h.pids.Delete(pid)
+
+			select {
+			case ossfsExited <- err:
+				doClean(passwdFile, target)
+				close(ossfsExited)
+				return
+
+			default:
+				if cmd.ProcessState.Sys().(syscall.WaitStatus).Signal() == syscall.SIGTERM {
+					doClean(passwdFile, target)
+					close(ossfsExited)
+					return
+				}
+				err := fmt.Errorf("Ossfs exited, need recovery")
+				klog.ErrorS(err, "mountpoint", target)
+				cmd, err = h.runCmd(req, fuseFd)
+				if err != nil {
+					doClean(passwdFile, target)
+					close(ossfsExited)
+					return
+				}
+			}
 		}
-		ossfsExited <- err
-		if err := os.Remove(passwdFile); err != nil {
-			klog.ErrorS(err, "Remove passwd file", "mountpoint", target, "path", passwdFile)
-		}
-		close(ossfsExited)
+
 	}()
 
 	err = wait.PollInfiniteWithContext(ctx, time.Second, func(ctx context.Context) (done bool, err error) {
@@ -120,8 +156,6 @@ func (h *MountHandler) Mount(ctx context.Context, req *proxy.MountRequest, fuseF
 			return false, nil
 		}
 	})
-	// release to avoid unexpected forking
-	defer syscall.Close(fuseFd)
 
 	if err == nil {
 		return nil
@@ -131,14 +165,14 @@ func (h *MountHandler) Mount(ctx context.Context, req *proxy.MountRequest, fuseF
 		// terminate ossfs process when timeout
 		terr := cmd.Process.Signal(syscall.SIGTERM)
 		if terr != nil {
-			klog.ErrorS(err, "Failed to terminate ossfs", "pid", pid)
+			klog.ErrorS(err, "Failed to terminate ossfs", "pid", cmd.Process.Pid)
 		}
 		select {
 		case <-ossfsExited:
 		case <-time.After(time.Second * 2):
 			kerr := cmd.Process.Kill()
 			if kerr != nil && errors.Is(kerr, os.ErrProcessDone) {
-				klog.ErrorS(err, "Failed to kill ossfs", "pid", pid)
+				klog.ErrorS(err, "Failed to kill ossfs", "pid", cmd.Process.Pid)
 			}
 		}
 	}
