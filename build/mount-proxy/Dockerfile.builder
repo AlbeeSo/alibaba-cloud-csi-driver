@@ -21,6 +21,10 @@ RUN gem install dotenv -v 2.8.1 -N \
     && gem install pleaserun --ignore-dependencies -N \
     && gem install fpm --ignore-dependencies -N
 RUN fpm -v
-RUN sudo -v && curl https://gosspublic.alicdn.com/ossutil/install.sh | sudo bash
+RUN sudo -v \
+    && if [ -f /lib64/libfuse3.so.3.3.0 ]; then mv /lib64/libfuse3.so.3.3.0 /lib64/libfuse3.so.3.3.0-bak; fi \
+    && curl https://ack-csiplugin.oss-cn-hangzhou.aliyuncs.com/dev/libfuse3.so.3.3.0 -o /lib64/libfuse3.so.3.3.0 \
+    && ln -snf /lib64/libfuse3-3.3.0 /lib64/libfuse3.so.3 && ls -l /lib64/libfuse3.so.3 \
+    && curl https://gosspublic.alicdn.com/ossutil/install.sh | sudo bash
 RUN ossutil -v
 COPY --link --from=builder /out/csi-mount-proxy* /usr/local/bin/

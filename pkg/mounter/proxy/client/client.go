@@ -19,7 +19,7 @@ import (
 const (
 	// this should be longer than default timeout in server
 	defaultTimeout = time.Second * 35
-	FuseMountType  = "fuse"
+	FuseMountType  = "fuse.myfuse"
 )
 
 type Client interface {
