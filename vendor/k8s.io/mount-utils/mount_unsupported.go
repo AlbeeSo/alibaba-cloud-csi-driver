@@ -80,3 +80,21 @@ func (mounter *SafeFormatAndMount) formatAndMountSensitive(source string, target
 func (mounter *SafeFormatAndMount) diskLooksUnformatted(disk string) (bool, error) {
 	return true, errUnsupported
 }
+
+// IsMountPoint determines if a directory is a mountpoint.
+// It always returns an error on unsupported platforms.
+func (mounter *SafeFormatAndMount) IsMountPoint(file string) (bool, error) {
+	return false, errUnsupported
+}
+
+func NewWithoutSystemd(mounterPath string) Interface {
+	return nil
+}
+
+func MakeMountArgs(source, target, fstype string, options []string) (mountArgs []string) {
+	return nil
+}
+
+func (mounter *SafeFormatAndMount) GetDiskFormat(disk string) (string, error) {
+	return "", nil
+}

@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy"
@@ -19,7 +21,7 @@ import (
 const (
 	// this should be longer than default timeout in server
 	defaultTimeout = time.Second * 35
-	FuseMountType  = "fuse.myfuse"
+	FuseMountType  = "fuse"
 )
 
 type Client interface {
@@ -125,7 +127,8 @@ func (c *client) mountFuseFilesystemWithFd(req *proxy.Request, fd int) error {
 	fuseOptions, daemonOptions := splitFuseOptions(mountReq.Options)
 	// 2.2 add fd=`fuseFd` option
 	fuseOptions = append(fuseOptions, fmt.Sprintf("fd=%v", fd))
-	err := c.rawMounter.Mount(mountReq.Source, mountReq.Target, FuseMountType, fuseOptions)
+	klog.V(4).InfoS("Premount on /dev/fuse", "source", mountReq.Source, "target", mountReq.Target, "fuseOptions", fuseOptions)
+	err := syscall.Mount(mountReq.Source, mountReq.Target, FuseMountType, 0, strings.Join(fuseOptions, ","))
 	if err != nil {
 		return fmt.Errorf("failed to mount the fuse filesystem: %w", err)
 	}
@@ -136,6 +139,14 @@ func (c *client) mountFuseFilesystemWithFd(req *proxy.Request, fd int) error {
 
 func splitFuseOptions(options []string) (fuseOptions, daemonOptions []string) {
 	// TODO: need well designed, just for demo here
+	fuseOptions = []string{
+		"nodev",
+		"nosuid",
+		"allow_other",
+		"rootmode=40000",
+		fmt.Sprintf("user_id=%d", os.Getuid()),
+		fmt.Sprintf("group_id=%d", os.Getgid()),
+	}
 	supportedFuseOptionKeys := map[string]struct{}{
 		"exec":         {},
 		"noexec":       {},
@@ -149,9 +160,6 @@ func splitFuseOptions(options []string) (fuseOptions, daemonOptions []string) {
 		"nosuid":       {},
 		"nodev":        {},
 		"relatime":     {},
-		"user_id":      {},
-		"group_id":     {},
-		"allow_other":  {},
 		"kernal_cache": {},
 	}
 	optionSet := sets.NewString(options...)
