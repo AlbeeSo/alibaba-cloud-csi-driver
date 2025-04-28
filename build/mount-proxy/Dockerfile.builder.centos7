@@ -9,18 +9,10 @@ RUN --mount=type=bind,target=. \
     go build -o /out/csi-mount-proxy-server ./cmd/mount-proxy-server && \
     go build -o /out/csi-mount-proxy-client ./cmd/mount-proxy-client
 
-FROM --platform=$TARGETPLATFORM alibaba-cloud-linux-2-registry.cn-hangzhou.cr.aliyuncs.com/alinux2/alinux2:231228.1
-RUN sudo yum install -y automake gcc-c++ git libcurl-devel libxml2-devel \
-    fuse-devel make openssl-devel 
-RUN sudo yum install -y rpm-build rubygems tar unzip
-COPY ./build/mount-proxy/ruby-3.2.8.tar.gz .
-RUN tar -xzvf ruby-3.2.8.tar.gz
-RUN cd ruby-3.2.8 && ./configure && make -j 4 && make install
-RUN ruby -v 
-RUN gem -v 
-RUN gem install --no-document fpm
+FROM --platform=$TARGETPLATFORM registry.cn-beijing.aliyuncs.com/tool-sys/ossfs-public:builder-250423.centos7
+RUN yum install -y  unzip
 
 RUN fpm -v 
-RUN sudo -v  && curl https://gosspublic.alicdn.com/ossutil/install.sh | sudo bash
+RUN curl https://gosspublic.alicdn.com/ossutil/install.sh | bash
 RUN ossutil -v
 COPY --link --from=builder /out/csi-mount-proxy* /usr/local/bin/
