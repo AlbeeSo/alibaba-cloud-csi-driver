@@ -12,15 +12,14 @@ RUN --mount=type=bind,target=. \
 FROM --platform=$TARGETPLATFORM alibaba-cloud-linux-2-registry.cn-hangzhou.cr.aliyuncs.com/alinux2/alinux2:231228.1
 RUN sudo yum install -y automake gcc-c++ git libcurl-devel libxml2-devel \
     fuse-devel make openssl-devel 
-RUN sudo yum install -y rpm-build rubygems ruby ruby-devel unzip
+RUN sudo yum install -y rpm-build rubygems tar unzip
+COPY ./build/mount-proxy/ruby-3.2.8.tar.gz .
+RUN tar -xzvf ruby-3.2.8.tar.gz
+RUN cd ruby-3.2.8 && ./configure && make -j 4 && make install
 RUN ruby -v 
-RUN gem -v  
-RUN gem install dotenv -v 2.8.1 -N \
-    && gem install clamp -v 1.0.1 -N \
-    && gem install mustache -v 0.99.8 -N \
-    && gem install cabin insist stud arr-pm backports rexml -N \
-    && gem install pleaserun --ignore-dependencies -N \
-    && gem install fpm --ignore-dependencies -N
+RUN gem -v 
+RUN gem install --no-document fpm
+
 RUN fpm -v 
 RUN sudo -v  && curl https://gosspublic.alicdn.com/ossutil/install.sh | sudo bash
 RUN ossutil -v
