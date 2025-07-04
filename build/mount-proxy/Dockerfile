@@ -76,15 +76,12 @@ ARG OSSFS_VERSION
 
 # install ossfs
 # only supports x86_64
-RUN set -ex; \
-    case "$TARGETPLATFORM" in \
-        linux/amd64) OSSFS_ARCH="x86_64" ;; \
-        linux/arm64) OSSFS_ARCH="aarch_64" ;; \
-        *) echo "unknown platform"; exit 1 ;; \
-    esac; \
-    yum install -y https://gosspublic.alicdn.com/ossfs/ossfs2_${OSSFS_VERSION}_linux_${OSSFS_ARCH}.rpm; \
-    yum install -y fuse3-devel util-linux mailcap procps; \
+
+RUN yum install -y util-linux procps; \
     yum clean all
+
+RUN curl -sSLO https://ack-csiplugin.oss-cn-hangzhou.aliyuncs.com/dev/ossfs-pro/ossfs2-2.0.2.ack.dev.ar-4.x86_64.rpm; \
+    rpm -ivh ossfs2-2.0.2.ack.dev.ar-4.x86_64.rpm 
 
 COPY --link --from=builder /out/csi-mount-proxy* /usr/local/bin/
 ENTRYPOINT ["csi-mount-proxy-server", "--driver=ossfs2"]
