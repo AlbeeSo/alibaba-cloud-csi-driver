@@ -82,7 +82,8 @@ RUN set -ex; \
         linux/arm64) OSSFS_ARCH="aarch_64" ;; \
         *) echo "unknown platform"; exit 1 ;; \
     esac; \
-    yum install -y https://ack-csiplugin.oss-cn-hangzhou.aliyuncs.com/ossfs2/ossfs2_${OSSFS_VERSION}_centos8.0_${OSSFS_ARCH}.rpm; \
+    
+    yum install -y https://ack-csiplugin.oss-cn-hangzhou.aliyuncs.com/dev/ossfs-pro/ossfs2_${OSSFS_VERSION}_centos8.0_${OSSFS_ARCH}.rpm; \
     yum install -y fuse3-devel util-linux mailcap procps; \
     yum clean all
 
