@@ -27,6 +27,11 @@ func init() {
 	server.RegisterDriver(NewDriver())
 }
 
+// Driver manages ossfs2 mounts and their monitoring.
+//
+// Note: Driver embeds mounter.Mounter (which is an extendedMounter wrapped with interceptors),
+// creating a circular dependency: Driver embeds Mounter, and extendedMounter holds a reference
+// to Driver. This is safe because Driver is initialized first, and all references are pointers.
 type Driver struct {
 	mounter.Mounter
 	pids           *sync.Map
@@ -34,6 +39,10 @@ type Driver struct {
 	wg             sync.WaitGroup
 }
 
+// NewDriver creates a new ossfs2 Driver instance.
+//
+// Note: Initialization order is critical: create Driver first, then extendedMounter with
+// a reference to Driver, and finally assign the wrapped mounter back to Driver.Mounter.
 func NewDriver() *Driver {
 	driver := &Driver{
 		pids:           new(sync.Map),
@@ -93,6 +102,11 @@ func (h *Driver) Terminate() {
 	klog.InfoS("All ossfs2 processes and monitoring goroutines exited")
 }
 
+// extendedMounter implements mounter.Mounter and provides the actual mount logic.
+//
+// Note: extendedMounter holds a reference to Driver to access shared resources (wg, pids)
+// for process lifecycle management. This creates a circular dependency with Driver, but it's
+// safe because Driver is initialized before extendedMounter.
 type extendedMounter struct {
 	driver *Driver
 	mount.Interface
@@ -140,6 +154,7 @@ func (m *extendedMounter) ExtendedMount(ctx context.Context, op *mounter.MountOp
 
 	// Wait for mount to complete
 	ossfsExited := make(chan error, 1)
+	// Note: Access Driver's resources (wg, pids) for process lifecycle management.
 	m.driver.wg.Add(1)
 	m.driver.pids.Store(pid, cmd)
 	go func() {
