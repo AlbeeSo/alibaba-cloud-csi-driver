@@ -29,6 +29,7 @@ import (
 	"github.com/alibabacloud-go/tea/tea"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/losetup"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/interceptors"
 	mounterutils "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/nas/cloud"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/nas/interfaces"
@@ -90,6 +91,9 @@ func doMount(m mounter.Mounter, opt *Options, targetPath, volumeId, podUid strin
 		secrets = map[string]string{
 			akIDKey:     opt.AkID,
 			akSecretKey: opt.AkSecret,
+		}
+		if agentMode {
+			m = mounter.NewForMounter(m, interceptors.AlinasSecretInterceptor)
 		}
 	}
 
