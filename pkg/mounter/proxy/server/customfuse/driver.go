@@ -203,6 +203,7 @@ func (m *extendedMounter) ExtendedMount(ctx context.Context, op *mounter.MountOp
 //
 // From options (carried as key=value):
 //
+//	bucket     — object storage bucket name
 //	url        — storage endpoint
 //	otherOpts  — single entry, raw customer string passed through
 //
@@ -227,6 +228,8 @@ func buildEnvVars(source, target string, options []string, secrets map[string]st
 			continue
 		}
 		switch key {
+		case "bucket":
+			env = append(env, "bucket="+value)
 		case "url":
 			env = append(env, "url="+value)
 		case "otherOpts":
