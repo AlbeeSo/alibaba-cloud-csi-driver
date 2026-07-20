@@ -54,6 +54,9 @@ func (cs *controllerServer) ControllerPublishVolume(ctx context.Context, req *cs
 	if err := precheckAuthConfig(opts); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "auth config error: %v", err)
 	}
+	if opts.AuthType == authTypeAgentIdentity {
+		return nil, status.Error(codes.InvalidArgument, "authType agent-identity is only supported in sandbox mode (not fuse-pod path)")
+	}
 	authCfg := makeAuthConfig(opts)
 	ptCfg := &fpm.PodTemplateConfig{
 		DnsPolicy: opts.DnsPolicy,

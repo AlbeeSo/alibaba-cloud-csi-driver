@@ -12,7 +12,10 @@ import (
 	mounterutils "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/klog/v2"
 )
+
+const authTypeAgentIdentity = "agent-identity"
 
 type fuseOptions struct {
 	// Source is the mount source passed to the FUSE entrypoint as $source.
@@ -61,6 +64,12 @@ type fuseOptions struct {
 	// CustomFuseAutoCapacity is enabled.
 	// Entrypoint strip example: capacity=${capacity%Gi}
 	Capacity string
+	// SandboxId identifies the sandbox for agent-identity authentication.
+	// Used to locate the token file at /var/opt/sandbox/agent-token/<sandboxId>.token.
+	SandboxId string
+	// SandboxCredProviderName is the name of the CredentialProvider CR that
+	// defines the RAM role and scoped policy for STS credential exchange.
+	SandboxCredProviderName string
 	// Secrets holds the raw Kubernetes Secret data.
 	// All entries are passed through to the FUSE entrypoint as environment
 	// variables with the key as the variable name (no prefix, no transformation).
@@ -126,6 +135,13 @@ func parseOptions(req publishRequest) (*fuseOptions, error) {
 			opts.FuseType = value
 		case "authtype":
 			opts.AuthType = value
+		case "sandboxid":
+			opts.SandboxId = value
+		case "sandboxcredprovidername", "credentialprovidername":
+			if opts.SandboxCredProviderName != "" && opts.SandboxCredProviderName != value {
+				klog.Warningf("multiple credential provider names are not allowed, use the first one")
+			}
+			opts.SandboxCredProviderName = value
 		case "capacity":
 			if hasUnitSuffix(value) {
 				if _, err := resource.ParseQuantity(value); err != nil {
@@ -181,28 +197,40 @@ func parseOptions(req publishRequest) (*fuseOptions, error) {
 	return opts, nil
 }
 
-// precheckAuthConfig validates the auth configuration before creating the fuse pod.
-// Currently only the default auth type (empty string) is supported, which passes
-// Kubernetes Secret entries as environment variables to the FUSE entrypoint.
-// Future auth types (rrsa, agent-identity) will be validated here.
 func precheckAuthConfig(opts *fuseOptions) error {
-	if opts.AuthType != "" {
-		return fmt.Errorf("unsupported authType %q; only default (secret passthrough) is currently supported", opts.AuthType)
+	switch opts.AuthType {
+	case "":
+		return nil
+	case authTypeAgentIdentity:
+		if opts.SandboxId == "" {
+			return fmt.Errorf("authType %s requires sandboxId in volumeAttributes", authTypeAgentIdentity)
+		}
+		if opts.SandboxCredProviderName == "" {
+			return fmt.Errorf("authType %s requires sandboxCredProviderName in volumeAttributes", authTypeAgentIdentity)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported authType %q; supported values: (empty), %s", opts.AuthType, authTypeAgentIdentity)
 	}
-	return nil
 }
 
 // makeAuthConfig constructs the AuthConfig for fuse pod creation.
 // The auth type determines how credentials are provisioned to the FUSE entrypoint:
 //   - "" (default): secrets are passed as env vars directly (key=value, no transformation)
 //   - "rrsa": (planned) RRSA-based auth via mount-proxy
-//   - "agent-identity": (planned) agent identity auth via mount-proxy
+//   - "agent-identity": agent identity auth via mount-proxy
 func makeAuthConfig(opts *fuseOptions) *fpm.AuthConfig {
 	authCfg := &fpm.AuthConfig{
 		AuthType: opts.AuthType,
 	}
 	if len(opts.Secrets) > 0 {
 		authCfg.Secrets = opts.Secrets
+	}
+	if opts.AuthType == authTypeAgentIdentity {
+		authCfg.AgentIdentityConfig = &fpm.AgentIdentityConfig{
+			CredProviderName: opts.SandboxCredProviderName,
+			SandboxId:        opts.SandboxId,
+		}
 	}
 	return authCfg
 }
@@ -238,6 +266,11 @@ func (o *fuseOptions) makeMountOptions() []string {
 	}
 	if o.Capacity != "" {
 		opts = append(opts, "capacity="+o.Capacity)
+	}
+	if o.AuthType == authTypeAgentIdentity {
+		opts = append(opts, "authType="+authTypeAgentIdentity,
+			"sandboxId="+o.SandboxId,
+			"sandboxCredProviderName="+o.SandboxCredProviderName)
 	}
 	opts = append(opts, o.MountOptions...)
 	return opts

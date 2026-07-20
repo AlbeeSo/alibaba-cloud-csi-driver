@@ -380,20 +380,43 @@ func TestParseOptions_CapacityPassthrough(t *testing.T) {
 
 func TestPrecheckAuthConfig(t *testing.T) {
 	tests := []struct {
-		name     string
-		authType string
-		wantErr  bool
+		name        string
+		opts        fuseOptions
+		wantErr     bool
+		errContains string
 	}{
-		{name: "default empty", authType: "", wantErr: false},
-		{name: "unsupported rrsa", authType: "rrsa", wantErr: true},
-		{name: "unsupported agent-identity", authType: "agent-identity", wantErr: true},
+		{name: "default empty", opts: fuseOptions{}, wantErr: false},
+		{name: "unsupported rrsa", opts: fuseOptions{AuthType: "rrsa"}, wantErr: true, errContains: "unsupported authType"},
+		{
+			name:    "agent-identity valid",
+			opts:    fuseOptions{AuthType: "agent-identity", SandboxId: "sb-123", SandboxCredProviderName: "my-cred"},
+			wantErr: false,
+		},
+		{
+			name:        "agent-identity missing sandboxId",
+			opts:        fuseOptions{AuthType: "agent-identity", SandboxCredProviderName: "my-cred"},
+			wantErr:     true,
+			errContains: "requires sandboxId",
+		},
+		{
+			name:        "agent-identity missing credProviderName",
+			opts:        fuseOptions{AuthType: "agent-identity", SandboxId: "sb-123"},
+			wantErr:     true,
+			errContains: "requires sandboxCredProviderName",
+		},
+		{
+			name:        "agent-identity missing both",
+			opts:        fuseOptions{AuthType: "agent-identity"},
+			wantErr:     true,
+			errContains: "requires sandboxId",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := precheckAuthConfig(&fuseOptions{AuthType: tt.authType})
+			err := precheckAuthConfig(&tt.opts)
 			if tt.wantErr {
 				assert.Error(t, err)
-				assert.Contains(t, err.Error(), tt.authType)
+				assert.Contains(t, err.Error(), tt.errContains)
 			} else {
 				assert.NoError(t, err)
 			}
@@ -408,6 +431,7 @@ func TestMakeAuthConfig(t *testing.T) {
 		cfg := makeAuthConfig(opts)
 		assert.Equal(t, "", cfg.AuthType)
 		assert.Equal(t, secrets, cfg.Secrets)
+		assert.Nil(t, cfg.AgentIdentityConfig)
 	})
 
 	t.Run("no secrets", func(t *testing.T) {
@@ -415,12 +439,42 @@ func TestMakeAuthConfig(t *testing.T) {
 		cfg := makeAuthConfig(opts)
 		assert.Equal(t, "", cfg.AuthType)
 		assert.Nil(t, cfg.Secrets)
+		assert.Nil(t, cfg.AgentIdentityConfig)
 	})
 
 	t.Run("auth type preserved", func(t *testing.T) {
 		opts := &fuseOptions{AuthType: "rrsa"}
 		cfg := makeAuthConfig(opts)
 		assert.Equal(t, "rrsa", cfg.AuthType)
+		assert.Nil(t, cfg.AgentIdentityConfig)
+	})
+
+	t.Run("agent-identity sets AgentIdentityConfig", func(t *testing.T) {
+		opts := &fuseOptions{
+			AuthType:                authTypeAgentIdentity,
+			SandboxId:               "sb-123",
+			SandboxCredProviderName: "my-cred-provider",
+		}
+		cfg := makeAuthConfig(opts)
+		assert.Equal(t, authTypeAgentIdentity, cfg.AuthType)
+		assert.NotNil(t, cfg.AgentIdentityConfig)
+		assert.Equal(t, "my-cred-provider", cfg.AgentIdentityConfig.CredProviderName)
+		assert.Equal(t, "sb-123", cfg.AgentIdentityConfig.SandboxId)
+	})
+
+	t.Run("agent-identity with secrets", func(t *testing.T) {
+		secrets := map[string]string{"extra": "val"}
+		opts := &fuseOptions{
+			AuthType:                authTypeAgentIdentity,
+			SandboxId:               "sb-456",
+			SandboxCredProviderName: "cred-prov",
+			Secrets:                 secrets,
+		}
+		cfg := makeAuthConfig(opts)
+		assert.Equal(t, authTypeAgentIdentity, cfg.AuthType)
+		assert.Equal(t, secrets, cfg.Secrets)
+		assert.NotNil(t, cfg.AgentIdentityConfig)
+		assert.Equal(t, "cred-prov", cfg.AgentIdentityConfig.CredProviderName)
 	})
 }
 
@@ -485,6 +539,16 @@ func TestMakeMountOptions(t *testing.T) {
 			opts: fuseOptions{Source: "redis://host:6379/1", Bucket: "mybucket", URL: "ep.com"},
 			want: []string{"bucket=mybucket", "url=ep.com"},
 		},
+		{
+			name: "agent-identity includes auth fields",
+			opts: fuseOptions{
+				Bucket:                  "b",
+				AuthType:                authTypeAgentIdentity,
+				SandboxId:               "sb-123",
+				SandboxCredProviderName: "my-cred",
+			},
+			want: []string{"bucket=b", "authType=agent-identity", "sandboxId=sb-123", "sandboxCredProviderName=my-cred"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -492,4 +556,46 @@ func TestMakeMountOptions(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestParseOptions_CredentialProviderNameAlias(t *testing.T) {
+	t.Run("credentialprovidername alias", func(t *testing.T) {
+		opts, err := parseOptions(&csi.NodePublishVolumeRequest{
+			VolumeContext: map[string]string{"credentialProviderName": "my-cred"},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, "my-cred", opts.SandboxCredProviderName)
+	})
+
+	t.Run("sandboxcredprovidername", func(t *testing.T) {
+		opts, err := parseOptions(&csi.NodePublishVolumeRequest{
+			VolumeContext: map[string]string{"sandboxCredProviderName": "my-cred"},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, "my-cred", opts.SandboxCredProviderName)
+	})
+
+	t.Run("first value wins on conflict", func(t *testing.T) {
+		// When both keys are present, map iteration order is non-deterministic,
+		// but the warning should fire and the result should be one of the two values.
+		opts, err := parseOptions(&csi.NodePublishVolumeRequest{
+			VolumeContext: map[string]string{
+				"sandboxCredProviderName": "cred-a",
+				"credentialProviderName":  "cred-b",
+			},
+		})
+		assert.NoError(t, err)
+		assert.Contains(t, []string{"cred-a", "cred-b"}, opts.SandboxCredProviderName)
+	})
+
+	t.Run("same value no conflict", func(t *testing.T) {
+		opts, err := parseOptions(&csi.NodePublishVolumeRequest{
+			VolumeContext: map[string]string{
+				"sandboxCredProviderName": "same-cred",
+				"credentialProviderName":  "same-cred",
+			},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, "same-cred", opts.SandboxCredProviderName)
+	})
 }

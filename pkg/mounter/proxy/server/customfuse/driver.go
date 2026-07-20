@@ -12,10 +12,13 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/interceptors"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/server"
+	mounterutils "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 	"k8s.io/mount-utils"
@@ -24,6 +27,16 @@ import (
 const (
 	configMapEntrypoint = "/etc/fuse-config/entrypoint.sh"
 	defaultEntrypoint   = "/entrypoint.sh"
+
+	authTypeAgentIdentity = "agent-identity"
+
+	optAuthType                  = "authType"
+	optSandboxId                 = "sandboxId"
+	optSandboxCredProviderName   = "sandboxCredProviderName"
+	optAgentIdentityEndpoint     = "agent_identity_endpoint"
+	optAgentIdentityTokenFile    = "agent_identity_token_file"
+	optAgentIdentityCredProvider = "agent_identity_cred_provider"
+	optAgentIdentityCAFile       = "agent_identity_ca_file"
 )
 
 func init() {
@@ -62,6 +75,37 @@ func (h *Driver) Fstypes() []string {
 
 func (h *Driver) Init() {}
 
+func (h *Driver) ApplyOptionDefaults(options []string) []string {
+	idx := mounterutils.IndexMountOptions(options)
+	if idx[optAuthType] != authTypeAgentIdentity {
+		return options
+	}
+
+	var appends []string
+	if _, ok := idx[optAgentIdentityEndpoint]; !ok {
+		appends = append(appends, optAgentIdentityEndpoint+"="+server.GetAgentIdentityEndpoint())
+	}
+	if _, ok := idx[optAgentIdentityTokenFile]; !ok {
+		if sandboxId := idx[optSandboxId]; sandboxId != "" {
+			appends = append(appends, optAgentIdentityTokenFile+"="+server.GetAgentIdentityTokenFilePath(sandboxId))
+		}
+	}
+	if credProv := idx[optSandboxCredProviderName]; credProv != "" {
+		if _, ok := idx[optAgentIdentityCredProvider]; !ok {
+			appends = append(appends, optAgentIdentityCredProvider+"="+credProv)
+		}
+	}
+	caPath := server.GetAgentIdentityCAFilePath()
+	if unix.Access(caPath, unix.R_OK) == nil {
+		appends = append(appends, optAgentIdentityCAFile+"="+caPath)
+	}
+
+	if len(appends) > 0 {
+		options = mounterutils.MergeMountOptions(options, appends)
+	}
+	return options
+}
+
 func (h *Driver) Terminate() {
 	h.monitorManager.StopAllMonitoring()
 
@@ -99,7 +143,29 @@ func (m *extendedMounter) ExtendedMount(ctx context.Context, op *mounter.MountOp
 	logger := klog.FromContext(ctx)
 	target := op.Target
 
-	env := buildEnvVars(op.Source, op.Target, op.Options, op.Secrets)
+	options := m.driver.ApplyOptionDefaults(op.Options)
+	env := buildEnvVars(op.Source, op.Target, options, op.Secrets)
+
+	var refresher *CredentialRefresher
+	idx := mounterutils.IndexMountOptions(options)
+	if idx[optAuthType] == authTypeAgentIdentity {
+		opts := AgentIdentityOpts{
+			TokenFile:    idx[optAgentIdentityTokenFile],
+			Endpoint:     idx[optAgentIdentityEndpoint],
+			CredProvider: idx[optAgentIdentityCredProvider],
+			CAFile:       idx[optAgentIdentityCAFile],
+		}
+		volumeID := idx[optSandboxId]
+		if volumeID == "" {
+			volumeID = "default"
+		}
+		refresher = NewCredentialRefresher(opts, volumeID)
+		if err := refresher.Start(ctx); err != nil {
+			return fmt.Errorf("credential refresher start: %w", err)
+		}
+		env = filterAgentIdentityEnv(env)
+		env = append(env, "credentialDir="+refresher.Dir(), optAuthType+"="+authTypeAgentIdentity)
+	}
 
 	entrypoint := defaultEntrypoint
 	if fi, err := os.Stat(configMapEntrypoint); err == nil {
@@ -120,6 +186,9 @@ func (m *extendedMounter) ExtendedMount(ctx context.Context, op *mounter.MountOp
 	}()
 
 	if err := cmd.Start(); err != nil {
+		if refresher != nil {
+			refresher.Stop()
+		}
 		return fmt.Errorf("start entrypoint failed: %w", err)
 	}
 
@@ -134,6 +203,9 @@ func (m *extendedMounter) ExtendedMount(ctx context.Context, op *mounter.MountOp
 		defer m.driver.pids.Delete(pid)
 
 		err := cmd.Wait()
+		if refresher != nil {
+			refresher.Stop()
+		}
 		if err != nil {
 			logger.Error(err, "customfuse entrypoint exited with error", "mountpoint", target, "pid", pid)
 		} else {
@@ -249,4 +321,23 @@ func buildEnvVars(source, target string, options []string, secrets map[string]st
 	}
 
 	return env
+}
+
+// filterAgentIdentityEnv removes infrastructure-only keys from env that should
+// not be exposed to the entrypoint. These keys are consumed by the driver itself
+// (CredentialRefresher) and replaced by credentialDir + authType.
+func filterAgentIdentityEnv(env []string) []string {
+	result := make([]string, 0, len(env))
+	for _, e := range env {
+		key, _, _ := strings.Cut(e, "=")
+		if strings.HasPrefix(key, "agent_identity_") {
+			continue
+		}
+		switch key {
+		case optSandboxId, optSandboxCredProviderName, optAuthType:
+			continue
+		}
+		result = append(result, e)
+	}
+	return result
 }
