@@ -42,6 +42,7 @@ import (
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils"
 	utilsio "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils/io"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils/rund/directvolume"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/volumecontext"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	v1 "k8s.io/api/core/v1"
@@ -268,9 +269,17 @@ func parseVolumeContext(volumeContext map[string]string) (*Options, string, erro
 			opt.SandboxCredProviderName = value
 		}
 	}
-	if opt.SubstrateMode && opt.SandboxId == "" {
-		// Substrate's atelet stores the actor UID in the standard CSI pod UID key.
-		if actorUID := volumeContext[utils.PodUIDKey]; actorUID != "" {
+	if opt.SubstrateMode {
+		if err := volumecontext.ValidateActorIdentity(volumeContext); err != nil {
+			return nil, "", status.Error(codes.InvalidArgument, err.Error())
+		}
+		actorUID := volumecontext.ActorUID(volumeContext)
+		if volumecontext.HasActorIdentity(volumeContext) {
+			if opt.SandboxId != "" && opt.SandboxId != actorUID {
+				return nil, "", status.Error(codes.PermissionDenied, "sandboxId differs from the actor UID")
+			}
+		}
+		if opt.SandboxId == "" {
 			opt.SandboxId = actorUID
 		}
 	}
@@ -535,7 +544,7 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		defer conn.Close()
 	}
 
-	if err := doMount(ns.mounter, opt, mountPath, req.VolumeId, podUID, ns.config.AgentMode); err != nil {
+	if err := doMount(ns.mounter, opt, mountPath, req.VolumeId, volumecontext.MountOwnerUID(req.VolumeContext), ns.config.AgentMode); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 	if opt.MountProtocol == "efc" {

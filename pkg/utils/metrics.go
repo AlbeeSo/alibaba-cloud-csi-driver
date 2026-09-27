@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/volumecontext"
 	"golang.org/x/sys/unix"
 	"k8s.io/klog/v2"
 )
@@ -189,13 +190,17 @@ func WriteMetricsInfo(metricsPathPrefix string,
 		mountPointDir = segments[len(segments)-2]
 	}
 
-	podUIDPath := metricsPathPrefix + req.VolumeContext["csi.storage.k8s.io/pod.uid"] + "/"
+	substrate := req.VolumeContext[volumecontext.SubstrateModeKey] == "true" && volumecontext.HasActorIdentity(req.VolumeContext)
+	if substrate {
+		mountPointDir = filepath.Base(req.TargetPath)
+	}
+	podUIDPath := metricsPathPrefix + volumecontext.MountOwnerUID(req.VolumeContext) + "/"
 
 	mountPointPath = podUIDPath + mountPointDir + "/"
 	if !IsFileExisting(mountPointPath) {
 		_ = os.MkdirAll(mountPointPath, os.FileMode(0755))
 	}
-	if !IsFileExisting(podUIDPath + PodInfoFile) {
+	if substrate || !IsFileExisting(podUIDPath+PodInfoFile) {
 		info := req.VolumeContext["csi.storage.k8s.io/pod.namespace"] + " " +
 			req.VolumeContext["csi.storage.k8s.io/pod.name"] + " " +
 			req.VolumeContext["csi.storage.k8s.io/pod.uid"] + " " +
