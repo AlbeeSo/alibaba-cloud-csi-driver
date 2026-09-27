@@ -40,7 +40,7 @@ func TestGoldenPlaceholderRealMountThroughGRPC(t *testing.T) {
 	root, state := t.TempDir(), t.TempDir()
 	target := filepath.Join(root, testUID, "volumes", "data")
 	var unavailable atomic.Bool
-	lookup := func(context.Context, string) (ActorInfo, error) {
+	lookup := func(context.Context, ActorReference) (ActorInfo, error) {
 		if unavailable.Load() {
 			return ActorInfo{}, status.Error(codes.Unavailable, "Actor API unavailable")
 		}
@@ -58,7 +58,7 @@ func TestGoldenPlaceholderRealMountThroughGRPC(t *testing.T) {
 	conn, err := grpc.NewClient(listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, conn.Close()) })
-	created, err := csi.NewControllerClient(conn).CreateVolume(t.Context(), &csi.CreateVolumeRequest{Name: testID, VolumeCapabilities: []*csi.VolumeCapability{publishFixture().VolumeCapability}})
+	created, err := csi.NewControllerClient(conn).CreateVolume(t.Context(), &csi.CreateVolumeRequest{Name: testID, Parameters: goldenMetadataFixture(), VolumeCapabilities: []*csi.VolumeCapability{publishFixture().VolumeCapability}})
 	require.NoError(t, err)
 	vc := created.Volume.VolumeContext
 	vc[PodUIDKey] = testUID
@@ -80,4 +80,27 @@ func TestGoldenPlaceholderRealMountThroughGRPC(t *testing.T) {
 	_, err = client.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: target})
 	require.NoError(t, err)
 	require.NoDirExists(t, target)
+}
+
+func TestGoldenReadonlyRealMount(t *testing.T) {
+	if os.Getenv("BRIDGE_REAL_MOUNT_TEST") != "1" {
+		t.Skip("set BRIDGE_REAL_MOUNT_TEST=1 inside an isolated privileged Linux container")
+	}
+	root := t.TempDir()
+	target := filepath.Join(root, "actors", testUID, "volumes", "data")
+	lookup := func(context.Context, ActorReference) (ActorInfo, error) {
+		return ActorInfo{UID: testUID, Atespace: "ate-golden", Name: "template-uid", TemplateUID: "template-uid", Golden: true}, nil
+	}
+	attributes := goldenMetadataFixture()
+	resolved, err := resolveMount(t.Context(), lookup, testID, attributes)
+	require.NoError(t, err)
+	attributes[PodUIDKey], attributes[BindingDigestKey] = "worker-uid", resolved.Digest
+	node := NewNode(NodeOptions{ActorRoot: filepath.Join(root, "actors"), StateDir: filepath.Join(root, "state"), Lookup: lookup, Mounter: mount.New("")})
+	_, err = node.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: target, Readonly: true, VolumeContext: attributes})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, cleanupErr := node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: target})
+		require.NoError(t, cleanupErr)
+	})
+	require.Error(t, os.WriteFile(filepath.Join(target, "must-not-write"), []byte("readonly"), 0600))
 }

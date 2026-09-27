@@ -1,0 +1,25 @@
+{
+  "sourceRepository": "gitlab.alibaba-inc.com/cos/substrate",
+  "sourceRevision": "abe771016ae50264d6018885a910fdbbd7a4f0de",
+  "sourceDirectory": "pkg/proto/ateapipb",
+  "files": [
+    {
+      "sha256": "733ad3443d0ecfd0700372e73b4660e3cdecff89ca78a4cbbfc77f7f47d61363",
+      "path": "pkg/substrate/internal/ateapipb/ateapi.proto"
+    },
+    {
+      "sha256": "d04d2c083a0c9165a03e815a5b61be6808a06b679636c7f16da0a2cddde1782e",
+      "path": "pkg/substrate/internal/ateapipb/ateapi.pb.go"
+    },
+    {
+      "sha256": "19439c8e21403928fc3419b83441237034481281a85073a919f666e0a805b858",
+      "path": "pkg/substrate/internal/ateapipb/ateapi_grpc.pb.go"
+    },
+    {
+      "sha256": "b796841e2546c133d07b470a99633c0bea0895123fd8cf4ce174ba33604d65ca",
+      "path": "pkg/substrate/internal/ateapipb/source.go"
+    }
+  ],
+  "unmodifiedUpstreamFiles": true,
+  "publicUpstreamAnnotationsAvailable": false
+}

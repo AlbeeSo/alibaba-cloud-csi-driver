@@ -34,13 +34,15 @@ func TestGoldenPlaceholderLifecycleWithoutNAS(t *testing.T) {
 	target := filepath.Join(root, testUID, "volumes", "data")
 	mounter := mount.NewFakeMounter(nil)
 	nas := &recordingNAS{err: errors.New("golden must not call NAS")}
-	lookup := func(context.Context, string) (ActorInfo, error) {
+	lookup := func(context.Context, ActorReference) (ActorInfo, error) {
 		return ActorInfo{UID: testUID, Atespace: "ate-golden", Name: "template-uid", TemplateUID: "template-uid", Golden: true}, nil
 	}
-	resolved, err := resolveMount(t.Context(), lookup, testID)
+	attributes := goldenMetadataFixture()
+	resolved, err := resolveMount(t.Context(), lookup, testID, attributes)
 	require.NoError(t, err)
 	node := NewNode(NodeOptions{ActorRoot: root, StateDir: state, Mounter: mounter, NAS: nas, Lookup: lookup})
-	in := &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: target, VolumeContext: map[string]string{PodUIDKey: testUID, BindingDigestKey: resolved.Digest}}
+	attributes[PodUIDKey], attributes[BindingDigestKey] = "worker-uid", resolved.Digest
+	in := &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: target, VolumeContext: attributes}
 	_, err = node.NodePublishVolume(t.Context(), in)
 	require.NoError(t, err)
 	require.Nil(t, nas.published)
@@ -67,7 +69,7 @@ func TestUnpublishKeepsBindingWhenNASFails(t *testing.T) {
 	b := bindingFixture()
 	require.NoError(t, store.put(b))
 	nas := &recordingNAS{err: status.Error(codes.Unavailable, "daemon unavailable")}
-	node := NewNode(NodeOptions{ActorRoot: DefaultActorRoot, StateDir: state, Mounter: mount.NewFakeMounter(nil), NAS: nas, Lookup: func(context.Context, string) (ActorInfo, error) {
+	node := NewNode(NodeOptions{ActorRoot: DefaultActorRoot, StateDir: state, Mounter: mount.NewFakeMounter(nil), NAS: nas, Lookup: func(context.Context, ActorReference) (ActorInfo, error) {
 		t.Fatal("unpublish must not query actor")
 		return ActorInfo{}, nil
 	}})
@@ -89,10 +91,10 @@ func TestUntrackedMountIsNeverClaimedOrRemoved(t *testing.T) {
 
 func TestControllerBindingRejectsAnnotationDriftOnAnotherNode(t *testing.T) {
 	annotation := annotationFixture(t, publishFixture())
-	lookup := func(context.Context, string) (ActorInfo, error) {
+	lookup := func(context.Context, ActorReference) (ActorInfo, error) {
 		return ActorInfo{UID: testUID, Atespace: "storage-test", Name: "actor", Annotation: annotation}, nil
 	}
-	created, err := (&Controller{Lookup: lookup}).CreateVolume(t.Context(), &csi.CreateVolumeRequest{Name: testID, VolumeCapabilities: []*csi.VolumeCapability{publishFixture().VolumeCapability}})
+	created, err := (&Controller{Lookup: lookup}).CreateVolume(t.Context(), &csi.CreateVolumeRequest{Name: testID, Parameters: actorMetadataFixture(), VolumeCapabilities: []*csi.VolumeCapability{publishFixture().VolumeCapability}})
 	require.NoError(t, err)
 	changed := publishFixture()
 	changed.VolumeContext["path"] = "/another-tenant"

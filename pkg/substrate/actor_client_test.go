@@ -14,6 +14,7 @@ limitations under the License.
 package substrate
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/pem"
 	"net"
@@ -23,7 +24,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/substrate/internal/actorpb"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/substrate/internal/ateapipb"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -33,6 +34,35 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+type actorControlFixture struct {
+	ateapipb.UnimplementedControlServer
+	actor    *ateapipb.Actor
+	template *ateapipb.ActorTemplate
+	tokens   chan string
+}
+
+func (s *actorControlFixture) GetActor(ctx context.Context, req *ateapipb.GetActorRequest) (*ateapipb.Actor, error) {
+	if req.GetActor().GetAtespace() != s.actor.Metadata.Atespace || req.GetActor().GetName() != s.actor.Metadata.Name {
+		return nil, status.Error(codes.NotFound, "actor reference not found")
+	}
+	if s.tokens != nil {
+		md, _ := metadata.FromIncomingContext(ctx)
+		values := md.Get("authorization")
+		if len(values) != 1 {
+			return nil, status.Error(codes.Unauthenticated, "missing bearer")
+		}
+		s.tokens <- values[0]
+	}
+	return s.actor, nil
+}
+
+func (s *actorControlFixture) GetActorTemplate(_ context.Context, req *ateapipb.GetActorTemplateRequest) (*ateapipb.ActorTemplate, error) {
+	if s.template == nil || req.GetActorTemplate().GetAtespace() != s.template.Metadata.Atespace || req.GetActorTemplate().GetName() != s.template.Metadata.Name {
+		return nil, status.Error(codes.NotFound, "template reference not found")
+	}
+	return s.template, nil
+}
+
 func TestActorLookupTLSAndTokenRotation(t *testing.T) {
 	seed := httptest.NewTLSServer(http.NotFoundHandler())
 	certificate := seed.TLS.Certificates[0]
@@ -41,23 +71,11 @@ func TestActorLookupTLSAndTokenRotation(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	tokens := make(chan string, 2)
-	server := grpc.NewServer(grpc.Creds(credentials.NewTLS(&tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12})), grpc.UnknownServiceHandler(func(_ interface{}, stream grpc.ServerStream) error {
-		method, _ := grpc.MethodFromServerStream(stream)
-		if method != "/ateapi.Control/GetActorByUID" {
-			return status.Error(codes.Unimplemented, "unexpected method")
-		}
-		request := new(actorpb.GetActorByUIDRequest)
-		if err := stream.RecvMsg(request); err != nil {
-			return err
-		}
-		md, _ := metadata.FromIncomingContext(stream.Context())
-		values := md.Get("authorization")
-		if len(values) != 1 {
-			return status.Error(codes.Unauthenticated, "missing bearer")
-		}
-		tokens <- values[0]
-		return stream.SendMsg(&actorpb.Actor{Metadata: &actorpb.ResourceMetadata{Uid: request.ActorUid, Atespace: "storage-test", Name: "actor", Annotations: map[string]string{PublishRequestsAnnotation: "[]"}}})
-	}))
+	server := grpc.NewServer(grpc.Creds(credentials.NewTLS(&tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12})))
+	ateapipb.RegisterControlServer(server, &actorControlFixture{
+		actor:  &ateapipb.Actor{Metadata: &ateapipb.ResourceMetadata{Uid: testUID, Atespace: "storage-test", Name: "actor", Annotations: map[string]string{PublishRequestsAnnotation: "[]"}}},
+		tokens: tokens,
+	})
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()
 	t.Cleanup(func() { server.Stop(); require.NoError(t, <-done) })
@@ -70,7 +88,7 @@ func TestActorLookupTLSAndTokenRotation(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, client.Close()) })
 	for _, token := range []string{"first", "rotated"} {
 		require.NoError(t, os.WriteFile(tokenPath, []byte(token+"\n"), 0600))
-		got, err := client.Lookup(t.Context(), testUID)
+		got, err := client.Lookup(t.Context(), ActorReference{UID: testUID, Name: "actor", Atespace: "storage-test"})
 		require.NoError(t, err)
 		require.Equal(t, "[]", got.Annotation)
 		require.False(t, got.Golden)
@@ -83,50 +101,52 @@ func TestActorLookupVerifiesGoldenTemplate(t *testing.T) {
 		name        string
 		actorName   string
 		templateUID string
-		golden      bool
-		fail        bool
+		wantError   bool
 	}{
-		{"verified", "template-uid", "template-uid", true, false},
-		{"mismatched template", "another-template", "template-uid", false, true},
+		{"verified", "template-uid", "template-uid", false},
+		{"mismatched template", "another-template", "template-uid", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			listener, err := net.Listen("tcp", "127.0.0.1:0")
 			require.NoError(t, err)
-			server := grpc.NewServer(grpc.UnknownServiceHandler(func(_ interface{}, stream grpc.ServerStream) error {
-				method, _ := grpc.MethodFromServerStream(stream)
-				switch method {
-				case "/ateapi.Control/GetActorByUID":
-					request := new(actorpb.GetActorByUIDRequest)
-					if err := stream.RecvMsg(request); err != nil {
-						return err
-					}
-					return stream.SendMsg(&actorpb.Actor{Metadata: &actorpb.ResourceMetadata{Uid: request.ActorUid, Atespace: "ate-golden", Name: tc.actorName}, ActorTemplate: &actorpb.ObjectRef{Atespace: "storage-test", Name: "template"}})
-				case "/ateapi.Control/GetActorTemplate":
-					request := new(actorpb.GetActorTemplateRequest)
-					if err := stream.RecvMsg(request); err != nil {
-						return err
-					}
-					return stream.SendMsg(&actorpb.ActorTemplate{Metadata: &actorpb.ResourceMetadata{Uid: tc.templateUID, Atespace: request.ActorTemplate.Atespace, Name: request.ActorTemplate.Name}})
-				default:
-					return status.Error(codes.Unimplemented, "unexpected method")
-				}
-			}))
+			server := grpc.NewServer()
+			ateapipb.RegisterControlServer(server, &actorControlFixture{
+				actor:    &ateapipb.Actor{Metadata: &ateapipb.ResourceMetadata{Uid: testUID, Atespace: "ate-golden", Name: tc.actorName}, ActorTemplate: &ateapipb.ObjectRef{Atespace: "storage-test", Name: "template"}},
+				template: &ateapipb.ActorTemplate{Metadata: &ateapipb.ResourceMetadata{Uid: tc.templateUID, Atespace: "storage-test", Name: "template"}},
+			})
 			done := make(chan error, 1)
 			go func() { done <- server.Serve(listener) }()
 			t.Cleanup(func() { server.Stop(); require.NoError(t, <-done) })
 			conn, err := grpc.NewClient(listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, conn.Close()) })
-			info, err := (&ActorClient{conn: conn}).Lookup(t.Context(), testUID)
-			if tc.fail {
+			client := &ActorClient{conn: conn, control: ateapipb.NewControlClient(conn)}
+			info, err := client.Lookup(t.Context(), ActorReference{UID: testUID, Name: tc.actorName, Atespace: "ate-golden"})
+			if tc.wantError {
 				require.Error(t, err)
 				return
 			}
 			require.NoError(t, err)
-			require.Equal(t, tc.golden, info.Golden)
+			require.True(t, info.Golden)
 			require.Equal(t, tc.templateUID, info.TemplateUID)
 		})
 	}
+}
+
+func TestActorLookupRejectsRecreatedActorUID(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	server := grpc.NewServer()
+	ateapipb.RegisterControlServer(server, &actorControlFixture{actor: &ateapipb.Actor{Metadata: &ateapipb.ResourceMetadata{Uid: "replacement-uid", Name: "actor", Atespace: "storage-test"}}})
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(listener) }()
+	t.Cleanup(func() { server.Stop(); require.NoError(t, <-done) })
+	conn, err := grpc.NewClient(listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, conn.Close()) })
+	client := &ActorClient{conn: conn, control: ateapipb.NewControlClient(conn)}
+	_, err = client.Lookup(t.Context(), ActorReference{UID: testUID, Name: "actor", Atespace: "storage-test"})
+	require.Equal(t, codes.PermissionDenied, status.Code(err))
 }
 
 func TestActorClientRejectsMissingTrust(t *testing.T) {

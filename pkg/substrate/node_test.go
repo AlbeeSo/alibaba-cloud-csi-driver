@@ -77,19 +77,23 @@ func TestPublishPreservesRequestAndUsesActorIdentity(t *testing.T) {
 	annotation := annotationFixture(t, request)
 	downstream := &recordingNAS{}
 	node := NewNode(NodeOptions{NodeID: "node", ActorRoot: "/var/lib/ateom-gvisor/actors", NAS: downstream, StateDir: t.TempDir(), Mounter: mount.NewFakeMounter(nil),
-		Lookup: func(_ context.Context, uid string) (ActorInfo, error) {
-			require.Equal(t, testUID, uid)
-			return ActorInfo{UID: uid, Atespace: "storage-test", Name: "actor", Annotation: annotation}, nil
+		Lookup: func(_ context.Context, ref ActorReference) (ActorInfo, error) {
+			require.Equal(t, testUID, ref.UID)
+			return ActorInfo{UID: ref.UID, Atespace: "storage-test", Name: "actor", Annotation: annotation}, nil
 		},
 	})
-	resolved, err := resolveMount(t.Context(), node.opts.Lookup, testID)
+	resolved, err := resolveMount(t.Context(), node.opts.Lookup, testID, actorMetadataFixture())
 	require.NoError(t, err)
-	_, err = node.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: testTarget, VolumeContext: map[string]string{"csi.storage.k8s.io/pod.uid": testUID, BindingDigestKey: resolved.Digest}})
+	_, err = node.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: testTarget, VolumeContext: nodeContextFixture(resolved.Digest)})
 	require.NoError(t, err)
 	want := proto.Clone(request).(*csi.NodePublishVolumeRequest)
 	want.TargetPath = testTarget
 	want.VolumeContext["csi.alibabacloud.com/substrate-mode"] = "true"
-	want.VolumeContext["csi.storage.k8s.io/pod.uid"] = testUID
+	for key, value := range nodeContextFixture("") {
+		if key != BindingDigestKey {
+			want.VolumeContext[key] = value
+		}
+	}
 	require.True(t, proto.Equal(want, downstream.published))
 	require.Equal(t, "/data", request.TargetPath)
 	require.NotContains(t, request.VolumeContext, "csi.storage.k8s.io/pod.uid")
@@ -100,7 +104,7 @@ func TestPublishRejectsInvalidBoundary(t *testing.T) {
 		name   string
 		mutate func(*csi.NodePublishVolumeRequest, *csi.NodePublishVolumeRequest)
 	}{
-		{"missing actor UID", func(in, _ *csi.NodePublishVolumeRequest) { delete(in.VolumeContext, "csi.storage.k8s.io/pod.uid") }},
+		{"missing actor UID", func(in, _ *csi.NodePublishVolumeRequest) { delete(in.VolumeContext, "csi.alibabacloud.com/actor.uid") }},
 		{"foreign target", func(in, _ *csi.NodePublishVolumeRequest) { in.TargetPath = "/etc/data" }},
 		{"wrong volume ID", func(in, _ *csi.NodePublishVolumeRequest) { in.VolumeId = "unrelated-volume" }},
 		{"secrets", func(_, real *csi.NodePublishVolumeRequest) {
@@ -112,12 +116,12 @@ func TestPublishRejectsInvalidBoundary(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			real := publishFixture()
-			in := &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: testTarget, VolumeContext: map[string]string{"csi.storage.k8s.io/pod.uid": testUID}}
+			in := &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: testTarget, VolumeContext: nodeContextFixture("")}
 			tc.mutate(in, real)
 			annotation := annotationFixture(t, real)
 			downstream := &recordingNAS{}
-			node := NewNode(NodeOptions{ActorRoot: "/var/lib/ateom-gvisor/actors", NAS: downstream, Lookup: func(context.Context, string) (ActorInfo, error) {
-				return ActorInfo{UID: testUID, Annotation: annotation}, nil
+			node := NewNode(NodeOptions{ActorRoot: "/var/lib/ateom-gvisor/actors", NAS: downstream, Lookup: func(context.Context, ActorReference) (ActorInfo, error) {
+				return ActorInfo{UID: testUID, Name: "actor", Atespace: "storage-test", Annotation: annotation}, nil
 			}})
 			_, err := node.NodePublishVolume(t.Context(), in)
 			require.Error(t, err)
@@ -130,13 +134,13 @@ func TestUnpublishResolvesIdentityWithoutVolumeContext(t *testing.T) {
 	downstream := &recordingNAS{}
 	annotation := annotationFixture(t, publishFixture())
 	state := t.TempDir()
-	node := NewNode(NodeOptions{ActorRoot: "/var/lib/ateom-gvisor/actors", NAS: downstream, StateDir: state, Mounter: mount.NewFakeMounter(nil), Lookup: func(_ context.Context, uid string) (ActorInfo, error) {
-		require.Equal(t, testUID, uid)
-		return ActorInfo{UID: uid, Annotation: annotation}, nil
+	node := NewNode(NodeOptions{ActorRoot: "/var/lib/ateom-gvisor/actors", NAS: downstream, StateDir: state, Mounter: mount.NewFakeMounter(nil), Lookup: func(_ context.Context, ref ActorReference) (ActorInfo, error) {
+		require.Equal(t, testUID, ref.UID)
+		return ActorInfo{UID: ref.UID, Name: "actor", Atespace: "storage-test", Annotation: annotation}, nil
 	}})
-	resolved, err := resolveMount(t.Context(), node.opts.Lookup, testID)
+	resolved, err := resolveMount(t.Context(), node.opts.Lookup, testID, actorMetadataFixture())
 	require.NoError(t, err)
-	_, err = node.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: testTarget, VolumeContext: map[string]string{PodUIDKey: testUID, BindingDigestKey: resolved.Digest}})
+	_, err = node.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: testTarget, VolumeContext: nodeContextFixture(resolved.Digest)})
 	require.NoError(t, err)
 	restarted := NewNode(NodeOptions{ActorRoot: DefaultActorRoot, StateDir: state, Mounter: mount.NewFakeMounter(nil), NAS: downstream})
 	_, err = restarted.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})
@@ -149,7 +153,7 @@ func TestUnpublishDoesNotNeedActorLookup(t *testing.T) {
 	downstream := &recordingNAS{}
 	state := t.TempDir()
 	require.NoError(t, (bindingStore{root: state}).put(bindingFixture()))
-	node := NewNode(NodeOptions{ActorRoot: "/var/lib/ateom-gvisor/actors", NAS: downstream, StateDir: state, Mounter: mount.NewFakeMounter(nil), Lookup: func(context.Context, string) (ActorInfo, error) {
+	node := NewNode(NodeOptions{ActorRoot: "/var/lib/ateom-gvisor/actors", NAS: downstream, StateDir: state, Mounter: mount.NewFakeMounter(nil), Lookup: func(context.Context, ActorReference) (ActorInfo, error) {
 		t.Fatal("unpublish must not call the Actor API")
 		return ActorInfo{}, status.Error(codes.Unavailable, "control plane unavailable")
 	}})

@@ -36,16 +36,16 @@ func readonlyNodeFixture(t *testing.T, real *csi.NodePublishVolumeRequest) (*Nod
 	node := NewNode(NodeOptions{
 		ActorRoot: DefaultActorRoot, StateDir: t.TempDir(), NAS: downstream,
 		Mounter: mount.NewFakeMounter(nil),
-		Lookup: func(context.Context, string) (ActorInfo, error) {
-			return ActorInfo{UID: testUID, Atespace: "storage-test", Annotation: annotation}, nil
+		Lookup: func(context.Context, ActorReference) (ActorInfo, error) {
+			return ActorInfo{UID: testUID, Atespace: "storage-test", Name: "actor", Annotation: annotation}, nil
 		},
 	})
-	resolved, err := resolveMount(t.Context(), node.opts.Lookup, testID)
+	resolved, err := resolveMount(t.Context(), node.opts.Lookup, testID, actorMetadataFixture())
 	require.NoError(t, err)
 	return node, downstream, &csi.NodePublishVolumeRequest{
 		VolumeId: testID, TargetPath: testTarget,
 		VolumeCapability: writablePublishFixture().VolumeCapability,
-		VolumeContext:    map[string]string{PodUIDKey: testUID, BindingDigestKey: resolved.Digest},
+		VolumeContext:    nodeContextFixture(resolved.Digest),
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/volumecontext"
 	"path/filepath"
 	"strings"
 
@@ -31,6 +32,7 @@ import (
 const BindingDigestKey = "csi.alibabacloud.com/substrate-binding-digest"
 
 type resolvedMount struct {
+	Actor      ActorInfo
 	ActorUID   string
 	VolumeName string
 	Kind       bindingKind
@@ -38,7 +40,7 @@ type resolvedMount struct {
 	Request    *csi.NodePublishVolumeRequest
 }
 
-func resolveMount(ctx context.Context, lookup ActorLookup, id string) (resolvedMount, error) {
+func resolveMount(ctx context.Context, lookup ActorLookup, id string, attributes map[string]string) (resolvedMount, error) {
 	parts := volumeIdentity.FindStringSubmatch(id)
 	if len(parts) != 3 {
 		return resolvedMount{}, status.Error(codes.InvalidArgument, "expected a Substrate actor volume identity")
@@ -46,14 +48,18 @@ func resolveMount(ctx context.Context, lookup ActorLookup, id string) (resolvedM
 	if lookup == nil {
 		return resolvedMount{}, status.Error(codes.FailedPrecondition, "actor lookup must be configured")
 	}
-	actor, err := lookup(ctx, parts[1])
+	ref := ActorReference{UID: parts[1], Name: attributes[volumecontext.ActorNameKey], Atespace: attributes[volumecontext.ActorNamespaceKey]}
+	if attributes[volumecontext.ActorUIDKey] != ref.UID || ref.Name == "" || ref.Atespace == "" {
+		return resolvedMount{}, status.Error(codes.InvalidArgument, "actor UID, name and namespace must identify the volume owner")
+	}
+	actor, err := lookup(ctx, ref)
 	if err != nil {
 		return resolvedMount{}, err
 	}
 	if actor.UID != parts[1] {
 		return resolvedMount{}, status.Error(codes.PermissionDenied, "actor lookup returned a different identity")
 	}
-	resolved := resolvedMount{ActorUID: parts[1], VolumeName: parts[2]}
+	resolved := resolvedMount{Actor: actor, ActorUID: parts[1], VolumeName: parts[2]}
 	if actor.Golden {
 		if actor.Atespace != "ate-golden" || actor.TemplateUID == "" || actor.Name != actor.TemplateUID {
 			return resolvedMount{}, status.Error(codes.FailedPrecondition, "golden actor association is invalid")
@@ -102,6 +108,9 @@ func resolveMount(ctx context.Context, lookup ActorLookup, id string) (resolvedM
 		if (strings.EqualFold(key, "sandboxId") || key == PodUIDKey) && value != "" && value != actor.UID {
 			return resolvedMount{}, status.Error(codes.PermissionDenied, "publish request carries a different actor identity")
 		}
+	}
+	if err := validateActorMetadata(req.VolumeContext, actor); err != nil {
+		return resolvedMount{}, err
 	}
 	canonical, err := proto.MarshalOptions{Deterministic: true}.Marshal(req)
 	if err != nil {

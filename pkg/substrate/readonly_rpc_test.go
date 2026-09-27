@@ -59,7 +59,7 @@ func TestReadonlyPublishLifecycleThroughGRPC(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, conn.Close()) })
 	created, err := csi.NewControllerClient(conn).CreateVolume(ctx, &csi.CreateVolumeRequest{
-		Name: testID, VolumeCapabilities: []*csi.VolumeCapability{in.VolumeCapability},
+		Name: testID, Parameters: actorMetadataFixture(), VolumeCapabilities: []*csi.VolumeCapability{in.VolumeCapability},
 	})
 	require.NoError(t, err)
 	in.VolumeContext = created.Volume.VolumeContext

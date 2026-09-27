@@ -16,6 +16,7 @@ package substrate
 import (
 	"context"
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/volumecontext"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -37,11 +38,18 @@ func (c *Controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 	if capacity < 0 || limit < 0 || (limit > 0 && capacity > limit) {
 		return nil, status.Error(codes.InvalidArgument, "invalid capacity range")
 	}
-	resolved, err := resolveMount(ctx, c.Lookup, req.Name)
+	resolved, err := resolveMount(ctx, c.Lookup, req.Name, req.Parameters)
 	if err != nil {
 		return nil, err
 	}
-	return &csi.CreateVolumeResponse{Volume: &csi.Volume{VolumeId: req.Name, CapacityBytes: capacity, VolumeContext: map[string]string{SubstrateModeKey: "true", BindingDigestKey: resolved.Digest}}}, nil
+	if err := validateActorMetadata(req.Parameters, resolved.Actor); err != nil {
+		return nil, err
+	}
+	attributes := map[string]string{SubstrateModeKey: "true", BindingDigestKey: resolved.Digest}
+	if volumecontext.HasActorIdentity(req.Parameters) {
+		setActorMetadata(attributes, resolved.Actor)
+	}
+	return &csi.CreateVolumeResponse{Volume: &csi.Volume{VolumeId: req.Name, CapacityBytes: capacity, VolumeContext: attributes}}, nil
 }
 
 func (*Controller) DeleteVolume(_ context.Context, req *csi.DeleteVolumeRequest) (*csi.DeleteVolumeResponse, error) {

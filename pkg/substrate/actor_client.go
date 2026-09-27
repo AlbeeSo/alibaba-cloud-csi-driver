@@ -22,14 +22,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/substrate/internal/actorpb"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/substrate/internal/ateapipb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 )
-
-//go:generate protoc --go_out=. --go_opt=paths=source_relative internal/actorpb/actor.proto
 
 type ActorClientOptions struct {
 	Endpoint   string
@@ -38,7 +36,16 @@ type ActorClientOptions struct {
 	ServerName string
 }
 
-type ActorClient struct{ conn *grpc.ClientConn }
+type ActorClient struct {
+	conn    *grpc.ClientConn
+	control ateapipb.ControlClient
+}
+
+type ActorReference struct {
+	UID      string
+	Name     string
+	Atespace string
+}
 
 type ActorInfo struct {
 	UID         string
@@ -51,7 +58,7 @@ type ActorInfo struct {
 
 func NewActorClient(opts ActorClientOptions) (*ActorClient, error) {
 	if opts.Endpoint == "" || opts.CAFile == "" || opts.TokenFile == "" {
-		return nil, fmt.Errorf("Substrate endpoint, CA and projected token file are required")
+		return nil, fmt.Errorf("substrate endpoint, CA and projected token file are required")
 	}
 	ca, err := os.ReadFile(opts.CAFile)
 	if err != nil {
@@ -59,7 +66,7 @@ func NewActorClient(opts ActorClientOptions) (*ActorClient, error) {
 	}
 	roots := x509.NewCertPool()
 	if !roots.AppendCertsFromPEM(ca) {
-		return nil, fmt.Errorf("Substrate CA contains no certificates")
+		return nil, fmt.Errorf("substrate CA contains no certificates")
 	}
 	conn, err := grpc.NewClient(opts.Endpoint,
 		grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, ServerName: opts.ServerName})),
@@ -68,38 +75,40 @@ func NewActorClient(opts ActorClientOptions) (*ActorClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create Substrate connection: %w", err)
 	}
-	return &ActorClient{conn: conn}, nil
+	return &ActorClient{conn: conn, control: ateapipb.NewControlClient(conn)}, nil
 }
 
-func (c *ActorClient) Lookup(ctx context.Context, uid string) (ActorInfo, error) {
+func (c *ActorClient) Lookup(ctx context.Context, ref ActorReference) (ActorInfo, error) {
+	if ref.UID == "" || ref.Name == "" || ref.Atespace == "" {
+		return ActorInfo{}, status.Error(codes.InvalidArgument, "actor UID, name and namespace are required")
+	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	response := new(actorpb.Actor)
-	err := c.conn.Invoke(ctx, "/ateapi.Control/GetActorByUID", &actorpb.GetActorByUIDRequest{ActorUid: uid}, response)
+	response, err := c.control.GetActor(ctx, &ateapipb.GetActorRequest{Actor: &ateapipb.ObjectRef{Atespace: ref.Atespace, Name: ref.Name}})
 	if err != nil {
 		return ActorInfo{}, err
 	}
-	if response.GetMetadata().GetUid() != uid {
+	if response.GetMetadata().GetUid() != ref.UID {
 		return ActorInfo{}, status.Error(codes.PermissionDenied, "actor lookup returned a different UID")
 	}
 	meta := response.GetMetadata()
-	if meta.GetAtespace() == "" || meta.GetName() == "" {
-		return ActorInfo{}, status.Error(codes.FailedPrecondition, "actor metadata lacks namespace or name")
+	if meta.GetAtespace() != ref.Atespace || meta.GetName() != ref.Name {
+		return ActorInfo{}, status.Error(codes.PermissionDenied, "actor lookup returned a different reference")
 	}
-	info := ActorInfo{UID: uid, Atespace: meta.Atespace, Name: meta.Name, Annotation: meta.GetAnnotations()[PublishRequestsAnnotation]}
+	info := ActorInfo{UID: ref.UID, Atespace: meta.Atespace, Name: meta.Name, Annotation: meta.GetAnnotations()[PublishRequestsAnnotation]}
 	if info.Atespace != "ate-golden" {
 		return info, nil
 	}
-	ref := response.GetActorTemplate()
-	if ref.GetAtespace() == "" || ref.GetName() == "" {
+	templateRef := response.GetActorTemplate()
+	if templateRef.GetAtespace() == "" || templateRef.GetName() == "" {
 		return ActorInfo{}, status.Error(codes.FailedPrecondition, "golden actor lacks a template reference")
 	}
-	template := new(actorpb.ActorTemplate)
-	if err := c.conn.Invoke(ctx, "/ateapi.Control/GetActorTemplate", &actorpb.GetActorTemplateRequest{ActorTemplate: ref}, template); err != nil {
+	template, err := c.control.GetActorTemplate(ctx, &ateapipb.GetActorTemplateRequest{ActorTemplate: templateRef})
+	if err != nil {
 		return ActorInfo{}, err
 	}
 	templateMeta := template.GetMetadata()
-	if templateMeta.GetAtespace() != ref.Atespace || templateMeta.GetName() != ref.Name || templateMeta.GetUid() == "" || templateMeta.GetUid() != info.Name {
+	if templateMeta.GetAtespace() != templateRef.Atespace || templateMeta.GetName() != templateRef.Name || templateMeta.GetUid() == "" || templateMeta.GetUid() != info.Name {
 		return ActorInfo{}, status.Error(codes.FailedPrecondition, "golden actor does not match its template UID")
 	}
 	info.Golden = true
