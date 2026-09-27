@@ -1,0 +1,27 @@
+// Copyright 2026 The Kubernetes Authors.
+// SPDX-License-Identifier: Apache-2.0
+syntax = "proto3";
+
+// Read-only wire projection of Substrate ateapipb/ateapi.proto at abe77101.
+// Field numbers match GetActorByUIDRequest, Actor and ResourceMetadata.
+// A distinct package avoids descriptor collisions with the full Substrate API.
+package alibabacloud.csi.substrate.actorlookup;
+option go_package = "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/substrate/internal/actorpb";
+
+message GetActorByUIDRequest { string actor_uid = 1; }
+message Actor {
+  ResourceMetadata metadata = 1;
+  ObjectRef actor_template = 4;
+}
+message ObjectRef {
+  string atespace = 1;
+  string name = 2;
+}
+message GetActorTemplateRequest { ObjectRef actor_template = 1; }
+message ActorTemplate { ResourceMetadata metadata = 1; }
+message ResourceMetadata {
+  string atespace = 1;
+  string name = 2;
+  string uid = 3;
+  map<string, string> annotations = 7;
+}
