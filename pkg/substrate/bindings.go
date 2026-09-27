@@ -97,9 +97,8 @@ func (s bindingStore) load(id, target string) (*binding, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
-	raw, err := io.ReadAll(io.LimitReader(f, 8193))
-	if err != nil {
+	raw, readErr := io.ReadAll(io.LimitReader(f, 8193))
+	if err := errors.Join(readErr, f.Close()); err != nil {
 		return nil, err
 	}
 	if len(raw) > 8192 {
@@ -118,7 +117,7 @@ func (s bindingStore) load(id, target string) (*binding, error) {
 	return &b, nil
 }
 
-func (s bindingStore) put(b binding) error {
+func (s bindingStore) put(b binding) (retErr error) {
 	if err := s.check(); err != nil {
 		return err
 	}
@@ -140,14 +139,16 @@ func (s bindingStore) put(b binding) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(f.Name())
+	defer func() {
+		if err := os.Remove(f.Name()); err != nil && !errors.Is(err, os.ErrNotExist) {
+			retErr = errors.Join(retErr, err)
+		}
+	}()
 	if err := json.NewEncoder(f).Encode(b); err != nil {
-		f.Close()
-		return err
+		return errors.Join(err, f.Close())
 	}
 	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
+		return errors.Join(err, f.Close())
 	}
 	if err := f.Close(); err != nil {
 		return err
@@ -185,6 +186,5 @@ func (s bindingStore) sync() error {
 	if err != nil {
 		return err
 	}
-	defer dir.Close()
-	return dir.Sync()
+	return errors.Join(dir.Sync(), dir.Close())
 }
