@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/volumecontext"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -50,7 +51,7 @@ type publishEntry struct {
 	Request    json.RawMessage `json:"request"`
 }
 
-type ActorLookup func(context.Context, string) (ActorInfo, error)
+type ActorLookup func(context.Context, ActorReference) (ActorInfo, error)
 
 type NodeOptions struct {
 	NodeID    string
@@ -87,20 +88,28 @@ func (n *Node) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolume
 	if err != nil {
 		return nil, err
 	}
-	if req.GetVolumeContext()[PodUIDKey] != uid {
+	if volumecontext.ActorUID(req.GetVolumeContext()) != uid {
 		return nil, status.Error(codes.InvalidArgument, "actor UID must match the volume identity")
+	}
+	if req.GetVolumeContext()[PodUIDKey] == "" {
+		return nil, status.Error(codes.InvalidArgument, "worker Pod UID is required")
 	}
 	if !n.acquire(req.TargetPath) {
 		return nil, status.Error(codes.Aborted, "target operation already in progress")
 	}
 	defer n.release(req.TargetPath)
-	resolved, err := resolveMount(ctx, n.opts.Lookup, req.VolumeId)
+	resolved, err := resolveMount(ctx, n.opts.Lookup, req.VolumeId, req.VolumeContext)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateActorMetadata(req.VolumeContext, resolved.Actor); err != nil {
 		return nil, err
 	}
 	if req.VolumeContext[BindingDigestKey] != resolved.Digest {
 		return nil, status.Error(codes.FailedPrecondition, "publish request differs from the controller binding")
 	}
+	// req describes the virtual bridge volume; resolved.Request owns the backend configuration.
+	// Only read-only restrictions affect backend access; do not merge virtual capabilities.
 	boundReadOnly := nasReadOnly(resolved.Request)
 	readOnly := boundReadOnly || requestReadOnly(req)
 	if readOnly && !boundReadOnly {
@@ -149,7 +158,18 @@ func (n *Node) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolume
 	real := resolved.Request
 	real.TargetPath = req.TargetPath
 	real.VolumeContext[SubstrateModeKey] = "true"
-	real.VolumeContext[PodUIDKey] = uid
+	if volumecontext.HasActorIdentity(req.VolumeContext) {
+		setActorMetadata(real.VolumeContext, resolved.Actor)
+		for _, key := range []string{volumecontext.PodUIDKey, volumecontext.PodNameKey, volumecontext.PodNamespaceKey} {
+			if value := req.VolumeContext[key]; value != "" {
+				real.VolumeContext[key] = value
+			} else {
+				delete(real.VolumeContext, key)
+			}
+		}
+	} else {
+		real.VolumeContext[PodUIDKey] = uid
+	}
 	return n.opts.NAS.NodePublishVolume(ctx, real)
 }
 

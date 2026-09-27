@@ -83,13 +83,15 @@ func TestGoldenReadonlyPlaceholderHonorsCallerAndRejectsModeChange(t *testing.T)
 	require.NoError(t, err)
 	target := filepath.Join(root, testUID, "volumes", "data")
 	mounter := mount.NewFakeMounter(nil)
-	lookup := func(context.Context, string) (ActorInfo, error) {
+	lookup := func(context.Context, ActorReference) (ActorInfo, error) {
 		return ActorInfo{UID: testUID, Atespace: "ate-golden", Name: "template-uid", TemplateUID: "template-uid", Golden: true}, nil
 	}
 	node := NewNode(NodeOptions{ActorRoot: root, StateDir: t.TempDir(), Lookup: lookup, Mounter: mounter})
-	resolved, err := resolveMount(t.Context(), lookup, testID)
+	attributes := goldenMetadataFixture()
+	resolved, err := resolveMount(t.Context(), lookup, testID, attributes)
 	require.NoError(t, err)
-	in := &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: target, Readonly: true, VolumeContext: map[string]string{PodUIDKey: testUID, BindingDigestKey: resolved.Digest}}
+	attributes[PodUIDKey], attributes[BindingDigestKey] = "worker-uid", resolved.Digest
+	in := &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: target, Readonly: true, VolumeContext: attributes}
 	_, err = node.NodePublishVolume(t.Context(), in)
 	require.NoError(t, err)
 	require.Len(t, mounter.MountPoints, 1)

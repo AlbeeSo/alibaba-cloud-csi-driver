@@ -24,10 +24,10 @@ import (
 
 func TestLogicalVolumeLifecycle(t *testing.T) {
 	annotation := annotationFixture(t, publishFixture())
-	controller := &Controller{Lookup: func(context.Context, string) (ActorInfo, error) {
+	controller := &Controller{Lookup: func(context.Context, ActorReference) (ActorInfo, error) {
 		return ActorInfo{UID: testUID, Atespace: "storage-test", Name: "actor", Annotation: annotation}, nil
 	}}
-	req := &csi.CreateVolumeRequest{Name: testID, VolumeCapabilities: []*csi.VolumeCapability{publishFixture().VolumeCapability}, CapacityRange: &csi.CapacityRange{RequiredBytes: 1024}}
+	req := &csi.CreateVolumeRequest{Name: testID, Parameters: actorMetadataFixture(), VolumeCapabilities: []*csi.VolumeCapability{publishFixture().VolumeCapability}, CapacityRange: &csi.CapacityRange{RequiredBytes: 1024}}
 	created, err := controller.CreateVolume(t.Context(), req)
 	require.NoError(t, err)
 	require.Equal(t, testID, created.Volume.VolumeId)
@@ -41,10 +41,10 @@ func TestLogicalVolumeLifecycle(t *testing.T) {
 }
 
 func TestControllerRejectsMissingBusinessAnnotation(t *testing.T) {
-	controller := &Controller{Lookup: func(context.Context, string) (ActorInfo, error) {
+	controller := &Controller{Lookup: func(context.Context, ActorReference) (ActorInfo, error) {
 		return ActorInfo{UID: testUID, Atespace: "storage-test", Name: "actor"}, nil
 	}}
-	_, err := controller.CreateVolume(t.Context(), &csi.CreateVolumeRequest{Name: testID, VolumeCapabilities: []*csi.VolumeCapability{publishFixture().VolumeCapability}})
+	_, err := controller.CreateVolume(t.Context(), &csi.CreateVolumeRequest{Name: testID, Parameters: actorMetadataFixture(), VolumeCapabilities: []*csi.VolumeCapability{publishFixture().VolumeCapability}})
 	require.Equal(t, codes.FailedPrecondition, status.Code(err))
 }
 
