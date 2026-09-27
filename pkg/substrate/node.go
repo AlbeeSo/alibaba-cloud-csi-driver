@@ -18,8 +18,10 @@ package substrate
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -99,6 +101,14 @@ func (n *Node) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolume
 	if req.VolumeContext[BindingDigestKey] != resolved.Digest {
 		return nil, status.Error(codes.FailedPrecondition, "publish request differs from the controller binding")
 	}
+	boundReadOnly := nasReadOnly(resolved.Request)
+	readOnly := boundReadOnly || requestReadOnly(req)
+	if readOnly && !boundReadOnly {
+		resolved.Digest = fmt.Sprintf("%x", sha256.Sum256([]byte(resolved.Digest+"\x00readonly")))
+	}
+	if readOnly && resolved.Request != nil {
+		enforceReadOnly(resolved.Request)
+	}
 	store := bindingStore{root: n.opts.StateDir}
 	if n.opts.Mounter == nil {
 		return nil, status.Error(codes.FailedPrecondition, "mount inspector is required")
@@ -113,6 +123,8 @@ func (n *Node) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolume
 		}
 	} else if err != nil {
 		return nil, status.Errorf(codes.FailedPrecondition, "cannot read binding: %v", err)
+	} else if err := n.checkMountedReadOnly(req.TargetPath, readOnly); err != nil {
+		return nil, err
 	}
 	b := binding{Version: 1, LogicalID: req.VolumeId, Target: req.TargetPath, ActorUID: uid, VolumeName: name, Kind: resolved.Kind, Digest: resolved.Digest}
 	if resolved.Kind == bindingNAS {
@@ -126,7 +138,7 @@ func (n *Node) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolume
 		return nil, status.Errorf(codes.Internal, "persist mount binding: %v", err)
 	}
 	if resolved.Kind == bindingGolden {
-		if err := n.publishPlaceholder(store, b); err != nil {
+		if err := n.publishPlaceholder(store, b, readOnly); err != nil {
 			return nil, status.Errorf(codes.Internal, "publish golden placeholder: %v", err)
 		}
 		return &csi.NodePublishVolumeResponse{}, nil

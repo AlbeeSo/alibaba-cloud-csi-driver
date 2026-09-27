@@ -39,7 +39,7 @@ func (n *Node) mounted(target string) (bool, error) {
 	return false, nil
 }
 
-func (n *Node) publishPlaceholder(store bindingStore, b binding) error {
+func (n *Node) publishPlaceholder(store bindingStore, b binding, readOnly bool) error {
 	mounted, err := n.mounted(b.Target)
 	if err != nil || mounted {
 		return err
@@ -51,7 +51,11 @@ func (n *Node) publishPlaceholder(store bindingStore, b binding) error {
 	if err := os.MkdirAll(b.Target, 0755); err != nil {
 		return err
 	}
-	return n.opts.Mounter.Mount(source, b.Target, "", []string{"bind"})
+	options := []string{"bind"}
+	if readOnly {
+		options = append(options, "ro")
+	}
+	return n.opts.Mounter.Mount(source, b.Target, "", options)
 }
 
 func (n *Node) unpublishPlaceholder(store bindingStore, b binding) error {
