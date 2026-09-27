@@ -1,0 +1,147 @@
+{{- if .Values.enableSubstrate }}
+{{- include "substrate.validate" . }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alicloud-csi-substrate
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: alicloud-csi-substrate
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods", "persistentvolumes", "persistentvolumeclaims", "configmaps", "namespaces"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses", "csidrivers", "csinodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.alibabacloud.com"]
+    resources: ["containernetworkfilesystems"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: alicloud-csi-substrate
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: alicloud-csi-substrate
+subjects:
+  - kind: ServiceAccount
+    name: alicloud-csi-substrate
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: substrate.csi.alibabacloud.com
+spec:
+  attachRequired: false
+  podInfoOnMount: true
+{{- if .Values.substrate.storageClass.create }}
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.substrate.storageClass.name }}
+provisioner: substrate.csi.alibabacloud.com
+reclaimPolicy: Retain
+volumeBindingMode: Immediate
+{{- end }}
+{{- if .Values.controller.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: csi-substrate-controller
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app.kubernetes.io/name: csi-substrate-controller
+  ports:
+    - name: grpc-tls
+      port: 443
+      targetPort: 8443
+{{- if .Values.substrate.createDriverConfig }}
+---
+apiVersion: ate.dev/v1alpha1
+kind: CSIDriverConfig
+metadata:
+  name: substrate-csi-bridge
+spec:
+  driverName: substrate.csi.alibabacloud.com
+  controllerEndpoint: dns:///csi-substrate-controller.{{ .Release.Namespace }}.svc:443
+  nodeSocketOverride: unix://{{ clean .Values.deploy.kubeletRootDir }}/csi-plugins/substrate.csi.alibabacloud.com/csi.sock
+  tls:
+    enabled: true
+    usePodIdentity: true
+    serverName: csi-substrate-controller.{{ .Release.Namespace }}.svc
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: csi-substrate-controller-envoy
+  namespace: {{ .Release.Namespace }}
+data:
+  envoy.yaml: |
+    static_resources:
+      listeners:
+        - name: controller
+          address:
+            socket_address: {address: 0.0.0.0, port_value: 8443}
+          filter_chains:
+            - transport_socket:
+                name: envoy.transport_sockets.tls
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+                  require_client_certificate: true
+                  common_tls_context:
+                    alpn_protocols: [h2]
+                    tls_certificates:
+                      - certificate_chain: {filename: /run/serving/credential-bundle.pem}
+                        private_key: {filename: /run/serving/credential-bundle.pem}
+                        watched_directory: {path: /run/serving}
+                    validation_context:
+                      trusted_ca: {filename: /run/clients/trust-bundle.pem}
+                      watched_directory: {path: /run/clients}
+              filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: controller
+                    codec_type: AUTO
+                    route_config:
+                      name: controller
+                      virtual_hosts:
+                        - name: controller
+                          domains: ["*"]
+                          routes:
+                            - match: {prefix: /csi.v1.Controller/}
+                              route: {cluster: bridge, timeout: 0s}
+                            - match: {prefix: /csi.v1.Identity/}
+                              route: {cluster: bridge, timeout: 0s}
+                    http_filters:
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+      clusters:
+        - name: bridge
+          connect_timeout: 5s
+          type: STATIC
+          http2_protocol_options: {}
+          load_assignment:
+            cluster_name: bridge
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        pipe: {path: /csi/csi.sock}
+{{- end }}
+{{- end }}

@@ -1,0 +1,20 @@
+name: helm-substrate
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+      - uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112
+        with:
+          version: v3.19.0
+      - run: go test ./deploy/charts/alibaba-cloud-csi-driver -run TestSubstrate -count=1
+      - run: helm lint deploy/charts/alibaba-cloud-csi-driver --set enableSubstrate=true

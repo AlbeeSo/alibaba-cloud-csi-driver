@@ -1,0 +1,120 @@
+{{- if and .Values.enableSubstrate .Values.plugin.enabled }}
+{{- range $key, $pool := .Values.nodePools }}
+{{- if ne $pool nil }}
+{{- $nodePool := mergeOverwrite (deepCopy $.Values) $pool }}
+{{- if ne (clean $nodePool.deploy.kubeletRootDir) (clean $.Values.deploy.kubeletRootDir) }}
+{{- fail "Substrate node pools must use the global deploy.kubeletRootDir" }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ printf "%s-substrate" $nodePool.pluginname | trunc 63 | trimSuffix "-" }}
+  namespace: {{ $.Release.Namespace }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: csi-substrate-plugin
+      nodepool: {{ $key }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: csi-substrate-plugin
+        nodepool: {{ $key }}
+    spec:
+      serviceAccountName: alicloud-csi-substrate
+      hostNetwork: true
+      hostPID: true
+      hostIPC: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        kubernetes.io/os: linux
+      tolerations:
+        - operator: Exists
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              {{- toYaml $nodePool.nodeSelectorTerms | nindent 14 }}
+      {{- with $.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- range . }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
+      containers:
+        - name: bridge
+          image: {{ include "imageSpec" (list $nodePool "plugin") }}
+          args:
+            - --driver=substrate.csi.alibabacloud.com
+            - --endpoint=unix:///csi/csi.sock
+            - --run-controller-service=false
+            - --run-node-service=true
+            - --nodeid=$(KUBE_NODE_NAME)
+            - --substrate-actor-root={{ clean $.Values.substrate.actorRoot }}
+            - --substrate-state-dir=/csi/substrate-state
+            - --mount-proxy-sock={{ $.Values.substrate.mountProxySocket }}
+            {{- include "substrate.apiArgs" $ | nindent 12 }}
+          env:
+            - name: SERVICE_PORT
+              value: "11262"
+            - name: KUBE_NODE_NAME
+              valueFrom:
+                fieldRef: {fieldPath: spec.nodeName}
+            {{- include "networkEnv" $nodePool.deploy | nindent 12 }}
+            {{- include "kubeletDirEnv" $nodePool.deploy.kubeletRootDir | nindent 12 }}
+            {{- if $nodePool.deploy.regionID }}
+            - name: REGION_ID
+              value: {{ $nodePool.deploy.regionID | quote }}
+            {{- end }}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+          ports:
+            - {name: healthz, containerPort: 11262}
+          readinessProbe:
+            httpGet: {path: /healthz, port: healthz}
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - {name: csi, mountPath: /csi}
+            - {name: ateapi, mountPath: /run/ateapi, readOnly: true}
+            - name: actors
+              mountPath: {{ clean $.Values.substrate.actorRoot }}
+              mountPropagation: Bidirectional
+            - {name: cnfs, mountPath: /run/cnfs}
+            - name: nas-workspace
+              mountPath: {{ clean $nodePool.deploy.kubeletRootDir }}/csi-plugins/nasplugin.csi.alibabacloud.com/node
+              mountPropagation: Bidirectional
+        - name: registrar
+          image: {{ include "imageSpec" (list $nodePool "pluginRegistrar") }}
+          args:
+            - --csi-address=/csi/csi.sock
+            - --kubelet-registration-path={{ clean $nodePool.deploy.kubeletRootDir }}/csi-plugins/substrate.csi.alibabacloud.com/csi.sock
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+          volumeMounts:
+            - {name: csi, mountPath: /csi}
+            - {name: registration, mountPath: /registration}
+      volumes:
+        - name: csi
+          hostPath:
+            path: {{ clean $nodePool.deploy.kubeletRootDir }}/csi-plugins/substrate.csi.alibabacloud.com
+            type: DirectoryOrCreate
+        - name: registration
+          hostPath:
+            path: {{ clean $nodePool.deploy.kubeletRootDir }}/plugins_registry
+            type: Directory
+        - name: actors
+          hostPath:
+            path: {{ clean $.Values.substrate.actorRoot }}
+            type: DirectoryOrCreate
+        - name: cnfs
+          hostPath: {path: /run/cnfs, type: DirectoryOrCreate}
+        - name: nas-workspace
+          hostPath:
+            path: {{ clean $nodePool.deploy.kubeletRootDir }}/csi-plugins/nasplugin.csi.alibabacloud.com/node
+            type: DirectoryOrCreate
+        {{- include "substrate.apiVolume" $ | nindent 8 }}
+{{- end }}
+{{- end }}
+{{- end }}

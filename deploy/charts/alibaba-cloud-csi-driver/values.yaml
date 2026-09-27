@@ -1,3 +1,16 @@
+enableSubstrate: false
+
+substrate:
+  apiEndpoint: api.ate-system.svc:443
+  apiAudience: api.ate-system.svc
+  actorRoot: /var/lib/ateom-gvisor/actors
+  mountProxySocket: /run/cnfs/alinas-mounter.sock
+  createDriverConfig: true
+  storageClass:
+    create: true
+    name: ate-storage
+  envoyImage: envoyproxy/envoy:v1.39.0
+
 controller:
   enabled: true
   replicas: 2
