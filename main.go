@@ -49,6 +49,7 @@ import (
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/options"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/oss"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/pov"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/substrate"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/version"
 	"github.com/sirupsen/logrus"
@@ -60,6 +61,7 @@ import (
 	logsapi "k8s.io/component-base/logs/api/v1"
 	_ "k8s.io/component-base/logs/json/register"
 	"k8s.io/klog/v2"
+	mountutils "k8s.io/mount-utils"
 )
 
 const (
@@ -118,6 +120,12 @@ var (
 	// --customfuse-mount-proxy-sock: the same resolution for customfuse mounts.
 	mountProxySock           = flag.String("mount-proxy-sock", "", "socket path of mount proxy server for alinas/cpfs/oss mounts")
 	customfuseMountProxySock = flag.String("customfuse-mount-proxy-sock", "", "socket path of mount proxy server for customfuse mounts")
+	substrateEndpoint        = flag.String("substrate-api-endpoint", "", "Substrate control API TLS endpoint for the bridge driver")
+	substrateCA              = flag.String("substrate-api-ca-file", "", "CA bundle verifying the Substrate control API")
+	substrateToken           = flag.String("substrate-api-token-file", "/var/run/secrets/kubernetes.io/serviceaccount/token", "projected bearer token for the Substrate control API")
+	substrateServerName      = flag.String("substrate-api-server-name", "", "TLS server name override for the Substrate control API")
+	substrateActorRoot       = flag.String("substrate-actor-root", substrate.DefaultActorRoot, "host directory containing Substrate actor volumes")
+	substrateStateDir        = flag.String("substrate-state-dir", "/csi/substrate-state", "persistent node-local bridge binding and golden placeholder directory")
 )
 
 func setupFlags() {
@@ -239,7 +247,7 @@ func main() {
 	}
 
 	for i, driverName := range driverNames {
-		if !strings.Contains(driverName, TypePluginSuffix) && driverName != ExtenderAgent {
+		if !strings.Contains(driverName, TypePluginSuffix) && driverName != ExtenderAgent && driverName != substrate.DriverName {
 			driverNames[i] = joinCsiPluginSuffix(driverName)
 		}
 	}
@@ -288,6 +296,24 @@ func main() {
 
 			var driver *common.Servers
 			switch driverName {
+			case substrate.DriverName:
+				driver = &common.Servers{IdentityServer: &common.GenericIdentityServer{Name: substrate.DriverName}}
+				actors, err := substrate.NewActorClient(substrate.ActorClientOptions{Endpoint: *substrateEndpoint, CAFile: *substrateCA, TokenFile: *substrateToken, ServerName: *substrateServerName})
+				if err != nil {
+					klog.Fatalf("Initialize Substrate actor lookup: %v", err)
+				}
+				defer func() {
+					if err := actors.Close(); err != nil {
+						klog.ErrorS(err, "Close Substrate actor lookup")
+					}
+				}()
+				if serviceType&utils.Controller != 0 {
+					driver.ControllerServer = &substrate.Controller{Lookup: actors.Lookup}
+				}
+				if serviceType&utils.Node != 0 {
+					nasNode := nas.NewServers(meta, endpoint, utils.Node, csiCfg, resolvedNasMountProxySock).NodeServer
+					driver.NodeServer = substrate.NewNode(substrate.NodeOptions{NodeID: *nodeID, ActorRoot: *substrateActorRoot, Lookup: actors.Lookup, NAS: nasNode, StateDir: *substrateStateDir, Mounter: mountutils.NewWithoutSystemd("")})
+				}
 			case TypePluginNAS:
 				driver = nas.NewServers(meta, endpoint, serviceType, csiCfg, resolvedNasMountProxySock)
 			case TypePluginOSS:
