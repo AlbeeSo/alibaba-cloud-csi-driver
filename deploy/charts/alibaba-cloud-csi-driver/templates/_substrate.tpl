@@ -1,22 +1,46 @@
-{{- define "substrate.apiVolume" -}}
-- name: ateapi
+{{- define "substrate.drivers" -}}
+{{- .base -}}{{- if .enabled -}}{{- if .base }},{{ end -}}substrate.csi.alibabacloud.com{{- end -}}
+{{- end -}}
+
+{{- define "substrate.commonVolumes" -}}
+- name: substrate-identity
   projected:
     sources:
+      - podCertificate:
+          signerName: podidentity.podcert.ate.dev/identity
+          keyType: ECDSAP256
+          credentialBundlePath: credential-bundle.pem
       - clusterTrustBundle:
           signerName: servicedns.podcert.ate.dev/identity
           labelSelector:
-            matchLabels:
-              podcert.ate.dev/canarying: live
+            matchLabels: {podcert.ate.dev/canarying: live}
           path: trust-bundle.pem
+      - clusterTrustBundle:
+          signerName: podidentity.podcert.ate.dev/identity
+          labelSelector:
+            matchLabels: {podcert.ate.dev/canarying: live}
+          path: client-trust-bundle.pem
+- name: substrate-api-token
+  projected:
+    sources:
       - serviceAccountToken:
           audience: {{ required "substrate.apiAudience is required" .Values.substrate.apiAudience | quote }}
           expirationSeconds: 3600
           path: token
 {{- end -}}
 
+{{- define "substrate.commonMounts" -}}
+- name: substrate-identity
+  mountPath: /run/podidentity.podcert.ate.dev
+  readOnly: true
+- name: substrate-api-token
+  mountPath: /run/ateapi
+  readOnly: true
+{{- end -}}
+
 {{- define "substrate.apiArgs" -}}
 - --substrate-api-endpoint={{ required "substrate.apiEndpoint is required" .Values.substrate.apiEndpoint }}
-- --substrate-api-ca-file=/run/ateapi/trust-bundle.pem
+- --substrate-api-ca-file=/run/podidentity.podcert.ate.dev/trust-bundle.pem
 - --substrate-api-token-file=/run/ateapi/token
 {{- end -}}
 
