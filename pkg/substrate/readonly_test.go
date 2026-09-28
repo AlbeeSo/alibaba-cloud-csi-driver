@@ -19,6 +19,9 @@ import (
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	mount "k8s.io/mount-utils"
 )
 
@@ -47,43 +50,44 @@ func readonlyNodeFixture(t *testing.T, real *csi.NodePublishVolumeRequest) (*Nod
 	}
 }
 
-func TestPublishHonorsReadonlySourcesWithoutMergingOtherFields(t *testing.T) {
+func TestPublishPreservesInnerReadonlyConfiguration(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		mutate func(*csi.NodePublishVolumeRequest, *csi.NodePublishVolumeRequest)
-		wantRO bool
 	}{
-		{"writable", func(_, _ *csi.NodePublishVolumeRequest) {}, false},
-		{"caller boolean", func(in, _ *csi.NodePublishVolumeRequest) { in.Readonly = true }, true},
-		{"annotation boolean", func(_, real *csi.NodePublishVolumeRequest) { real.Readonly = true }, true},
-		{"caller single reader", func(in, _ *csi.NodePublishVolumeRequest) {
-			in.VolumeCapability.AccessMode.Mode = csi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY
-		}, true},
-		{"caller multi reader", func(in, _ *csi.NodePublishVolumeRequest) {
-			in.VolumeCapability.AccessMode.Mode = csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY
-		}, true},
-		{"annotation reader", func(_, real *csi.NodePublishVolumeRequest) {
+		{"writable", func(_, _ *csi.NodePublishVolumeRequest) {}},
+		{"annotation boolean", func(_, real *csi.NodePublishVolumeRequest) { real.Readonly = true }},
+		{"annotation single reader", func(_, real *csi.NodePublishVolumeRequest) {
+			real.VolumeCapability.AccessMode.Mode = csi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY
+		}},
+		{"annotation multi reader", func(_, real *csi.NodePublishVolumeRequest) {
 			real.VolumeCapability.AccessMode.Mode = csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY
-		}, true},
-		{"caller ro flags", func(in, _ *csi.NodePublishVolumeRequest) {
-			in.VolumeCapability.GetMount().MountFlags = []string{"vers=4", "rw,ro"}
-		}, true},
+		}},
 		{"annotation ro flags", func(_, real *csi.NodePublishVolumeRequest) {
 			real.VolumeCapability.GetMount().MountFlags = []string{"tls", "vers=3", "rw,ro"}
-		}, true},
+		}},
 		{"annotation options", func(_, real *csi.NodePublishVolumeRequest) {
 			real.VolumeContext["options"] = "tls,ram,rw,ro"
-		}, true},
+		}},
+		{"mount flags override readonly options", func(_, real *csi.NodePublishVolumeRequest) {
+			real.VolumeContext["options"] = "tls,ram,ro"
+			real.VolumeCapability.GetMount().MountFlags = []string{"tls", "ram", "rw"}
+		}},
+		{"explicit readonly does not normalize flags", func(_, real *csi.NodePublishVolumeRequest) {
+			real.Readonly = true
+			real.VolumeCapability.GetMount().MountFlags = []string{"tls,rw,vers=3", `context="value,rw,value"`, "rw"}
+			real.VolumeContext["options"] = "tls,ram,rw,nolock"
+		}},
 		{"quoted option is not ro", func(in, _ *csi.NodePublishVolumeRequest) {
 			in.VolumeCapability.GetMount().MountFlags = []string{`context="value,ro,value"`}
-		}, false},
+		}},
 		{"unrecognized context is not merged", func(in, _ *csi.NodePublishVolumeRequest) {
 			in.VolumeContext["options"] = "ro"
 			in.VolumeContext["ro"] = "true"
-		}, false},
+		}},
 		{"obsolete controller digest is ignored", func(in, _ *csi.NodePublishVolumeRequest) {
 			in.VolumeContext["csi.alibabacloud.com/substrate-binding-digest"] = "obsolete"
-		}, false},
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			real := writablePublishFixture()
@@ -97,28 +101,50 @@ func TestPublishHonorsReadonlySourcesWithoutMergingOtherFields(t *testing.T) {
 			}
 			request.VolumeContext["server"] = "must-not-replace-the-bound-server"
 			request.VolumeContext["path"] = "/must-not-replace-the-bound-path"
+			want := proto.Clone(real).(*csi.NodePublishVolumeRequest)
+			want.TargetPath = testTarget
+			want.VolumeContext[SubstrateModeKey] = "true"
+			for key, value := range nodeContextFixture() {
+				want.VolumeContext[key] = value
+			}
 			_, err := node.NodePublishVolume(t.Context(), request)
 			require.NoError(t, err)
-			require.Equal(t, tc.wantRO, downstream.published.Readonly)
-			require.Equal(t, real.VolumeId, downstream.published.VolumeId)
-			require.Equal(t, real.VolumeContext["server"], downstream.published.VolumeContext["server"])
-			require.Equal(t, real.VolumeContext["path"], downstream.published.VolumeContext["path"])
-			require.NotContains(t, downstream.published.VolumeCapability.GetMount().MountFlags, "vers=4")
-			require.NotContains(t, downstream.published.VolumeContext, "csi.alibabacloud.com/substrate-binding-digest")
+			require.True(t, proto.Equal(want, downstream.published), "forwarded request differs from the annotation")
 		})
 	}
 }
 
-func TestReadonlyPublishRemovesOnlyConflictingWritableOptions(t *testing.T) {
-	real := writablePublishFixture()
-	real.VolumeCapability.GetMount().MountFlags = []string{"tls,rw,vers=3", `context="value,rw,value"`, "rw"}
-	real.VolumeContext["options"] = "tls,ram,rw,nolock"
-	node, downstream, in := readonlyNodeFixture(t, real)
-	in.Readonly = true
-	_, err := node.NodePublishVolume(t.Context(), in)
-	require.NoError(t, err)
-	require.True(t, downstream.published.Readonly)
-	require.Equal(t, []string{"tls,vers=3", `context="value,rw,value"`}, downstream.published.VolumeCapability.GetMount().MountFlags)
-	require.Equal(t, "tls,ram,nolock", downstream.published.VolumeContext["options"])
-	require.Equal(t, []string{"tls,rw,vers=3", `context="value,rw,value"`, "rw"}, real.VolumeCapability.GetMount().MountFlags)
+func TestPublishRejectsOuterReadonlyBeforeLookupOrMount(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*csi.NodePublishVolumeRequest)
+	}{
+		{"boolean", func(in *csi.NodePublishVolumeRequest) { in.Readonly = true }},
+		{"single reader", func(in *csi.NodePublishVolumeRequest) {
+			in.VolumeCapability.AccessMode.Mode = csi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY
+		}},
+		{"multi reader", func(in *csi.NodePublishVolumeRequest) {
+			in.VolumeCapability.AccessMode.Mode = csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY
+		}},
+		{"mount flag", func(in *csi.NodePublishVolumeRequest) { in.VolumeCapability.GetMount().MountFlags = []string{"ro"} }},
+		{"combined mount flags", func(in *csi.NodePublishVolumeRequest) {
+			in.VolumeCapability.GetMount().MountFlags = []string{"tls, ro ,rw"}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			node, downstream, in := readonlyNodeFixture(t, writablePublishFixture())
+			lookup := node.opts.Lookup
+			calls := 0
+			node.opts.Lookup = func(ctx context.Context, ref ActorReference) (ActorInfo, error) {
+				calls++
+				return lookup(ctx, ref)
+			}
+			tc.mutate(in)
+			_, err := node.NodePublishVolume(t.Context(), in)
+			require.Equal(t, codes.FailedPrecondition, status.Code(err))
+			require.Zero(t, calls)
+			require.Nil(t, downstream.published)
+			require.NoFileExists(t, (bindingStore{root: node.opts.StateDir}).file(testID, testTarget))
+		})
+	}
 }

@@ -22,24 +22,16 @@ import (
 )
 
 func requestReadOnly(req *csi.NodePublishVolumeRequest) bool {
+	return explicitReadOnly(req) || flagsContain(req.GetVolumeCapability().GetMount().GetMountFlags(), "ro")
+}
+
+func explicitReadOnly(req *csi.NodePublishVolumeRequest) bool {
 	if req.GetReadonly() {
 		return true
 	}
 	switch req.GetVolumeCapability().GetAccessMode().GetMode() {
 	case csi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY, csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY:
 		return true
-	}
-	return flagsContain(req.GetVolumeCapability().GetMount().GetMountFlags(), "ro")
-}
-
-func nasReadOnly(req *csi.NodePublishVolumeRequest) bool {
-	if requestReadOnly(req) {
-		return true
-	}
-	for key, value := range req.GetVolumeContext() {
-		if strings.EqualFold(key, "options") && flagsContain([]string{value}, "ro") {
-			return true
-		}
 	}
 	return false
 }
@@ -65,47 +57,16 @@ func flagsContain(flags []string, wanted string) bool {
 	return false
 }
 
-func withoutWritableOption(value string) string {
-	options := splitMountFlags(value)
-	kept := make([]string, 0, len(options))
-	for _, option := range options {
-		if strings.TrimSpace(option) != "rw" {
-			kept = append(kept, option)
-		}
-	}
-	if len(kept) == len(options) {
-		return value
-	}
-	return strings.Join(kept, ",")
-}
-
-func enforceReadOnly(req *csi.NodePublishVolumeRequest) {
-	req.Readonly = true
-	mount := req.GetVolumeCapability().GetMount()
-	if len(mount.MountFlags) > 0 {
-		flags := make([]string, 0, len(mount.MountFlags))
-		for _, flag := range mount.MountFlags {
-			filtered := withoutWritableOption(flag)
-			if filtered != "" || flag == "" {
-				flags = append(flags, filtered)
-			}
-		}
-		mount.MountFlags = flags
-	}
-	for key, value := range req.VolumeContext {
-		if strings.EqualFold(key, "options") {
-			req.VolumeContext[key] = withoutWritableOption(value)
-		}
-	}
-}
-
 func (n *Node) checkMountedReadOnly(target string, readOnly bool) error {
+	if !readOnly {
+		return nil
+	}
 	entries, err := n.opts.Mounter.List()
 	if err != nil {
 		return status.Errorf(codes.Internal, "read mount table: %v", err)
 	}
 	for _, entry := range entries {
-		if entry.Path == target && flagsContain(entry.Opts, "ro") != readOnly {
+		if entry.Path == target && !flagsContain(entry.Opts, "ro") {
 			return status.Error(codes.AlreadyExists, "target access mode differs; unpublish before changing readonly")
 		}
 	}

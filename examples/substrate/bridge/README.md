@@ -132,15 +132,26 @@ mount options, provider and PublishContext. The bridge sets the host target and
 validated identity metadata. It does not merge arbitrary outer VolumeContext,
 fsType or mount flags into the actual request.
 
-The one access restriction that can be tightened is read-only:
+Read-only configuration belongs to the annotation request. Its `Readonly`,
+access mode, mount flags and `VolumeContext.options` are forwarded unchanged.
+The NAS driver applies their semantics and option precedence; the bridge does
+not normalize conflicting `rw` options or reinterpret options overridden by
+mount flags.
 
-```text
-effectiveReadOnly = annotationReadOnly || bridgeRequestReadOnly
-```
+Outer `Readonly=true`, either READER_ONLY access mode, or an outer mount flag
+containing `ro` is unsupported. The bridge returns `FailedPrecondition` before
+Actor lookup or downstream mounting rather than silently publishing writable
+storage. Outer VolumeContext is not interpreted as read-only configuration.
+Configure business read-only access in the annotation producer, not in the
+bridge StorageClass's mountOptions.
 
-Supported read-only booleans, reader-only access modes and `ro` flags are
-recognized; conflicting `rw` options are removed. An existing target cannot
-silently change access mode. Unpublish it before republishing in another mode.
+For a target with an existing binding, only an explicit inner `Readonly=true`
+or READER_ONLY mode requires an already-mounted filesystem to report `ro`.
+This catches writable remounts without a configuration change. The check does
+not infer requirements from inner options or mount flags, and does not require
+RW when no explicit read-only requirement exists. Untracked mounts still cannot
+be claimed. Golden placeholders are writable bind mounts; they do not inherit
+outer read-only constraints.
 
 ## Identity keys
 
@@ -168,8 +179,8 @@ lookup, annotation parsing, backend provisioning or driver-side state write.
 Missing or invalid annotations and unavailable Actor APIs are handled at publish,
 not at create.
 
-NodePublish reads the current Actor configuration and retains all identity,
-annotation, target, protocol and read-only checks. A legitimate annotation change
+NodePublish reads the current Actor configuration and retains identity,
+annotation, target and protocol checks, with the read-only boundaries above. A legitimate annotation change
 after create and before the first local binding takes effect on first publish.
 There is no cross-stage digest in VolumeContext and no comparison against a
 Controller snapshot of the configuration.
@@ -177,9 +188,9 @@ Controller snapshot of the configuration.
 The node-local binding still stores a SHA256 of the canonical annotation request
 and backend driver (or the verified Golden association). It prevents rebinding
 the same target to different storage; identical requests remain retryable.
-Worker placement does not affect this digest. A stricter caller read-only request
-adds a local binding restriction. Neither the digest algorithm nor the persisted
-binding format changes, and the digest is not a substitute for authorization.
+Worker placement does not affect this digest. No outer read-only salt is added;
+the canonical annotation digest and persisted binding format remain unchanged.
+The digest is not a substitute for authorization.
 The binding is written before calling NAS, so even a failed publish can leave it
 in place. Changing that target's configuration requires Unpublish first; deleting
 and recreating the logical volume is not required.
@@ -196,6 +207,10 @@ responses. A single Helm upgrade rolls both workloads concurrently, so a volume
 created during that window may fail its first publish until the Node restarts and
 the publish is retried. Keep node-local binding files intact throughout the
 upgrade.
+
+Targets previously tightened by outer read-only signals, such as manually adding
+`ro` to the bridge StorageClass, can have salted bindings. Unpublish them before
+republishing with the new behavior; do not bypass or rewrite those bindings.
 
 ## API client provenance
 
@@ -215,7 +230,8 @@ only by re-extraction, never by hand-editing.
 
 ## Validation and remaining system work
 
-Local tests cover multiple read-only sources, Actor/worker identity separation,
+Local tests cover inner read-only passthrough, early rejection of outer read-only
+signals, actual mount-mode checks, Actor/worker identity separation,
 current configuration on first publish, node-local binding conflicts, old binding
 cleanup, failed publish followed by restart,
 and generated-client TLS/token rotation. Helm tests cover disabled output,
@@ -232,7 +248,8 @@ It runs the render/socket-selection tests and Helm lint with Substrate disabled 
 does not require a cluster or deploy resources, and has no dedicated workflow.
 
 On an isolated privileged Linux container, set `BRIDGE_REAL_MOUNT_TEST=1` to run
-the real Golden placeholder bind/unbind and read-only mount tests. The optional
+the real Golden placeholder bind/unbind, writable access and read-only request
+rejection tests. The optional
 `TestActorLookupLive` performs only API reads when `SUBSTRATE_LIVE_*` is set.
 
 These do not prove the full system sequence:
@@ -268,7 +285,7 @@ live in the existing `pkg/mounter/utils/agentidentity` package rather than a new
 | `node.go` | Node publish/unpublish and target validation |
 | `bindings.go` | Durable backend identity for restart/deletion-safe cleanup |
 | `placeholder.go` | Golden-only isolated bind mounts |
-| `readonly.go` | Read-only restriction and idempotence checks |
+| `readonly.go` | Outer read-only rejection and explicit inner read-only mount checks |
 | `*_test.go` | Unit, restart, gRPC, Linux mount and optional live-read coverage |
 | Helm `plugin.yaml` / `controller.yaml` | Shared processes, registrar, TLS sidecar and mounts |
 | Helm `_substrate.tpl` / `substrate-support.yaml` | One identity/flag definition, shared Service/TLS configuration and per-driver configs |

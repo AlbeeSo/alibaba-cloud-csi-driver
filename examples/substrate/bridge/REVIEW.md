@@ -8,8 +8,9 @@
 | Uppercase error strings | Actor client errors now start with lowercase text |
 | Two-request responsibility | `node.go` states that the annotation owns backend configuration and that virtual capabilities must not be merged |
 | Create/publish responsibility | Create validates only the logical request, without Actor lookup or a cross-stage digest; first publish uses current configuration and retains all publish-side validation |
-| Local drift protection | Node-local binding digests, persisted format and read-only restrictions remain unchanged; changed configurations require Unpublish once a binding exists, including after a failed publish |
-| Read-only precedence | Documented as the union of supported read-only restrictions; covered by unit, gRPC, restart and real Linux bind-mount tests |
+| Local drift protection | Canonical annotation digests and persisted format remain unchanged; changed configurations require Unpublish once a binding exists, including after a failed publish; legacy salted bindings also require Unpublish, not an implicit rewrite |
+| Read-only passthrough | Inner Readonly, access mode, mount flags and options remain unchanged, including conflicting options whose precedence belongs to NAS; outer Readonly, READER_ONLY and ro mount flags fail before lookup or mounting; no union, salt or normalization |
+| Mounted read-only consistency | Existing targets are checked for actual ro only when the inner request explicitly sets Readonly or READER_ONLY; no inference from options/flags, no writable-mode requirement, and no claim of untracked mounts |
 | Deployment wiring | `enableSubstrate` extends the original plugin/provisioner processes, reuses their ServiceAccounts, and adds a shared Envoy/Service/ConfigMap, bridge registrar and persistent state; Actor API client initialization, token and server trust are Node-only, while Controller inbound mTLS remains |
 | Deployment regressions | Default-disabled render stays byte-identical; enabled render, custom paths, component switches and server-side dry-run are checked |
 | Check execution | `hack/check-substrate-helm.sh` provides an opt-in local check; no dedicated GitHub Actions workflow |
@@ -27,8 +28,9 @@
    remove that projection. Go, Kubernetes, gRPC and other dependency versions were
    left at the existing CSI baseline; incompatible dependency experiments were
    reverted.
-2. **Golden restore:** real placeholder mounting, read-only behavior, restart and
-   unpublish have been exercised. The complete checkpoint → remove placeholder →
+2. **Golden restore:** real placeholder mounting, restart and unpublish have been
+   exercised. Placeholders now stay writable and reject outer read-only requests.
+   The complete checkpoint → remove placeholder →
    publish real storage → restore Golden workflow is a separate runtime integration
    acceptance test. Known source-path/rebinding failures are not marked fixed.
 3. **External deployment services:** signers/trust bundles, Substrate API permission,
@@ -55,8 +57,9 @@
   installed over the running components.
 - A temporary privileged Linux test Pod with no hostPath mounts ran the actual NAS
   identity parser, Actor-owned metrics test, Golden bind/unbind gRPC test and
-  readonly bind-mount test. Uploaded test binaries were checksum-verified before
-  execution. The Pod was deleted afterwards.
+  readonly bind-mount test before removal of the outer read-only feature. That
+  historical read-only placeholder result is not a current capability. Uploaded
+  test binaries were checksum-verified before execution. The Pod was deleted afterwards.
 - Existing workload Deployments/DaemonSets, Actor VMs and NAS data were not replaced
   or rolled back during these checks.
 

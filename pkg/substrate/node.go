@@ -18,10 +18,8 @@ package substrate
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils/agentidentity"
 	"os"
 	"path/filepath"
@@ -94,6 +92,9 @@ func (n *Node) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolume
 	if req.GetVolumeContext()[PodUIDKey] == "" {
 		return nil, status.Error(codes.InvalidArgument, "worker Pod UID is required")
 	}
+	if requestReadOnly(req) {
+		return nil, status.Error(codes.FailedPrecondition, "outer readonly constraints are unsupported; configure readonly in the Actor publish request")
+	}
 	if !n.acquire(req.TargetPath) {
 		return nil, status.Error(codes.Aborted, "target operation already in progress")
 	}
@@ -106,15 +107,6 @@ func (n *Node) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolume
 		return nil, err
 	}
 	// req describes the virtual bridge volume; resolved.Request owns the backend configuration.
-	// Only read-only restrictions affect backend access; do not merge virtual capabilities.
-	boundReadOnly := nasReadOnly(resolved.Request)
-	readOnly := boundReadOnly || requestReadOnly(req)
-	if readOnly && !boundReadOnly {
-		resolved.Digest = fmt.Sprintf("%x", sha256.Sum256([]byte(resolved.Digest+"\x00readonly")))
-	}
-	if readOnly && resolved.Request != nil {
-		enforceReadOnly(resolved.Request)
-	}
 	store := bindingStore{root: n.opts.StateDir}
 	if n.opts.Mounter == nil {
 		return nil, status.Error(codes.FailedPrecondition, "mount inspector is required")
@@ -129,7 +121,7 @@ func (n *Node) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolume
 		}
 	} else if err != nil {
 		return nil, status.Errorf(codes.FailedPrecondition, "cannot read binding: %v", err)
-	} else if err := n.checkMountedReadOnly(req.TargetPath, readOnly); err != nil {
+	} else if err := n.checkMountedReadOnly(req.TargetPath, explicitReadOnly(resolved.Request)); err != nil {
 		return nil, err
 	}
 	b := binding{Version: 1, LogicalID: req.VolumeId, Target: req.TargetPath, ActorUID: uid, VolumeName: name, Kind: resolved.Kind, Digest: resolved.Digest}
@@ -144,7 +136,7 @@ func (n *Node) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolume
 		return nil, status.Errorf(codes.Internal, "persist mount binding: %v", err)
 	}
 	if resolved.Kind == bindingGolden {
-		if err := n.publishPlaceholder(store, b, readOnly); err != nil {
+		if err := n.publishPlaceholder(store, b); err != nil {
 			return nil, status.Errorf(codes.Internal, "publish golden placeholder: %v", err)
 		}
 		return &csi.NodePublishVolumeResponse{}, nil

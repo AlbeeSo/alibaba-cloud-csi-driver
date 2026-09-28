@@ -82,7 +82,7 @@ func TestGoldenPlaceholderRealMountThroughGRPC(t *testing.T) {
 	require.NoDirExists(t, target)
 }
 
-func TestGoldenReadonlyRealMount(t *testing.T) {
+func TestGoldenRealMountRejectsReadonlyAndRemainsWritable(t *testing.T) {
 	if os.Getenv("BRIDGE_REAL_MOUNT_TEST") != "1" {
 		t.Skip("set BRIDGE_REAL_MOUNT_TEST=1 inside an isolated privileged Linux container")
 	}
@@ -95,10 +95,13 @@ func TestGoldenReadonlyRealMount(t *testing.T) {
 	attributes[PodUIDKey] = "worker-uid"
 	node := NewNode(NodeOptions{ActorRoot: filepath.Join(root, "actors"), StateDir: filepath.Join(root, "state"), Lookup: lookup, Mounter: mount.New("")})
 	_, err := node.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: target, Readonly: true, VolumeContext: attributes})
+	require.Equal(t, codes.FailedPrecondition, status.Code(err))
+	require.NoDirExists(t, target)
+	_, err = node.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: target, VolumeContext: attributes})
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		_, cleanupErr := node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: target})
 		require.NoError(t, cleanupErr)
 	})
-	require.Error(t, os.WriteFile(filepath.Join(target, "must-not-write"), []byte("readonly"), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(target, "probe"), []byte("writable placeholder"), 0600))
 }
