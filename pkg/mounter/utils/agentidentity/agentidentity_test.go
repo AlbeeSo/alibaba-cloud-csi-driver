@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestGetTokenDir(t *testing.T) {
@@ -77,4 +78,33 @@ func TestGetTokenRefreshMargin(t *testing.T) {
 			assert.Equal(t, DefaultTokenRefreshMargin, GetTokenRefreshMargin(), "value %q", value)
 		}
 	})
+}
+
+func TestIsSubstrateVolumeContext(t *testing.T) {
+	assert.False(t, IsSubstrateVolumeContext(nil))
+	assert.False(t, IsSubstrateVolumeContext(map[string]string{}))
+	for _, value := range []string{"", "false", "TRUE", "1", " true "} {
+		assert.False(t, IsSubstrateVolumeContext(map[string]string{"csi.alibabacloud.com/substrate-mode": value}))
+	}
+	assert.True(t, IsSubstrateVolumeContext(map[string]string{"csi.alibabacloud.com/substrate-mode": "true"}))
+}
+
+func TestActorIdentityDoesNotFallBackToWorkerWhenIncomplete(t *testing.T) {
+	legacy := map[string]string{PodUIDKey: "legacy-actor", SubstrateModeKey: "true"}
+	require.Equal(t, "legacy-actor", ActorUID(legacy))
+	current := map[string]string{ActorUIDKey: "actor-id", ActorNameKey: "actor-name", ActorNamespaceKey: "actor-space", PodUIDKey: "worker-id", SubstrateModeKey: "true"}
+	require.Equal(t, "actor-id", ActorUID(current))
+	require.Equal(t, "actor-id", MountOwnerUID(current))
+	delete(current, ActorUIDKey)
+	require.Empty(t, ActorUID(current))
+	current[SubstrateModeKey] = "false"
+	require.Equal(t, "worker-id", MountOwnerUID(current))
+}
+
+func TestActorUIDCannotBecomePathOrMountOption(t *testing.T) {
+	for _, uid := range []string{"../other", "..", "/root", "actor,option=value", "actor\x00id"} {
+		values := map[string]string{ActorUIDKey: uid, ActorNameKey: "actor", ActorNamespaceKey: "space"}
+		require.Error(t, ValidateActorIdentity(values))
+	}
+	require.NoError(t, ValidateActorIdentity(map[string]string{ActorUIDKey: "actor-id", ActorNameKey: "actor", ActorNamespaceKey: "space"}))
 }

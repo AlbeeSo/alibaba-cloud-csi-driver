@@ -35,6 +35,7 @@ import (
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/ecs"
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/go-ping/ping"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils/agentidentity"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/options"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -90,9 +91,9 @@ const (
 	// GiB ...
 	GiB = 1024 * 1024 * 1024
 
-	PodNameKey      = "csi.storage.k8s.io/pod.name"
-	PodNamespaceKey = "csi.storage.k8s.io/pod.namespace"
-	PodUIDKey       = "csi.storage.k8s.io/pod.uid"
+	PodNameKey      = agentidentity.PodNameKey
+	PodNamespaceKey = agentidentity.PodNamespaceKey
+	PodUIDKey       = agentidentity.PodUIDKey
 )
 
 type ServiceType int

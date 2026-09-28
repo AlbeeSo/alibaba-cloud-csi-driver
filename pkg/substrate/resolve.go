@@ -18,7 +18,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/volumecontext"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils/agentidentity"
 	"path/filepath"
 	"strings"
 
@@ -48,8 +48,8 @@ func resolveMount(ctx context.Context, lookup ActorLookup, id string, attributes
 	if lookup == nil {
 		return resolvedMount{}, status.Error(codes.FailedPrecondition, "actor lookup must be configured")
 	}
-	ref := ActorReference{UID: parts[1], Name: attributes[volumecontext.ActorNameKey], Atespace: attributes[volumecontext.ActorNamespaceKey]}
-	if attributes[volumecontext.ActorUIDKey] != ref.UID || ref.Name == "" || ref.Atespace == "" {
+	ref := ActorReference{UID: parts[1], Name: attributes[agentidentity.ActorNameKey], Atespace: attributes[agentidentity.ActorNamespaceKey]}
+	if attributes[agentidentity.ActorUIDKey] != ref.UID || ref.Name == "" || ref.Atespace == "" {
 		return resolvedMount{}, status.Error(codes.InvalidArgument, "actor UID, name and namespace must identify the volume owner")
 	}
 	actor, err := lookup(ctx, ref)
@@ -120,4 +120,23 @@ func resolveMount(ctx context.Context, lookup ActorLookup, id string, attributes
 	resolved.Digest = fmt.Sprintf("%x", sha256.Sum256(append([]byte(NASDriverName+"\x00"), canonical...)))
 	resolved.Request = req
 	return resolved, nil
+}
+
+func validateActorMetadata(values map[string]string, actor ActorInfo) error {
+	if !agentidentity.HasActorIdentity(values) {
+		return nil
+	}
+	if err := agentidentity.ValidateActorIdentity(values); err != nil {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
+	if values[agentidentity.ActorUIDKey] != actor.UID || values[agentidentity.ActorNameKey] != actor.Name || values[agentidentity.ActorNamespaceKey] != actor.Atespace {
+		return status.Error(codes.PermissionDenied, "actor metadata does not match the volume owner")
+	}
+	return nil
+}
+
+func setActorMetadata(values map[string]string, actor ActorInfo) {
+	values[agentidentity.ActorUIDKey] = actor.UID
+	values[agentidentity.ActorNameKey] = actor.Name
+	values[agentidentity.ActorNamespaceKey] = actor.Atespace
 }
