@@ -22,7 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/volumecontext"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils/agentidentity"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -38,8 +38,8 @@ const (
 	DriverName                = "substrate.csi.alibabacloud.com"
 	NASDriverName             = "nasplugin.csi.alibabacloud.com"
 	PublishRequestsAnnotation = "ate.dev/csi-volume-publish-requests"
-	PodUIDKey                 = "csi.storage.k8s.io/pod.uid"
-	SubstrateModeKey          = "csi.alibabacloud.com/substrate-mode"
+	PodUIDKey                 = agentidentity.PodUIDKey
+	SubstrateModeKey          = agentidentity.SubstrateModeKey
 	DefaultActorRoot          = "/var/lib/ateom-gvisor/actors"
 )
 
@@ -88,7 +88,7 @@ func (n *Node) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolume
 	if err != nil {
 		return nil, err
 	}
-	if volumecontext.ActorUID(req.GetVolumeContext()) != uid {
+	if agentidentity.ActorUID(req.GetVolumeContext()) != uid {
 		return nil, status.Error(codes.InvalidArgument, "actor UID must match the volume identity")
 	}
 	if req.GetVolumeContext()[PodUIDKey] == "" {
@@ -158,9 +158,9 @@ func (n *Node) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolume
 	real := resolved.Request
 	real.TargetPath = req.TargetPath
 	real.VolumeContext[SubstrateModeKey] = "true"
-	if volumecontext.HasActorIdentity(req.VolumeContext) {
+	if agentidentity.HasActorIdentity(req.VolumeContext) {
 		setActorMetadata(real.VolumeContext, resolved.Actor)
-		for _, key := range []string{volumecontext.PodUIDKey, volumecontext.PodNameKey, volumecontext.PodNamespaceKey} {
+		for _, key := range []string{agentidentity.PodUIDKey, agentidentity.PodNameKey, agentidentity.PodNamespaceKey} {
 			if value := req.VolumeContext[key]; value != "" {
 				real.VolumeContext[key] = value
 			} else {

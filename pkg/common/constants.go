@@ -1,12 +1,14 @@
 package common
 
+import "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils/agentidentity"
+
 const (
 	CsiAlibabaCloudPrefix    = "csi.alibabacloud.com"
 	ECSInstanceIDTopologyKey = "alibabacloud.com/ecs-instance-id"
 	NodeTypeLabelKey         = "type"
 	VirtualNodeType          = "virtual-kubelet"
 
-	SubstrateModeKey = CsiAlibabaCloudPrefix + "/substrate-mode"
+	SubstrateModeKey = agentidentity.SubstrateModeKey
 )
 
 // constants of keys in volume parameters

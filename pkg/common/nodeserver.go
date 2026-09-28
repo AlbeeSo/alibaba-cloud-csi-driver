@@ -10,6 +10,7 @@ import (
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/metric"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils/agentidentity"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils"
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc/codes"
@@ -138,7 +139,7 @@ type NodeServerWithValidator struct {
 // (atelet) rather than kubelet. Substrate uses its own staging/target paths
 // outside /var/lib/kubelet, so path validation must be skipped.
 func IsSubstrateVolumeContext(ctx map[string]string) bool {
-	return ctx != nil && ctx[SubstrateModeKey] == "true"
+	return agentidentity.IsSubstrateVolumeContext(ctx)
 }
 
 func (s NodeServerWithValidator) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRequest) (*csi.NodeStageVolumeResponse, error) {
