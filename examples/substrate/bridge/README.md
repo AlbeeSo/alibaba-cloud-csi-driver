@@ -8,17 +8,25 @@ the Substrate caller must implement the contracts below.
 ## Helm deployment
 
 The chart defaults to `enableSubstrate: false`, preserving the existing
-deployment. With the option enabled it creates:
+deployment. With the option enabled it extends the existing workloads:
 
-- A dedicated ServiceAccount and read-oriented Kubernetes RBAC.
-- A Controller Deployment with the bridge and an Envoy mTLS sidecar.
-- A Controller TCP Service, accepting Controller/Identity RPCs only.
-- A bridge Node DaemonSet and registrar for each configured node pool.
+- The existing `csi-provisioner` and `csi-plugin` processes also serve the bridge
+  driver, on a separate socket. No additional Deployment, DaemonSet or bridge
+  process is created.
+- The existing `alicloud-csi-provisioner` and `alicloud-csi-node` ServiceAccounts
+  are retained, with a separate audience-bound token for the Substrate API.
+- One Envoy sidecar and one `csi-provisioner` Service expose the native NAS
+  Controller on port 443 and the bridge Controller on port 444. Both require
+  mTLS and accept Controller/Identity RPCs only.
+- One `csi-provisioner-substrate` ConfigMap defines both TLS listeners.
+- One additional bridge registrar is added to each existing Node Pod.
 - Actor hostPath mounts with bidirectional propagation and persistent node-local
   state under the bridge's CSI socket directory.
-- Projected Service DNS trust and an audience-bound API token; the Controller
-  serving certificate and client trust also use projected Substrate signers.
-- A `CSIDriver`, optional `CSIDriverConfig`, and optional `ate-storage` class.
+- One shared Pod identity/API token projection definition is used by both
+  workloads. Service DNS roots verify servers; Pod identity roots verify clients.
+- A bridge `CSIDriver`, per-driver `CSIDriverConfig` objects, and optional
+  `ate-storage` class. Native NAS configuration is emitted only when its
+  Controller is enabled; two driver names cannot share one `CSIDriverConfig`.
 
 ```sh
 helm upgrade --install csi deploy/charts/alibaba-cloud-csi-driver \
@@ -41,8 +49,8 @@ Key values:
 | `substrate.apiEndpoint` | `api.ate-system.svc:443` | Substrate API TLS endpoint |
 | `substrate.apiAudience` | `api.ate-system.svc` | Audience of the projected API token |
 | `substrate.actorRoot` | `/var/lib/ateom-gvisor/actors` | Must match atelet's host target layout |
-| `substrate.mountProxySocket` | `/run/cnfs/alinas-mounter.sock` | Existing NAS broker socket |
-| `substrate.createDriverConfig` | `true` | Create the Substrate CR when Controller is enabled |
+| `substrate.mountProxySocket` | `/run/cnfs/alinas-mounter.sock` | NAS-specific broker socket shared by native NAS and bridge |
+| `substrate.createDriverConfig` | `true` | Create the native NAS and bridge configs for enabled Controllers |
 | `substrate.storageClass.create` | `true` | Create the bridge reference class |
 | `substrate.storageClass.name` | `ate-storage` | Must match the annotation producer's template slots |
 | `substrate.envoyImage` | `envoyproxy/envoy:v1.39.0` | TLS frontend image |
@@ -50,11 +58,22 @@ Key values:
 `controller.enabled`, `controller.replicas`, `plugin.enabled`, `nodePools`,
 `deploy.kubeletRootDir`, and `imagePullSecrets` are also honored. Node pools must
 be non-overlapping and use the same kubelet root for the global driver config.
-The Node bridge uses health port 11262 to avoid the native plugin's 11260.
+The original process health ports are unchanged; there is no second bridge
+process competing for them. The NAS-only `--nas-mount-proxy-sock` override takes
+precedence over `--mount-proxy-sock` and the `AlinasMountProxy` default, without
+changing OSS's per-volume proxy selection.
 
-The state directory is mounted at `/csi/substrate-state`; using an ephemeral
-directory instead breaks cleanup after a Pod restart. Never run two Node
-registrars for this driver on the same node/socket during migration.
+The state directory is `/csi/substrate.csi.alibabacloud.com/substrate-state`
+inside the shared Node container. It still maps to the same node-local bridge
+socket directory used by the standalone layout. Using an ephemeral directory
+instead breaks cleanup after a Pod restart. Never run the old standalone Node
+driver and the shared Node driver on the same node/socket during migration.
+
+The shared Service selects `app: csi-provisioner`. `substrate-nas` points the NAS
+driver to `dns:///csi-provisioner.<namespace>.svc:443`; `substrate-csi-bridge`
+points the bridge to port 444. Each config retains its own Node socket. Disable
+`substrate.createDriverConfig` when these resources are managed externally,
+and do not leave competing configs for the same driver name.
 
 ### External prerequisites
 
@@ -64,8 +83,8 @@ These are not supplied by this CSI chart:
 2. `PodCertificate` and `ClusterTrustBundle` projection support, with the
    `servicedns.podcert.ate.dev/identity` and
    `podidentity.podcert.ate.dev/identity` signers and live trust bundles.
-3. Substrate authorization permitting the dedicated bridge ServiceAccount to
-   query the intended Actors and templates. Kubernetes RBAC alone does not
+3. Substrate authorization permitting the existing node/provisioner ServiceAccounts
+   to query the intended Actors and templates. Kubernetes RBAC alone does not
    configure Substrate's application authorization policy.
 4. An operational NAS mount broker, AgentIdentity credential service, NAS/AP
    connectivity and the required per-Actor permissions.
@@ -74,6 +93,17 @@ These are not supplied by this CSI chart:
 
 Do not turn off TLS verification to work around missing CA/signers. No CA
 private key, cloud key or business token is placed in this chart.
+
+The shared identity projection puts the client certificate at
+`/run/podidentity.podcert.ate.dev/credential-bundle.pem` and Service DNS server
+trust at `trust-bundle.pem` in that directory, matching the native Substrate
+credential-path contract. Envoy uses a separate `client-trust-bundle.pem` from
+the Pod identity signer for inbound client verification. The directory name
+does not determine which issuer a trust bundle must contain.
+
+The CNFS mount broker is a separate workload: these CSI Pod projections do not
+automatically configure its credentials. The broker must independently have the
+client identity and correct trust for its credential endpoint.
 
 ## Two requests, one authority
 
@@ -159,7 +189,15 @@ Local tests cover multiple read-only sources, Actor/worker identity separation,
 configuration drift, old binding cleanup, failed publish followed by restart,
 and generated-client TLS/token rotation. Helm tests cover disabled output,
 enabled resources, trust/token wiring, socket paths and component switches.
-The workflow `helm-substrate` installs Helm and runs those render checks in CI.
+After changing Substrate-related code or chart templates, run the local self-check
+with Go and Helm installed:
+
+```sh
+bash hack/check-substrate-helm.sh
+```
+
+It runs the render/socket-selection tests and Helm lint with Substrate disabled and enabled. It
+does not require a cluster or deploy resources, and has no dedicated workflow.
 
 On an isolated privileged Linux container, set `BRIDGE_REAL_MOUNT_TEST=1` to run
 the real Golden placeholder bind/unbind and read-only mount tests. The optional
@@ -181,17 +219,30 @@ leave source placeholders mounted merely to make restore pass.
 
 ## File responsibilities
 
+The direct `pkg/substrate` directory now contains seven implementation files and
+eleven test files. Its internal API snapshot has four unchanged upstream API
+files plus two provenance files; most added lines are generated API definitions,
+not additional runtime components. The small metadata checks were folded into
+`resolve.go`, and shared identity helpers now live in the existing
+`pkg/mounter/utils/agentidentity` package rather than a new `pkg/volumecontext`.
+
 | Files | Responsibility |
 |---|---|
 | `actor_client.go` | TLS/token connection and generated API calls |
 | `internal/ateapipb/*` | Unmodified API schema/client snapshot and provenance |
-| `identity.go`, `pkg/volumecontext/*` | Actor versus Pod identity contract |
-| `controller.go`, `resolve.go` | Logical lifecycle, annotation selection and digest |
-| `node.go`, `bindings.go` | Validated publishing and durable backend identity |
+| `controller.go` | Logical CSI Controller lifecycle |
+| `resolve.go` | Actor validation, annotation selection and digest |
+| `node.go` | Node publish/unpublish and target validation |
+| `bindings.go` | Durable backend identity for restart/deletion-safe cleanup |
 | `placeholder.go` | Golden-only isolated bind mounts |
 | `readonly.go` | Read-only restriction and idempotence checks |
 | `*_test.go` | Unit, restart, gRPC, Linux mount and optional live-read coverage |
-| Helm `substrate-*` / `_substrate.tpl` | Deployment, registrar, TLS, state and runtime configuration |
+| Helm `plugin.yaml` / `controller.yaml` | Shared processes, registrar, TLS sidecar and mounts |
+| Helm `_substrate.tpl` / `substrate-support.yaml` | One identity/flag definition, shared Service/TLS configuration and per-driver configs |
+
+`agentidentity.IsSubstrateVolumeContext` is the single parser for the Substrate
+mode key. The existing `common.IsSubstrateVolumeContext` delegates to it so
+existing callers keep their API. Only the exact string `true` enables the mode.
 
 Writing a binding before calling NAS, re-querying the Actor on publish, no-op
 logical Create/Attach/Stage, and Actor-independent Unpublish are deliberate
