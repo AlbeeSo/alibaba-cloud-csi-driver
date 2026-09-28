@@ -103,9 +103,6 @@ spec:
             - --run-node-service=false
             - --kube-api-qps=100
             - --kube-api-burst=200
-{{- if .Values.enableSubstrate }}
-            {{- include "substrate.apiArgs" . | nindent 12 }}
-{{- end }}
 {{- if .Values.deploy.featureGates }}
             - "--feature-gates={{ .Values.deploy.featureGates }}"
 {{- end -}}
@@ -179,7 +176,7 @@ spec:
               containerPort: 11270
           volumeMounts:
 {{- if .Values.enableSubstrate }}
-            {{- include "substrate.commonMounts" . | nindent 12 }}
+            {{- include "substrate.commonMounts" (dict "Values" .Values "node" false) | nindent 12 }}
             - name: substrate-provisioner-dir
               mountPath: /csi/substrate.csi.alibabacloud.com
 {{- end }}
@@ -876,7 +873,7 @@ spec:
 {{- end }}
       volumes:
 {{- if .Values.enableSubstrate }}
-        {{- include "substrate.commonVolumes" . | nindent 8 }}
+        {{- include "substrate.commonVolumes" (dict "Values" .Values "node" false) | nindent 8 }}
         - name: substrate-provisioner-dir
           emptyDir: {}
         - name: substrate-envoy-config

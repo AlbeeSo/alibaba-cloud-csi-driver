@@ -50,7 +50,7 @@ func TestGoldenPlaceholderRealMountThroughGRPC(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	server := grpc.NewServer()
-	csi.RegisterControllerServer(server, &Controller{Lookup: lookup})
+	csi.RegisterControllerServer(server, &Controller{})
 	csi.RegisterNodeServer(server, node)
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()
@@ -92,11 +92,9 @@ func TestGoldenReadonlyRealMount(t *testing.T) {
 		return ActorInfo{UID: testUID, Atespace: "ate-golden", Name: "template-uid", TemplateUID: "template-uid", Golden: true}, nil
 	}
 	attributes := goldenMetadataFixture()
-	resolved, err := resolveMount(t.Context(), lookup, testID, attributes)
-	require.NoError(t, err)
-	attributes[PodUIDKey], attributes[BindingDigestKey] = "worker-uid", resolved.Digest
+	attributes[PodUIDKey] = "worker-uid"
 	node := NewNode(NodeOptions{ActorRoot: filepath.Join(root, "actors"), StateDir: filepath.Join(root, "state"), Lookup: lookup, Mounter: mount.New("")})
-	_, err = node.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: target, Readonly: true, VolumeContext: attributes})
+	_, err := node.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: target, Readonly: true, VolumeContext: attributes})
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		_, cleanupErr := node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: target})

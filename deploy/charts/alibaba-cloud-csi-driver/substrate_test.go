@@ -111,9 +111,17 @@ func TestSubstrateEnabledWiresControllerNodeAndTrust(t *testing.T) {
 		t.Fatal("controller must keep NAS and add bridge")
 	}
 	args := strings.Join(driver.Args, " ")
-	for _, flag := range []string{"substrate.csi.alibabacloud.com", "--run-controller-service=true", "--run-node-service=false", "--substrate-api-endpoint=api.ate-system.svc:443", "--substrate-api-ca-file=/run/podidentity.podcert.ate.dev/trust-bundle.pem", "--substrate-api-token-file=/run/ateapi/token"} {
+	for _, flag := range []string{"substrate.csi.alibabacloud.com", "--run-controller-service=true", "--run-node-service=false"} {
 		if !strings.Contains(args, flag) {
 			t.Errorf("missing controller flag %s", flag)
+		}
+	}
+	if strings.Contains(args, "--substrate-api-") {
+		t.Fatal("controller must not require the Actor API")
+	}
+	for _, volume := range deployment.Template.Spec.Volumes {
+		if volume.Name == "substrate-api-token" {
+			t.Fatal("controller must not project an Actor API token")
 		}
 	}
 	container(t, deployment.Template.Spec, "substrate-controller-proxy")
@@ -125,6 +133,11 @@ func TestSubstrateEnabledWiresControllerNodeAndTrust(t *testing.T) {
 		t.Fatal(err)
 	}
 	node := container(t, daemon.Template.Spec, "csi-plugin")
+	for _, flag := range []string{"--substrate-api-endpoint=api.ate-system.svc:443", "--substrate-api-ca-file=/run/podidentity.podcert.ate.dev/trust-bundle.pem", "--substrate-api-token-file=/run/ateapi/token"} {
+		if !slices.Contains(node.Args, flag) {
+			t.Errorf("missing node flag %s", flag)
+		}
+	}
 	if !slices.Contains(driverNames(node), "nas") || !slices.Contains(driverNames(node), "substrate.csi.alibabacloud.com") {
 		t.Fatal("node must keep NAS and add bridge")
 	}

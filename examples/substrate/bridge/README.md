@@ -14,7 +14,8 @@ deployment. With the option enabled it extends the existing workloads:
   driver, on a separate socket. No additional Deployment, DaemonSet or bridge
   process is created.
 - The existing `alicloud-csi-provisioner` and `alicloud-csi-node` ServiceAccounts
-  are retained, with a separate audience-bound token for the Substrate API.
+  are retained. Only the Node workload receives an audience-bound token for the
+  Substrate API; the bridge Controller does not query Actors or templates.
 - One Envoy sidecar and one `csi-provisioner` Service expose the native NAS
   Controller on port 443 and the bridge Controller on port 444. Both require
   mTLS and accept Controller/Identity RPCs only.
@@ -22,8 +23,9 @@ deployment. With the option enabled it extends the existing workloads:
 - One additional bridge registrar is added to each existing Node Pod.
 - Actor hostPath mounts with bidirectional propagation and persistent node-local
   state under the bridge's CSI socket directory.
-- One shared Pod identity/API token projection definition is used by both
-  workloads. Service DNS roots verify servers; Pod identity roots verify clients.
+- Both workloads retain Pod identity projections for TLS. Only the Node workload
+  projects the Actor API token and Service DNS server trust; the Controller keeps
+  its certificate and Pod identity client trust for inbound mTLS.
 - A bridge `CSIDriver`, per-driver `CSIDriverConfig` objects, and optional
   `ate-storage` class. Native NAS configuration is emitted only when its
   Controller is enabled; two driver names cannot share one `CSIDriverConfig`.
@@ -46,8 +48,8 @@ Key values:
 | Value | Default | Meaning |
 |---|---|---|
 | `enableSubstrate` | `false` | Enable all bridge resources |
-| `substrate.apiEndpoint` | `api.ate-system.svc:443` | Substrate API TLS endpoint |
-| `substrate.apiAudience` | `api.ate-system.svc` | Audience of the projected API token |
+| `substrate.apiEndpoint` | `api.ate-system.svc:443` | Substrate API TLS endpoint, required only for Node |
+| `substrate.apiAudience` | `api.ate-system.svc` | Audience of the Node's projected API token |
 | `substrate.actorRoot` | `/var/lib/ateom-gvisor/actors` | Must match atelet's host target layout |
 | `substrate.mountProxySocket` | `/run/cnfs/alinas-mounter.sock` | NAS-specific broker socket shared by native NAS and bridge |
 | `substrate.createDriverConfig` | `true` | Create the native NAS and bridge configs for enabled Controllers |
@@ -83,8 +85,9 @@ These are not supplied by this CSI chart:
 2. `PodCertificate` and `ClusterTrustBundle` projection support, with the
    `servicedns.podcert.ate.dev/identity` and
    `podidentity.podcert.ate.dev/identity` signers and live trust bundles.
-3. Substrate authorization permitting the existing node/provisioner ServiceAccounts
-   to query the intended Actors and templates. Kubernetes RBAC alone does not
+3. Substrate authorization permitting `alicloud-csi-node` to query the intended
+   Actors and templates. The bridge Controller needs no such permission.
+   Kubernetes RBAC alone does not
    configure Substrate's application authorization policy.
 4. An operational NAS mount broker, AgentIdentity credential service, NAS/AP
    connectivity and the required per-Actor permissions.
@@ -94,10 +97,10 @@ These are not supplied by this CSI chart:
 Do not turn off TLS verification to work around missing CA/signers. No CA
 private key, cloud key or business token is placed in this chart.
 
-The shared identity projection puts the client certificate at
-`/run/podidentity.podcert.ate.dev/credential-bundle.pem` and Service DNS server
-trust at `trust-bundle.pem` in that directory, matching the native Substrate
-credential-path contract. Envoy uses a separate `client-trust-bundle.pem` from
+The shared identity projection puts the certificate at
+`/run/podidentity.podcert.ate.dev/credential-bundle.pem`. The Node additionally
+projects Service DNS server trust at `trust-bundle.pem` in that directory,
+matching the native Substrate credential-path contract. Envoy uses a separate `client-trust-bundle.pem` from
 the Pod identity signer for inbound client verification. The directory name
 does not determine which issuer a trust bundle must contain.
 
@@ -143,14 +146,13 @@ silently change access mode. Unpublish it before republishing in another mode.
 
 | Key | Meaning / producer |
 |---|---|
-| `csi.alibabacloud.com/actor.uid` | Actor UID, validated against logical volume ID and API response |
+| `csi.alibabacloud.com/actor.uid` | Actor UID, checked against logical volume ID; also checked against the API response at publish |
 | `csi.alibabacloud.com/actor.name` | Actor name used for `GetActor` |
 | `csi.alibabacloud.com/actor.namespace` | Actor atespace, not the Kubernetes namespace |
 | `csi.storage.k8s.io/pod.uid` | Current worker Pod UID |
 | `csi.storage.k8s.io/pod.name` | Current worker Pod name |
 | `csi.storage.k8s.io/pod.namespace` | Current worker Pod Kubernetes namespace |
 | `csi.alibabacloud.com/substrate-mode` | Selects Substrate path/credential handling |
-| `csi.alibabacloud.com/substrate-binding-digest` | Controller-generated configuration fingerprint |
 
 The Actor keys are sent as CreateVolume parameters and returned in
 VolumeContext. Worker PodInfo is injected on each Run/Restore from the current
@@ -158,17 +160,42 @@ assignment, not stored as immutable volume identity. On the storage side,
 `sandboxId`/credential `ResourceID` and EFC ownership remain Actor-scoped;
 restoring real PodInfo must not change the identity used to access data.
 
-The digest is a SHA256 of the canonical annotation request and backend driver
-(or the verified Golden association). It detects configuration changes between
-CreateVolume and NodePublish and prevents rebinding a target to different
-storage. It is not a signature, secret, credential, or substitute for API
-authorization. Worker placement does not affect it. A stricter caller read-only
-request adds a local binding restriction without changing the Controller value.
+CreateVolume validates only its request: logical volume name, filesystem
+capabilities, capacity range, absence of content source/secrets, and complete
+Actor parameters whose UID matches the volume name. It returns the logical ID,
+requested capacity, Substrate mode and Actor keys. It performs no Actor/template
+lookup, annotation parsing, backend provisioning or driver-side state write.
+Missing or invalid annotations and unavailable Actor APIs are handled at publish,
+not at create.
+
+NodePublish reads the current Actor configuration and retains all identity,
+annotation, target, protocol and read-only checks. A legitimate annotation change
+after create and before the first local binding takes effect on first publish.
+There is no cross-stage digest in VolumeContext and no comparison against a
+Controller snapshot of the configuration.
+
+The node-local binding still stores a SHA256 of the canonical annotation request
+and backend driver (or the verified Golden association). It prevents rebinding
+the same target to different storage; identical requests remain retryable.
+Worker placement does not affect this digest. A stricter caller read-only request
+adds a local binding restriction. Neither the digest algorithm nor the persisted
+binding format changes, and the digest is not a substitute for authorization.
+The binding is written before calling NAS, so even a failed publish can leave it
+in place. Changing that target's configuration requires Unpublish first; deleting
+and recreating the logical volume is not required.
 
 New publish calls need the Actor name and atespace. Older binding files remain
 readable and can still be unpublished without querying an Actor. Coordinate
 the Substrate API/atelet and bridge upgrade; do not expect the old UID-only
 caller to work with a name-based generated API client.
+
+When upgrading from the cross-stage-digest implementation, upgrade all Node
+instances before the Controller. New Nodes ignore an old digest left in persisted
+VolumeContext; old Nodes still require one and cannot consume new Controller
+responses. A single Helm upgrade rolls both workloads concurrently, so a volume
+created during that window may fail its first publish until the Node restarts and
+the publish is retried. Keep node-local binding files intact throughout the
+upgrade.
 
 ## API client provenance
 
@@ -189,9 +216,11 @@ only by re-extraction, never by hand-editing.
 ## Validation and remaining system work
 
 Local tests cover multiple read-only sources, Actor/worker identity separation,
-configuration drift, old binding cleanup, failed publish followed by restart,
+current configuration on first publish, node-local binding conflicts, old binding
+cleanup, failed publish followed by restart,
 and generated-client TLS/token rotation. Helm tests cover disabled output,
-enabled resources, trust/token wiring, socket paths and component switches.
+enabled resources, node-only API trust/token wiring, Controller-only operation
+without Actor API configuration, socket paths and component switches.
 After changing Substrate-related code or chart templates, run the local self-check
 with Go and Helm installed:
 
@@ -235,7 +264,7 @@ live in the existing `pkg/mounter/utils/agentidentity` package rather than a new
 | `actor_client.go` | TLS/token connection and generated API calls |
 | `internal/ateapipb/*` | Minimal generated API projection and provenance |
 | `controller.go` | Logical CSI Controller lifecycle |
-| `resolve.go` | Actor validation, annotation selection and digest |
+| `resolve.go` | Publish-time Actor validation, annotation selection and node-local digest |
 | `node.go` | Node publish/unpublish and target validation |
 | `bindings.go` | Durable backend identity for restart/deletion-safe cleanup |
 | `placeholder.go` | Golden-only isolated bind mounts |

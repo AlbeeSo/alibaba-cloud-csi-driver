@@ -177,7 +177,7 @@ spec:
               containerPort: 11260
           volumeMounts:
 {{- if $.Values.enableSubstrate }}
-            {{- include "substrate.commonMounts" $ | nindent 12 }}
+            {{- include "substrate.commonMounts" (dict "Values" $.Values "node" true) | nindent 12 }}
             - name: substrate-plugin-dir
               mountPath: /csi/substrate.csi.alibabacloud.com
             - name: substrate-actors
@@ -358,7 +358,7 @@ spec:
 {{- end }}
       volumes:
 {{- if $.Values.enableSubstrate }}
-        {{- include "substrate.commonVolumes" $ | nindent 8 }}
+        {{- include "substrate.commonVolumes" (dict "Values" $.Values "node" true) | nindent 8 }}
         - name: substrate-plugin-dir
           hostPath:
             path: {{ clean $nodePool.deploy.kubeletRootDir }}/csi-plugins/substrate.csi.alibabacloud.com

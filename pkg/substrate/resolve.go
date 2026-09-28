@@ -29,8 +29,6 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-const BindingDigestKey = "csi.alibabacloud.com/substrate-binding-digest"
-
 type resolvedMount struct {
 	Actor      ActorInfo
 	ActorUID   string

@@ -7,8 +7,10 @@
 | Unchecked binding file Close/Remove errors | Read/close errors are joined; temporary-file cleanup errors are propagated; directory Sync and Close are both checked |
 | Uppercase error strings | Actor client errors now start with lowercase text |
 | Two-request responsibility | `node.go` states that the annotation owns backend configuration and that virtual capabilities must not be merged |
+| Create/publish responsibility | Create validates only the logical request, without Actor lookup or a cross-stage digest; first publish uses current configuration and retains all publish-side validation |
+| Local drift protection | Node-local binding digests, persisted format and read-only restrictions remain unchanged; changed configurations require Unpublish once a binding exists, including after a failed publish |
 | Read-only precedence | Documented as the union of supported read-only restrictions; covered by unit, gRPC, restart and real Linux bind-mount tests |
-| Deployment wiring | `enableSubstrate` extends the original plugin/provisioner processes, reuses their ServiceAccounts, and adds a shared Envoy/Service/ConfigMap, bridge registrar, persistent state and trust/token projections |
+| Deployment wiring | `enableSubstrate` extends the original plugin/provisioner processes, reuses their ServiceAccounts, and adds a shared Envoy/Service/ConfigMap, bridge registrar and persistent state; Actor API client initialization, token and server trust are Node-only, while Controller inbound mTLS remains |
 | Deployment regressions | Default-disabled render stays byte-identical; enabled render, custom paths, component switches and server-side dry-run are checked |
 | Check execution | `hack/check-substrate-helm.sh` provides an opt-in local check; no dedicated GitHub Actions workflow |
 | Actor versus worker identity | Separate Actor keys; standard PodInfo carries the current worker, while credentials and EFC ownership remain Actor-scoped |

@@ -23,11 +23,11 @@ import (
 
 type Controller struct {
 	csi.UnimplementedControllerServer
-	Lookup ActorLookup
 }
 
-func (c *Controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
-	if !volumeIdentity.MatchString(req.GetName()) || req.GetVolumeContentSource() != nil || len(req.GetSecrets()) != 0 {
+func (*Controller) CreateVolume(_ context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
+	parts := volumeIdentity.FindStringSubmatch(req.GetName())
+	if len(parts) != 3 || req.GetVolumeContentSource() != nil || len(req.GetSecrets()) != 0 {
 		return nil, status.Error(codes.InvalidArgument, "expected an existing-volume reference without content source or secrets")
 	}
 	if !filesystemCapabilities(req.VolumeCapabilities) {
@@ -38,16 +38,15 @@ func (c *Controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 	if capacity < 0 || limit < 0 || (limit > 0 && capacity > limit) {
 		return nil, status.Error(codes.InvalidArgument, "invalid capacity range")
 	}
-	resolved, err := resolveMount(ctx, c.Lookup, req.Name, req.Parameters)
-	if err != nil {
-		return nil, err
+	if err := agentidentity.ValidateActorIdentity(req.Parameters); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	if err := validateActorMetadata(req.Parameters, resolved.Actor); err != nil {
-		return nil, err
+	if req.Parameters[agentidentity.ActorUIDKey] != parts[1] || req.Parameters[agentidentity.ActorNameKey] == "" || req.Parameters[agentidentity.ActorNamespaceKey] == "" {
+		return nil, status.Error(codes.InvalidArgument, "actor UID, name and namespace must identify the volume owner")
 	}
-	attributes := map[string]string{SubstrateModeKey: "true", BindingDigestKey: resolved.Digest}
-	if agentidentity.HasActorIdentity(req.Parameters) {
-		setActorMetadata(attributes, resolved.Actor)
+	attributes := map[string]string{SubstrateModeKey: "true"}
+	for _, key := range []string{agentidentity.ActorUIDKey, agentidentity.ActorNameKey, agentidentity.ActorNamespaceKey} {
+		attributes[key] = req.Parameters[key]
 	}
 	return &csi.CreateVolumeResponse{Volume: &csi.Volume{VolumeId: req.Name, CapacityBytes: capacity, VolumeContext: attributes}}, nil
 }

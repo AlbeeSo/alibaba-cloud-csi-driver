@@ -289,19 +289,19 @@ func main() {
 			switch driverName {
 			case substrate.DriverName:
 				driver = &common.Servers{IdentityServer: &common.GenericIdentityServer{Name: substrate.DriverName}}
-				actors, err := substrate.NewActorClient(substrate.ActorClientOptions{Endpoint: *substrateEndpoint, CAFile: *substrateCA, TokenFile: *substrateToken, ServerName: *substrateServerName})
-				if err != nil {
-					klog.Fatalf("Initialize Substrate actor lookup: %v", err)
-				}
-				defer func() {
-					if err := actors.Close(); err != nil {
-						klog.ErrorS(err, "Close Substrate actor lookup")
-					}
-				}()
 				if serviceType&utils.Controller != 0 {
-					driver.ControllerServer = &substrate.Controller{Lookup: actors.Lookup}
+					driver.ControllerServer = &substrate.Controller{}
 				}
 				if serviceType&utils.Node != 0 {
+					actors, err := substrate.NewActorClient(substrate.ActorClientOptions{Endpoint: *substrateEndpoint, CAFile: *substrateCA, TokenFile: *substrateToken, ServerName: *substrateServerName})
+					if err != nil {
+						klog.Fatalf("Initialize Substrate actor lookup: %v", err)
+					}
+					defer func() {
+						if err := actors.Close(); err != nil {
+							klog.ErrorS(err, "Close Substrate actor lookup")
+						}
+					}()
 					nasNode := nas.NewServers(meta, endpoint, utils.Node, csiCfg, resolvedNasMountProxySock).NodeServer
 					bridgeNodeID := *nodeID
 					if bridgeNodeID == "" {

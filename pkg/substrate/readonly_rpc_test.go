@@ -16,6 +16,7 @@ package substrate
 import (
 	"context"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -45,12 +46,18 @@ func TestReadonlyPublishLifecycleThroughGRPC(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	t.Cleanup(cancel)
 	node, _, in := readonlyNodeFixture(t, writablePublishFixture())
+	lookup := node.opts.Lookup
+	var lookups atomic.Int32
+	node.opts.Lookup = func(ctx context.Context, ref ActorReference) (ActorInfo, error) {
+		lookups.Add(1)
+		return lookup(ctx, ref)
+	}
 	nas := &readonlyObservedNAS{published: make(chan bool, 1)}
 	node.opts.NAS = nas
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	server := grpc.NewServer()
-	csi.RegisterControllerServer(server, &Controller{Lookup: node.opts.Lookup})
+	csi.RegisterControllerServer(server, &Controller{})
 	csi.RegisterNodeServer(server, node)
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()
@@ -63,11 +70,13 @@ func TestReadonlyPublishLifecycleThroughGRPC(t *testing.T) {
 	})
 	require.NoError(t, err)
 	in.VolumeContext = created.Volume.VolumeContext
+	require.Zero(t, lookups.Load())
 	in.VolumeContext[PodUIDKey] = testUID
 	in.Readonly = true
 	client := csi.NewNodeClient(conn)
 	_, err = client.NodePublishVolume(ctx, in)
 	require.NoError(t, err)
+	require.Equal(t, int32(1), lookups.Load())
 	require.Len(t, nas.published, 1)
 	require.True(t, <-nas.published)
 	in.Readonly = false

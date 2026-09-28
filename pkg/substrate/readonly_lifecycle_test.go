@@ -52,7 +52,9 @@ func TestReadonlyModeCannotChangeAcrossRetriesOrRestart(t *testing.T) {
 func TestLegacyReadonlyBindingRetainsItsDigest(t *testing.T) {
 	node, downstream, in := readonlyNodeFixture(t, publishFixture())
 	real := publishFixture()
-	legacy := binding{Version: 1, LogicalID: testID, Target: testTarget, ActorUID: testUID, VolumeName: "data", Kind: bindingNAS, Driver: NASDriverName, RealID: real.VolumeId, Digest: in.VolumeContext[BindingDigestKey]}
+	resolved, err := resolveMount(t.Context(), node.opts.Lookup, testID, in.VolumeContext)
+	require.NoError(t, err)
+	legacy := binding{Version: 1, LogicalID: testID, Target: testTarget, ActorUID: testUID, VolumeName: "data", Kind: bindingNAS, Driver: NASDriverName, RealID: real.VolumeId, Digest: resolved.Digest}
 	require.NoError(t, (bindingStore{root: node.opts.StateDir}).put(legacy))
 	for _, callerRO := range []bool{false, true} {
 		in.Readonly = callerRO
@@ -70,10 +72,12 @@ func TestReadonlyPublishDoesNotClaimExistingWritableMount(t *testing.T) {
 	real.VolumeContext["options"] = "ro"
 	real.VolumeCapability.GetMount().MountFlags = []string{"rw"}
 	node, downstream, in := readonlyNodeFixture(t, real)
-	legacy := binding{Version: 1, LogicalID: testID, Target: testTarget, ActorUID: testUID, VolumeName: "data", Kind: bindingNAS, Driver: NASDriverName, RealID: real.VolumeId, Digest: in.VolumeContext[BindingDigestKey]}
+	resolved, err := resolveMount(t.Context(), node.opts.Lookup, testID, in.VolumeContext)
+	require.NoError(t, err)
+	legacy := binding{Version: 1, LogicalID: testID, Target: testTarget, ActorUID: testUID, VolumeName: "data", Kind: bindingNAS, Driver: NASDriverName, RealID: real.VolumeId, Digest: resolved.Digest}
 	require.NoError(t, (bindingStore{root: node.opts.StateDir}).put(legacy))
 	node.opts.Mounter = mount.NewFakeMounter([]mount.MountPoint{{Path: testTarget, Type: "nfs", Opts: []string{"rw"}}})
-	_, err := node.NodePublishVolume(t.Context(), in)
+	_, err = node.NodePublishVolume(t.Context(), in)
 	require.Equal(t, codes.AlreadyExists, status.Code(err))
 	require.Nil(t, downstream.published)
 }
@@ -88,9 +92,7 @@ func TestGoldenReadonlyPlaceholderHonorsCallerAndRejectsModeChange(t *testing.T)
 	}
 	node := NewNode(NodeOptions{ActorRoot: root, StateDir: t.TempDir(), Lookup: lookup, Mounter: mounter})
 	attributes := goldenMetadataFixture()
-	resolved, err := resolveMount(t.Context(), lookup, testID, attributes)
-	require.NoError(t, err)
-	attributes[PodUIDKey], attributes[BindingDigestKey] = "worker-uid", resolved.Digest
+	attributes[PodUIDKey] = "worker-uid"
 	in := &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: target, Readonly: true, VolumeContext: attributes}
 	_, err = node.NodePublishVolume(t.Context(), in)
 	require.NoError(t, err)

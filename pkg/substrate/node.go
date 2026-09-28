@@ -105,9 +105,6 @@ func (n *Node) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolume
 	if err := validateActorMetadata(req.VolumeContext, resolved.Actor); err != nil {
 		return nil, err
 	}
-	if req.VolumeContext[BindingDigestKey] != resolved.Digest {
-		return nil, status.Error(codes.FailedPrecondition, "publish request differs from the controller binding")
-	}
 	// req describes the virtual bridge volume; resolved.Request owns the backend configuration.
 	// Only read-only restrictions affect backend access; do not merge virtual capabilities.
 	boundReadOnly := nasReadOnly(resolved.Request)
@@ -158,17 +155,13 @@ func (n *Node) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolume
 	real := resolved.Request
 	real.TargetPath = req.TargetPath
 	real.VolumeContext[SubstrateModeKey] = "true"
-	if agentidentity.HasActorIdentity(req.VolumeContext) {
-		setActorMetadata(real.VolumeContext, resolved.Actor)
-		for _, key := range []string{agentidentity.PodUIDKey, agentidentity.PodNameKey, agentidentity.PodNamespaceKey} {
-			if value := req.VolumeContext[key]; value != "" {
-				real.VolumeContext[key] = value
-			} else {
-				delete(real.VolumeContext, key)
-			}
+	setActorMetadata(real.VolumeContext, resolved.Actor)
+	for _, key := range []string{agentidentity.PodUIDKey, agentidentity.PodNameKey, agentidentity.PodNamespaceKey} {
+		if value := req.VolumeContext[key]; value != "" {
+			real.VolumeContext[key] = value
+		} else {
+			delete(real.VolumeContext, key)
 		}
-	} else {
-		real.VolumeContext[PodUIDKey] = uid
 	}
 	return n.opts.NAS.NodePublishVolume(ctx, real)
 }

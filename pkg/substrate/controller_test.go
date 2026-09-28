@@ -14,7 +14,6 @@ limitations under the License.
 package substrate
 
 import (
-	"context"
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -23,29 +22,34 @@ import (
 )
 
 func TestLogicalVolumeLifecycle(t *testing.T) {
-	annotation := annotationFixture(t, publishFixture())
-	controller := &Controller{Lookup: func(context.Context, ActorReference) (ActorInfo, error) {
-		return ActorInfo{UID: testUID, Atespace: "storage-test", Name: "actor", Annotation: annotation}, nil
-	}}
+	controller := &Controller{}
 	req := &csi.CreateVolumeRequest{Name: testID, Parameters: actorMetadataFixture(), VolumeCapabilities: []*csi.VolumeCapability{publishFixture().VolumeCapability}, CapacityRange: &csi.CapacityRange{RequiredBytes: 1024}}
 	created, err := controller.CreateVolume(t.Context(), req)
 	require.NoError(t, err)
 	require.Equal(t, testID, created.Volume.VolumeId)
 	require.Equal(t, int64(1024), created.Volume.CapacityBytes)
 	require.Equal(t, "true", created.Volume.VolumeContext["csi.alibabacloud.com/substrate-mode"])
-	require.Len(t, created.Volume.VolumeContext[BindingDigestKey], 64)
+	wantContext := actorMetadataFixture()
+	wantContext[SubstrateModeKey] = "true"
+	require.Equal(t, wantContext, created.Volume.VolumeContext)
+	retried, err := controller.CreateVolume(t.Context(), req)
+	require.NoError(t, err)
+	require.Equal(t, created.Volume, retried.Volume)
 	_, err = controller.DeleteVolume(t.Context(), &csi.DeleteVolumeRequest{VolumeId: testID})
 	require.NoError(t, err)
 	_, err = controller.DeleteVolume(t.Context(), &csi.DeleteVolumeRequest{VolumeId: testID})
 	require.NoError(t, err)
 }
 
-func TestControllerRejectsMissingBusinessAnnotation(t *testing.T) {
-	controller := &Controller{Lookup: func(context.Context, ActorReference) (ActorInfo, error) {
-		return ActorInfo{UID: testUID, Atespace: "storage-test", Name: "actor"}, nil
-	}}
-	_, err := controller.CreateVolume(t.Context(), &csi.CreateVolumeRequest{Name: testID, Parameters: actorMetadataFixture(), VolumeCapabilities: []*csi.VolumeCapability{publishFixture().VolumeCapability}})
-	require.Equal(t, codes.FailedPrecondition, status.Code(err))
+func TestControllerDoesNotResolveBackendConfiguration(t *testing.T) {
+	parameters := actorMetadataFixture()
+	parameters[PublishRequestsAnnotation] = "not JSON"
+	parameters["server"] = "not-a-storage-server"
+	created, err := (&Controller{}).CreateVolume(t.Context(), &csi.CreateVolumeRequest{Name: testID, Parameters: parameters, VolumeCapabilities: []*csi.VolumeCapability{publishFixture().VolumeCapability}})
+	require.NoError(t, err)
+	wantContext := actorMetadataFixture()
+	wantContext[SubstrateModeKey] = "true"
+	require.Equal(t, wantContext, created.Volume.VolumeContext)
 }
 
 func TestControllerRejectsInvalidVolumeRequests(t *testing.T) {
@@ -57,10 +61,31 @@ func TestControllerRejectsInvalidVolumeRequests(t *testing.T) {
 		{"block", &csi.CreateVolumeRequest{Name: testID, VolumeCapabilities: []*csi.VolumeCapability{{AccessType: &csi.VolumeCapability_Block{Block: &csi.VolumeCapability_BlockVolume{}}}}}},
 		{"snapshot", &csi.CreateVolumeRequest{Name: testID, VolumeCapabilities: []*csi.VolumeCapability{publishFixture().VolumeCapability}, VolumeContentSource: &csi.VolumeContentSource{}}},
 		{"invalid capacity", &csi.CreateVolumeRequest{Name: testID, VolumeCapabilities: []*csi.VolumeCapability{publishFixture().VolumeCapability}, CapacityRange: &csi.CapacityRange{RequiredBytes: 2048, LimitBytes: 1024}}},
+		{"negative capacity", &csi.CreateVolumeRequest{Name: testID, VolumeCapabilities: []*csi.VolumeCapability{publishFixture().VolumeCapability}, CapacityRange: &csi.CapacityRange{RequiredBytes: -1}}},
+		{"negative limit", &csi.CreateVolumeRequest{Name: testID, VolumeCapabilities: []*csi.VolumeCapability{publishFixture().VolumeCapability}, CapacityRange: &csi.CapacityRange{LimitBytes: -1}}},
+		{"secrets", &csi.CreateVolumeRequest{Name: testID, VolumeCapabilities: []*csi.VolumeCapability{publishFixture().VolumeCapability}, Secrets: map[string]string{"key": "not-allowed"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := (&Controller{}).CreateVolume(t.Context(), tc.req)
 			require.Equal(t, codes.InvalidArgument, status.Code(err))
 		})
 	}
+}
+
+func TestControllerRejectsMissingOrInconsistentActorParameters(t *testing.T) {
+	for _, tc := range []struct{ key, value string }{
+		{"csi.alibabacloud.com/actor.uid", ""},
+		{"csi.alibabacloud.com/actor.name", ""},
+		{"csi.alibabacloud.com/actor.namespace", ""},
+		{"csi.alibabacloud.com/actor.uid", "00000000-0000-0000-0000-000000000000"},
+	} {
+		t.Run(tc.key+"="+tc.value, func(t *testing.T) {
+			parameters := actorMetadataFixture()
+			parameters[tc.key] = tc.value
+			_, err := (&Controller{}).CreateVolume(t.Context(), &csi.CreateVolumeRequest{Name: testID, Parameters: parameters, VolumeCapabilities: []*csi.VolumeCapability{publishFixture().VolumeCapability}})
+			require.Equal(t, codes.InvalidArgument, status.Code(err))
+		})
+	}
+	_, err := (&Controller{}).CreateVolume(t.Context(), &csi.CreateVolumeRequest{Name: testID, VolumeCapabilities: []*csi.VolumeCapability{publishFixture().VolumeCapability}})
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
 }

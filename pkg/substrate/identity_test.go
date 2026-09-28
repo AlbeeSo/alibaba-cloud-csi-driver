@@ -36,12 +36,11 @@ func goldenMetadataFixture() map[string]string {
 	return attributes
 }
 
-func nodeContextFixture(digest string) map[string]string {
+func nodeContextFixture() map[string]string {
 	attributes := actorMetadataFixture()
 	attributes[PodUIDKey] = "worker-uid"
 	attributes["csi.storage.k8s.io/pod.name"] = "worker-name"
 	attributes["csi.storage.k8s.io/pod.namespace"] = "worker-space"
-	attributes[BindingDigestKey] = digest
 	return attributes
 }
 
@@ -54,7 +53,7 @@ func identifiedLookup(t *testing.T) ActorLookup {
 }
 
 func TestCreateReturnsActorMetadataWithoutBindingWorker(t *testing.T) {
-	controller := &Controller{Lookup: identifiedLookup(t)}
+	controller := &Controller{}
 	parameters := actorMetadataFixture()
 	parameters[PodUIDKey] = "worker-one"
 	request := &csi.CreateVolumeRequest{Name: testID, Parameters: parameters, VolumeCapabilities: []*csi.VolumeCapability{writablePublishFixture().VolumeCapability}}
@@ -67,10 +66,11 @@ func TestCreateReturnsActorMetadataWithoutBindingWorker(t *testing.T) {
 	parameters[PodUIDKey] = "worker-two"
 	second, err := controller.CreateVolume(t.Context(), request)
 	require.NoError(t, err)
-	require.Equal(t, first.Volume.VolumeContext[BindingDigestKey], second.Volume.VolumeContext[BindingDigestKey])
+	require.Equal(t, first.Volume.VolumeContext, second.Volume.VolumeContext)
 	parameters["csi.alibabacloud.com/actor.name"] = "wrong-actor"
-	_, err = controller.CreateVolume(t.Context(), request)
-	require.Error(t, err)
+	third, err := controller.CreateVolume(t.Context(), request)
+	require.NoError(t, err)
+	require.Equal(t, "wrong-actor", third.Volume.VolumeContext["csi.alibabacloud.com/actor.name"])
 }
 
 func TestPublishKeepsActorIdentityWhileWorkerChanges(t *testing.T) {

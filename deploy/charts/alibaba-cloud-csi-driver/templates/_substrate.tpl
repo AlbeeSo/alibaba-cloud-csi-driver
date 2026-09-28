@@ -10,16 +10,19 @@
           signerName: podidentity.podcert.ate.dev/identity
           keyType: ECDSAP256
           credentialBundlePath: credential-bundle.pem
+{{- if .node }}
       - clusterTrustBundle:
           signerName: servicedns.podcert.ate.dev/identity
           labelSelector:
             matchLabels: {podcert.ate.dev/canarying: live}
           path: trust-bundle.pem
+{{- end }}
       - clusterTrustBundle:
           signerName: podidentity.podcert.ate.dev/identity
           labelSelector:
             matchLabels: {podcert.ate.dev/canarying: live}
           path: client-trust-bundle.pem
+{{- if .node }}
 - name: substrate-api-token
   projected:
     sources:
@@ -27,15 +30,18 @@
           audience: {{ required "substrate.apiAudience is required" .Values.substrate.apiAudience | quote }}
           expirationSeconds: 3600
           path: token
+{{- end }}
 {{- end -}}
 
 {{- define "substrate.commonMounts" -}}
 - name: substrate-identity
   mountPath: /run/podidentity.podcert.ate.dev
   readOnly: true
+{{- if .node }}
 - name: substrate-api-token
   mountPath: /run/ateapi
   readOnly: true
+{{- end }}
 {{- end -}}
 
 {{- define "substrate.apiArgs" -}}

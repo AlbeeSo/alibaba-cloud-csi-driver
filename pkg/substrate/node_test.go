@@ -82,17 +82,13 @@ func TestPublishPreservesRequestAndUsesActorIdentity(t *testing.T) {
 			return ActorInfo{UID: ref.UID, Atespace: "storage-test", Name: "actor", Annotation: annotation}, nil
 		},
 	})
-	resolved, err := resolveMount(t.Context(), node.opts.Lookup, testID, actorMetadataFixture())
-	require.NoError(t, err)
-	_, err = node.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: testTarget, VolumeContext: nodeContextFixture(resolved.Digest)})
+	_, err := node.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: testTarget, VolumeContext: nodeContextFixture()})
 	require.NoError(t, err)
 	want := proto.Clone(request).(*csi.NodePublishVolumeRequest)
 	want.TargetPath = testTarget
 	want.VolumeContext["csi.alibabacloud.com/substrate-mode"] = "true"
-	for key, value := range nodeContextFixture("") {
-		if key != BindingDigestKey {
-			want.VolumeContext[key] = value
-		}
+	for key, value := range nodeContextFixture() {
+		want.VolumeContext[key] = value
 	}
 	require.True(t, proto.Equal(want, downstream.published))
 	require.Equal(t, "/data", request.TargetPath)
@@ -103,28 +99,31 @@ func TestPublishRejectsInvalidBoundary(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		mutate func(*csi.NodePublishVolumeRequest, *csi.NodePublishVolumeRequest)
+		code   codes.Code
+		reason string
 	}{
-		{"missing actor UID", func(in, _ *csi.NodePublishVolumeRequest) { delete(in.VolumeContext, "csi.alibabacloud.com/actor.uid") }},
-		{"foreign target", func(in, _ *csi.NodePublishVolumeRequest) { in.TargetPath = "/etc/data" }},
-		{"wrong volume ID", func(in, _ *csi.NodePublishVolumeRequest) { in.VolumeId = "unrelated-volume" }},
+		{"missing actor UID", func(in, _ *csi.NodePublishVolumeRequest) { delete(in.VolumeContext, "csi.alibabacloud.com/actor.uid") }, codes.InvalidArgument, "actor UID must match the volume identity"},
+		{"foreign target", func(in, _ *csi.NodePublishVolumeRequest) { in.TargetPath = "/etc/data" }, codes.InvalidArgument, "target must be the actor volume path"},
+		{"wrong volume ID", func(in, _ *csi.NodePublishVolumeRequest) { in.VolumeId = "unrelated-volume" }, codes.InvalidArgument, "expected a Substrate actor volume identity"},
 		{"secrets", func(_, real *csi.NodePublishVolumeRequest) {
 			real.Secrets = map[string]string{"key": "must-not-persist"}
-		}},
-		{"foreign identity", func(_, real *csi.NodePublishVolumeRequest) { real.VolumeContext["sandboxId"] = "another-actor" }},
-		{"non agent identity", func(_, real *csi.NodePublishVolumeRequest) { real.VolumeContext["authType"] = "access-key" }},
-		{"non AgenticFS", func(_, real *csi.NodePublishVolumeRequest) { real.VolumeContext["mountProtocol"] = "nfs" }},
+		}, codes.FailedPrecondition, "a filesystem request without secrets is required"},
+		{"foreign identity", func(_, real *csi.NodePublishVolumeRequest) { real.VolumeContext["sandboxId"] = "another-actor" }, codes.PermissionDenied, "publish request carries a different actor identity"},
+		{"non agent identity", func(_, real *csi.NodePublishVolumeRequest) { real.VolumeContext["authType"] = "access-key" }, codes.FailedPrecondition, "only AgenticFS with Agent Identity is supported"},
+		{"non AgenticFS", func(_, real *csi.NodePublishVolumeRequest) { real.VolumeContext["mountProtocol"] = "nfs" }, codes.FailedPrecondition, "only AgenticFS with Agent Identity is supported"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			real := publishFixture()
-			in := &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: testTarget, VolumeContext: nodeContextFixture("")}
+			in := &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: testTarget, VolumeContext: nodeContextFixture()}
 			tc.mutate(in, real)
 			annotation := annotationFixture(t, real)
 			downstream := &recordingNAS{}
-			node := NewNode(NodeOptions{ActorRoot: "/var/lib/ateom-gvisor/actors", NAS: downstream, Lookup: func(context.Context, ActorReference) (ActorInfo, error) {
+			node := NewNode(NodeOptions{ActorRoot: "/var/lib/ateom-gvisor/actors", StateDir: t.TempDir(), Mounter: mount.NewFakeMounter(nil), NAS: downstream, Lookup: func(context.Context, ActorReference) (ActorInfo, error) {
 				return ActorInfo{UID: testUID, Name: "actor", Atespace: "storage-test", Annotation: annotation}, nil
 			}})
 			_, err := node.NodePublishVolume(t.Context(), in)
-			require.Error(t, err)
+			require.Equal(t, tc.code, status.Code(err))
+			require.Equal(t, tc.reason, status.Convert(err).Message())
 			require.Nil(t, downstream.published)
 		})
 	}
@@ -138,9 +137,7 @@ func TestUnpublishResolvesIdentityWithoutVolumeContext(t *testing.T) {
 		require.Equal(t, testUID, ref.UID)
 		return ActorInfo{UID: ref.UID, Name: "actor", Atespace: "storage-test", Annotation: annotation}, nil
 	}})
-	resolved, err := resolveMount(t.Context(), node.opts.Lookup, testID, actorMetadataFixture())
-	require.NoError(t, err)
-	_, err = node.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: testTarget, VolumeContext: nodeContextFixture(resolved.Digest)})
+	_, err := node.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: testTarget, VolumeContext: nodeContextFixture()})
 	require.NoError(t, err)
 	restarted := NewNode(NodeOptions{ActorRoot: DefaultActorRoot, StateDir: state, Mounter: mount.NewFakeMounter(nil), NAS: downstream})
 	_, err = restarted.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})

@@ -38,10 +38,8 @@ func TestGoldenPlaceholderLifecycleWithoutNAS(t *testing.T) {
 		return ActorInfo{UID: testUID, Atespace: "ate-golden", Name: "template-uid", TemplateUID: "template-uid", Golden: true}, nil
 	}
 	attributes := goldenMetadataFixture()
-	resolved, err := resolveMount(t.Context(), lookup, testID, attributes)
-	require.NoError(t, err)
 	node := NewNode(NodeOptions{ActorRoot: root, StateDir: state, Mounter: mounter, NAS: nas, Lookup: lookup})
-	attributes[PodUIDKey], attributes[BindingDigestKey] = "worker-uid", resolved.Digest
+	attributes[PodUIDKey] = "worker-uid"
 	in := &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: target, VolumeContext: attributes}
 	_, err = node.NodePublishVolume(t.Context(), in)
 	require.NoError(t, err)
@@ -89,12 +87,12 @@ func TestUntrackedMountIsNeverClaimedOrRemoved(t *testing.T) {
 	require.Len(t, mounter.MountPoints, 1)
 }
 
-func TestControllerBindingRejectsAnnotationDriftOnAnotherNode(t *testing.T) {
+func TestFirstPublishUsesAnnotationChangedAfterCreate(t *testing.T) {
 	annotation := annotationFixture(t, publishFixture())
 	lookup := func(context.Context, ActorReference) (ActorInfo, error) {
 		return ActorInfo{UID: testUID, Atespace: "storage-test", Name: "actor", Annotation: annotation}, nil
 	}
-	created, err := (&Controller{Lookup: lookup}).CreateVolume(t.Context(), &csi.CreateVolumeRequest{Name: testID, Parameters: actorMetadataFixture(), VolumeCapabilities: []*csi.VolumeCapability{publishFixture().VolumeCapability}})
+	created, err := (&Controller{}).CreateVolume(t.Context(), &csi.CreateVolumeRequest{Name: testID, Parameters: actorMetadataFixture(), VolumeCapabilities: []*csi.VolumeCapability{publishFixture().VolumeCapability}})
 	require.NoError(t, err)
 	changed := publishFixture()
 	changed.VolumeContext["path"] = "/another-tenant"
@@ -102,8 +100,73 @@ func TestControllerBindingRejectsAnnotationDriftOnAnotherNode(t *testing.T) {
 	nas := &recordingNAS{}
 	node := NewNode(NodeOptions{ActorRoot: DefaultActorRoot, StateDir: t.TempDir(), Mounter: mount.NewFakeMounter(nil), Lookup: lookup, NAS: nas})
 	context := created.Volume.VolumeContext
-	context[PodUIDKey] = testUID
+	context[PodUIDKey] = "worker-uid"
 	_, err = node.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: testTarget, VolumeContext: context})
-	require.Equal(t, codes.FailedPrecondition, status.Code(err))
-	require.Nil(t, nas.published)
+	require.NoError(t, err)
+	require.Equal(t, "/another-tenant", nas.published.VolumeContext["path"])
+}
+
+func TestCreateSucceedsBeforePublishConfigurationIsAvailable(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		annotation string
+		lookupErr  error
+		wantCode   codes.Code
+	}{
+		{"missing annotation", "", nil, codes.FailedPrecondition},
+		{"invalid annotation", "not JSON", nil, codes.FailedPrecondition},
+		{"API unavailable", "", status.Error(codes.Unavailable, "API unavailable"), codes.Unavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			created, err := (&Controller{}).CreateVolume(t.Context(), &csi.CreateVolumeRequest{Name: testID, Parameters: actorMetadataFixture(), VolumeCapabilities: []*csi.VolumeCapability{publishFixture().VolumeCapability}})
+			require.NoError(t, err)
+			calls := 0
+			nas := &recordingNAS{}
+			node := NewNode(NodeOptions{ActorRoot: DefaultActorRoot, StateDir: t.TempDir(), Mounter: mount.NewFakeMounter(nil), NAS: nas, Lookup: func(context.Context, ActorReference) (ActorInfo, error) {
+				calls++
+				return ActorInfo{UID: testUID, Name: "actor", Atespace: "storage-test", Annotation: tc.annotation}, tc.lookupErr
+			}})
+			created.Volume.VolumeContext[PodUIDKey] = "worker-uid"
+			_, err = node.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: testTarget, VolumeContext: created.Volume.VolumeContext})
+			require.Equal(t, tc.wantCode, status.Code(err))
+			require.Equal(t, 1, calls)
+			require.Nil(t, nas.published)
+		})
+	}
+}
+
+func TestLocalBindingRejectsConfigurationChangesUntilUnpublish(t *testing.T) {
+	for _, failedFirst := range []bool{false, true} {
+		t.Run(map[bool]string{false: "mounted", true: "failed publish"}[failedFirst], func(t *testing.T) {
+			real := writablePublishFixture()
+			annotation := annotationFixture(t, real)
+			node, nas, request := readonlyNodeFixture(t, real)
+			node.opts.Lookup = func(context.Context, ActorReference) (ActorInfo, error) {
+				return ActorInfo{UID: testUID, Name: "actor", Atespace: "storage-test", Annotation: annotation}, nil
+			}
+			if failedFirst {
+				nas.err = status.Error(codes.Unavailable, "NAS unavailable")
+			}
+			_, err := node.NodePublishVolume(t.Context(), request)
+			if failedFirst {
+				require.Equal(t, codes.Unavailable, status.Code(err))
+			} else {
+				require.NoError(t, err)
+				_, err = node.NodePublishVolume(t.Context(), request)
+				require.NoError(t, err)
+			}
+			node = NewNode(node.opts)
+			nas.err, nas.published = nil, nil
+			real.VolumeContext["path"] = "/changed-after-binding"
+			annotation = annotationFixture(t, real)
+			_, err = node.NodePublishVolume(t.Context(), request)
+			require.Equal(t, codes.AlreadyExists, status.Code(err))
+			require.Nil(t, nas.published)
+			_, err = node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})
+			require.NoError(t, err)
+			_, err = node.NodePublishVolume(t.Context(), request)
+			require.NoError(t, err)
+			require.Equal(t, "/changed-after-binding", nas.published.VolumeContext["path"])
+		})
+	}
 }

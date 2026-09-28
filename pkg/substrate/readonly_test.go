@@ -40,12 +40,10 @@ func readonlyNodeFixture(t *testing.T, real *csi.NodePublishVolumeRequest) (*Nod
 			return ActorInfo{UID: testUID, Atespace: "storage-test", Name: "actor", Annotation: annotation}, nil
 		},
 	})
-	resolved, err := resolveMount(t.Context(), node.opts.Lookup, testID, actorMetadataFixture())
-	require.NoError(t, err)
 	return node, downstream, &csi.NodePublishVolumeRequest{
 		VolumeId: testID, TargetPath: testTarget,
 		VolumeCapability: writablePublishFixture().VolumeCapability,
-		VolumeContext:    nodeContextFixture(resolved.Digest),
+		VolumeContext:    nodeContextFixture(),
 	}
 }
 
@@ -83,6 +81,9 @@ func TestPublishHonorsReadonlySourcesWithoutMergingOtherFields(t *testing.T) {
 			in.VolumeContext["options"] = "ro"
 			in.VolumeContext["ro"] = "true"
 		}, false},
+		{"obsolete controller digest is ignored", func(in, _ *csi.NodePublishVolumeRequest) {
+			in.VolumeContext["csi.alibabacloud.com/substrate-binding-digest"] = "obsolete"
+		}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			real := writablePublishFixture()
@@ -103,7 +104,7 @@ func TestPublishHonorsReadonlySourcesWithoutMergingOtherFields(t *testing.T) {
 			require.Equal(t, real.VolumeContext["server"], downstream.published.VolumeContext["server"])
 			require.Equal(t, real.VolumeContext["path"], downstream.published.VolumeContext["path"])
 			require.NotContains(t, downstream.published.VolumeCapability.GetMount().MountFlags, "vers=4")
-			require.NotContains(t, downstream.published.VolumeContext, BindingDigestKey)
+			require.NotContains(t, downstream.published.VolumeContext, "csi.alibabacloud.com/substrate-binding-digest")
 		})
 	}
 }
