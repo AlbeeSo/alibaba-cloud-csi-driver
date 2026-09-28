@@ -89,7 +89,7 @@ These are not supplied by this CSI chart:
 4. An operational NAS mount broker, AgentIdentity credential service, NAS/AP
    connectivity and the required per-Actor permissions.
 5. A Substrate API with `ResourceMetadata.annotations`. Public upstream does
-   not currently expose that field; see the API snapshot provenance below.
+   not currently expose that field; see the API client provenance below.
 
 Do not turn off TLS verification to work around missing CA/signers. No CA
 private key, cloud key or business token is placed in this chart.
@@ -223,16 +223,17 @@ leave source placeholders mounted merely to make restore pass.
 ## File responsibilities
 
 The direct `pkg/substrate` directory now contains seven implementation files and
-eleven test files. Its internal API snapshot has four unchanged upstream API
-files plus two provenance files; most added lines are generated API definitions,
-not additional runtime components. The small metadata checks were folded into
-`resolve.go`, and shared identity helpers now live in the existing
-`pkg/mounter/utils/agentidentity` package rather than a new `pkg/volumecontext`.
+eleven test files. Its internal `ateapipb` package is a minimal generated
+projection of the deployed API plus one provenance file; most of its added lines
+are generated API definitions, not additional runtime components. The small
+metadata checks were folded into `resolve.go`, and shared identity helpers now
+live in the existing `pkg/mounter/utils/agentidentity` package rather than a new
+`pkg/volumecontext`.
 
 | Files | Responsibility |
 |---|---|
 | `actor_client.go` | TLS/token connection and generated API calls |
-| `internal/ateapipb/*` | Unmodified API schema/client snapshot and provenance |
+| `internal/ateapipb/*` | Minimal generated API projection and provenance |
 | `controller.go` | Logical CSI Controller lifecycle |
 | `resolve.go` | Actor validation, annotation selection and digest |
 | `node.go` | Node publish/unpublish and target validation |
