@@ -161,3 +161,11 @@ func TestUnpublishDoesNotNeedActorLookup(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "customer-pv", downstream.unpublished.VolumeId)
 }
+
+func TestNodeGetInfoRequiresNodeIdentity(t *testing.T) {
+	_, err := NewNode(NodeOptions{}).NodeGetInfo(t.Context(), &csi.NodeGetInfoRequest{})
+	require.Equal(t, codes.FailedPrecondition, status.Code(err))
+	info, err := NewNode(NodeOptions{NodeID: "worker-node"}).NodeGetInfo(t.Context(), &csi.NodeGetInfoRequest{})
+	require.NoError(t, err)
+	require.Equal(t, "worker-node", info.NodeId)
+}

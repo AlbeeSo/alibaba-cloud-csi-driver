@@ -244,6 +244,9 @@ func (*Node) NodeUnstageVolume(context.Context, *csi.NodeUnstageVolumeRequest) (
 }
 
 func (n *Node) NodeGetInfo(context.Context, *csi.NodeGetInfoRequest) (*csi.NodeGetInfoResponse, error) {
+	if n.opts.NodeID == "" {
+		return nil, status.Error(codes.FailedPrecondition, "bridge node identity is not configured")
+	}
 	return &csi.NodeGetInfoResponse{NodeId: n.opts.NodeID}, nil
 }
 

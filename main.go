@@ -91,9 +91,6 @@ const (
 	TypePluginCustomFuse = "customfuseplugin.csi.alibabacloud.com"
 	// ExtenderAgent agent component
 	ExtenderAgent = "agent"
-	// defaultMountProxySocket is the default socket path for mount-proxy-server (alinas-mounter).
-	// Used as fallback when AlinasMountProxy feature gate is enabled but --mount-proxy-sock is not set.
-	defaultMountProxySocket = "/run/cnfs/alinas-mounter.sock"
 )
 
 var (
@@ -119,6 +116,7 @@ var (
 	//
 	// --customfuse-mount-proxy-sock: the same resolution for customfuse mounts.
 	mountProxySock           = flag.String("mount-proxy-sock", "", "socket path of mount proxy server for alinas/cpfs/oss mounts")
+	nasMountProxySock        = flag.String("nas-mount-proxy-sock", "", "NAS-only mount proxy socket override; takes precedence over mount-proxy-sock")
 	customfuseMountProxySock = flag.String("customfuse-mount-proxy-sock", "", "socket path of mount proxy server for customfuse mounts")
 	substrateEndpoint        = flag.String("substrate-api-endpoint", "", "Substrate control API TLS endpoint for the bridge driver")
 	substrateCA              = flag.String("substrate-api-ca-file", "", "CA bundle verifying the Substrate control API")
@@ -254,14 +252,7 @@ func main() {
 
 	csiCfg := getCSIPluginConfig()
 
-	// NAS mount proxy socket resolution:
-	//   1. --mount-proxy-sock flag set → use flag value (sandbox agent scenario).
-	//   2. AlinasMountProxy feature gate enabled → use defaultMountProxySocket.
-	//   3. Neither → empty string, NAS uses ConnectorMounter instead of ProxyMounter.
-	resolvedNasMountProxySock := *mountProxySock
-	if resolvedNasMountProxySock == "" && features.FunctionalMutableFeatureGate.Enabled(features.AlinasMountProxy) {
-		resolvedNasMountProxySock = defaultMountProxySocket
-	}
+	resolvedNasMountProxySock := options.ResolveNASMountProxySocket(*nasMountProxySock, *mountProxySock, features.FunctionalMutableFeatureGate.Enabled(features.AlinasMountProxy))
 
 	// OSS and CustomFuse take their flag values as-is. Each driver's
 	// NodePublishVolume resolves the socket with ResolveMountProxySocket: a
@@ -312,7 +303,11 @@ func main() {
 				}
 				if serviceType&utils.Node != 0 {
 					nasNode := nas.NewServers(meta, endpoint, utils.Node, csiCfg, resolvedNasMountProxySock).NodeServer
-					driver.NodeServer = substrate.NewNode(substrate.NodeOptions{NodeID: *nodeID, ActorRoot: *substrateActorRoot, Lookup: actors.Lookup, NAS: nasNode, StateDir: *substrateStateDir, Mounter: mountutils.NewWithoutSystemd("")})
+					bridgeNodeID := *nodeID
+					if bridgeNodeID == "" {
+						bridgeNodeID = os.Getenv("KUBE_NODE_NAME")
+					}
+					driver.NodeServer = substrate.NewNode(substrate.NodeOptions{NodeID: bridgeNodeID, ActorRoot: *substrateActorRoot, Lookup: actors.Lookup, NAS: nasNode, StateDir: *substrateStateDir, Mounter: mountutils.NewWithoutSystemd("")})
 				}
 			case TypePluginNAS:
 				driver = nas.NewServers(meta, endpoint, serviceType, csiCfg, resolvedNasMountProxySock)
