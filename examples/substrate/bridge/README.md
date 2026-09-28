@@ -174,14 +174,17 @@ caller to work with a name-based generated API client.
 
 The driver uses generated `ControlClient.GetActor` and `GetActorTemplate`, checks
 the returned UID, and verifies Golden Actor/template association. There are no
-handwritten RPC paths or locally trimmed message definitions.
+handwritten RPC paths.
 
-`pkg/substrate/internal/ateapipb` is an unchanged snapshot of the complete API
-package from the deployed Substrate integration, with source revision and hashes
-in `SOURCE.json`. This is necessary because public upstream currently omits
-annotations. It is not advertised as compatibility with an unextended public
-server. Once an annotation-capable lightweight API module is published, replace
-the snapshot with that dependency; do not hand-edit the copied schema.
+`pkg/substrate/internal/ateapipb` is a minimal generated projection of the
+deployed Substrate API: only the two lookups above and the message closure they
+need, with verbatim message, field and RPC names and numbers and omitted field
+numbers marked `reserved`. `SOURCE.md` records the source revision, the
+extraction rule and the refresh procedure. The projection exists because public
+upstream currently omits annotations; it is not advertised as compatibility
+with an unextended public server. Once an annotation-capable lightweight API
+module is published, replace the projection with that dependency; refresh it
+only by re-extraction, never by hand-editing.
 
 ## Validation and remaining system work
 

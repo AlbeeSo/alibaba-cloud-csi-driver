@@ -13,16 +13,18 @@
 | Check execution | `hack/check-substrate-helm.sh` provides an opt-in local check; no dedicated GitHub Actions workflow |
 | Actor versus worker identity | Separate Actor keys; standard PodInfo carries the current worker, while credentials and EFC ownership remain Actor-scoped |
 | Shared identity helpers | Folded into the existing agentidentity utility package; one Substrate mode predicate, with the old common entry point retained |
-| Client API usage | Handwritten Invoke paths and the trimmed proto are removed; generated GetActor/GetActorTemplate are used and tested against the deployed API |
+| Client API usage | Handwritten Invoke paths and the hand-written proto are removed; generated GetActor/GetActorTemplate are used and tested against the deployed API |
 
 ## Explicit limitations
 
 1. **Public API packaging:** public Substrate currently has no metadata annotations.
-   The client package is therefore an unmodified, provenance-pinned snapshot of
-   the deployed integration API, not a claim that a public upstream module works
-   unchanged. A published annotation-capable API module is still needed to remove
-   that snapshot. Go, Kubernetes, gRPC and other dependency versions were left at
-   the existing CSI baseline; incompatible dependency experiments were reverted.
+   The client package is therefore a mechanically extracted, provenance-pinned
+   projection of the deployed integration API - the two lookups the bridge needs,
+   with verbatim names and numbers - not a claim that a public upstream module
+   works unchanged. A published annotation-capable API module is still needed to
+   remove that projection. Go, Kubernetes, gRPC and other dependency versions were
+   left at the existing CSI baseline; incompatible dependency experiments were
+   reverted.
 2. **Golden restore:** real placeholder mounting, read-only behavior, restart and
    unpublish have been exercised. The complete checkpoint → remove placeholder →
    publish real storage → restore Golden workflow is a separate runtime integration
