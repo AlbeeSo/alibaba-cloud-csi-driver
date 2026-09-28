@@ -168,9 +168,8 @@ func TestWriteMetricsInfo(t *testing.T) {
 	assert.Equal(t, expectedMountPointInfo, string(mountPointContent2))
 }
 
-func TestSubstrateMetricsKeepActorOwnershipAndRealPodLabels(t *testing.T) {
+func TestSubstrateMetricsAreSkipped(t *testing.T) {
 	root := t.TempDir() + "/"
-	paths := make(map[string]string)
 	for _, actor := range []string{"actor-one", "actor-two"} {
 		req := &csi.NodePublishVolumeRequest{VolumeId: "shared-pv", TargetPath: "/var/lib/ateom-gvisor/actors/" + actor + "/volumes/data", VolumeContext: map[string]string{
 			"csi.alibabacloud.com/substrate-mode": "true",
@@ -179,18 +178,14 @@ func TestSubstrateMetricsKeepActorOwnershipAndRealPodLabels(t *testing.T) {
 			"csi.storage.k8s.io/pod.name":         "worker-name",
 			"csi.storage.k8s.io/pod.namespace":    "worker-space",
 		}}
-		paths[actor] = WriteMetricsInfo(root, req, "10", "efc", "nas", "fs")
-		content, err := os.ReadFile(filepath.Join(root, actor, PodInfoFile))
-		require.NoError(t, err)
-		require.Equal(t, "worker-space worker-name worker-id 10", string(content))
+		require.Empty(t, WriteMetricsInfo(root, req, "10", "efc", "nas", "fs"))
 		req.VolumeContext["csi.storage.k8s.io/pod.uid"] = "next-worker-id"
 		req.VolumeContext["csi.storage.k8s.io/pod.name"] = "next-worker-name"
-		WriteMetricsInfo(root, req, "10", "efc", "nas", "fs")
-		content, err = os.ReadFile(filepath.Join(root, actor, PodInfoFile))
-		require.NoError(t, err)
-		require.Equal(t, "worker-space next-worker-name next-worker-id 10", string(content))
+		require.Empty(t, WriteMetricsInfo(root, req, "10", "efc", "nas", "fs"))
 	}
-	require.NotEqual(t, paths["actor-one"], paths["actor-two"])
+	entries, err := os.ReadDir(root)
+	require.NoError(t, err)
+	require.Empty(t, entries)
 }
 
 func TestRemoveMetrics(t *testing.T) {

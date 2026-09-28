@@ -184,23 +184,22 @@ func WriteMetricsInfo(metricsPathPrefix string,
 	metricsTop string, clientName string, storageBackendName string, fsName string) (
 	mountPointPath string,
 ) {
+	if agentidentity.IsSubstrateVolumeContext(req.GetVolumeContext()) {
+		return ""
+	}
 	mountPointDir := req.GetVolumeId()
 	segments := strings.Split(req.TargetPath, "/")
 	if len(segments) > 1 {
 		mountPointDir = segments[len(segments)-2]
 	}
 
-	substrate := agentidentity.IsSubstrateVolumeContext(req.VolumeContext) && agentidentity.HasActorIdentity(req.VolumeContext)
-	if substrate {
-		mountPointDir = filepath.Base(req.TargetPath)
-	}
 	podUIDPath := metricsPathPrefix + agentidentity.MountOwnerUID(req.VolumeContext) + "/"
 
 	mountPointPath = podUIDPath + mountPointDir + "/"
 	if !IsFileExisting(mountPointPath) {
 		_ = os.MkdirAll(mountPointPath, os.FileMode(0755))
 	}
-	if substrate || !IsFileExisting(podUIDPath+PodInfoFile) {
+	if !IsFileExisting(podUIDPath + PodInfoFile) {
 		info := req.VolumeContext["csi.storage.k8s.io/pod.namespace"] + " " +
 			req.VolumeContext["csi.storage.k8s.io/pod.name"] + " " +
 			req.VolumeContext["csi.storage.k8s.io/pod.uid"] + " " +
