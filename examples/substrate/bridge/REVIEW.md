@@ -8,9 +8,11 @@
 | Uppercase error strings | Actor client errors now start with lowercase text |
 | Two-request responsibility | `node.go` states that the annotation owns backend configuration and that virtual capabilities must not be merged |
 | Read-only precedence | Documented as the union of supported read-only restrictions; covered by unit, gRPC, restart and real Linux bind-mount tests |
-| Deployment wiring | `enableSubstrate` now adds Controller/Envoy, Node/registrar, Service, ServiceAccount/RBAC, persistent state and trust/token projections |
+| Deployment wiring | `enableSubstrate` extends the original plugin/provisioner processes, reuses their ServiceAccounts, and adds a shared Envoy/Service/ConfigMap, bridge registrar, persistent state and trust/token projections |
 | Deployment regressions | Default-disabled render stays byte-identical; enabled render, custom paths, component switches and server-side dry-run are checked |
+| Check execution | `hack/check-substrate-helm.sh` provides an opt-in local check; no dedicated GitHub Actions workflow |
 | Actor versus worker identity | Separate Actor keys; standard PodInfo carries the current worker, while credentials and EFC ownership remain Actor-scoped |
+| Shared identity helpers | Folded into the existing agentidentity utility package; one Substrate mode predicate, with the old common entry point retained |
 | Client API usage | Handwritten Invoke paths and the trimmed proto are removed; generated GetActor/GetActorTemplate are used and tested against the deployed API |
 
 ## Explicit limitations
@@ -30,6 +32,11 @@
    Helm configures the CSI side but does not manufacture those external services.
 4. **Release artifact:** the chart requires a CSI image containing this branch.
    Enabling the option cannot add the driver to an older published binary.
+5. **Chart consolidation:** native NAS and bridge have separate logical driver
+   configs and sockets but share workloads and TLS infrastructure. Migrate old
+   standalone bridge resources deliberately; do not run duplicate Node drivers
+   against the same socket. The shared-workload consolidation has render and
+   build coverage, not a fresh live deployment result.
 
 ## Validation performed
 
@@ -57,6 +64,11 @@ durable binding, Golden placeholder and read-only restrictions. Test files cover
 those boundaries and their lifecycle combinations. Helm files describe actual
 deployment responsibilities. The large API files are generated upstream API
 definitions with recorded hashes, not handwritten bridge business logic.
+
+After consolidation there are seven implementation files and eleven test files
+directly under `pkg/substrate`. The separate metadata helper file and the new
+`pkg/volumecontext` directory have been removed. Controller/Node workloads are
+the existing provisioner/plugin Pods, not a second deployment stack.
 
 See [README.md](README.md) for the field contract, deployment values, upgrade
 constraints and the deliberate no-op/cleanup behaviors retained from the design.
