@@ -117,9 +117,6 @@ func validateActorMetadata(values map[string]string, actor ActorInfo) error {
 	if !agentidentity.HasActorIdentity(values) {
 		return nil
 	}
-	if err := agentidentity.ValidateActorIdentity(values); err != nil {
-		return status.Error(codes.InvalidArgument, err.Error())
-	}
 	if values[agentidentity.ActorUIDKey] != actor.UID || values[agentidentity.ActorNameKey] != actor.Name || values[agentidentity.ActorNamespaceKey] != actor.Atespace {
 		return status.Error(codes.PermissionDenied, "actor metadata does not match the volume owner")
 	}

@@ -110,7 +110,7 @@ func TestPublishPreservesInnerReadonlyConfiguration(t *testing.T) {
 			request.VolumeContext["path"] = "/must-not-replace-the-bound-path"
 			want := proto.Clone(real).(*csi.NodePublishVolumeRequest)
 			want.TargetPath = testTarget
-			want.VolumeContext[SubstrateModeKey] = "true"
+			want.VolumeContext["csi.alibabacloud.com/substrate-mode"] = "true"
 			for key, value := range nodeContextFixture() {
 				want.VolumeContext[key] = value
 			}

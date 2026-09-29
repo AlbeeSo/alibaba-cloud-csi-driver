@@ -80,25 +80,13 @@ func TestGetTokenRefreshMargin(t *testing.T) {
 	})
 }
 
-func TestIsSubstrateVolumeContext(t *testing.T) {
-	assert.False(t, IsSubstrateVolumeContext(nil))
-	assert.False(t, IsSubstrateVolumeContext(map[string]string{}))
-	for _, value := range []string{"", "false", "TRUE", "1", " true "} {
-		assert.False(t, IsSubstrateVolumeContext(map[string]string{"csi.alibabacloud.com/substrate-mode": value}))
-	}
-	assert.True(t, IsSubstrateVolumeContext(map[string]string{"csi.alibabacloud.com/substrate-mode": "true"}))
-}
-
 func TestActorIdentityDoesNotFallBackToWorkerWhenIncomplete(t *testing.T) {
-	legacy := map[string]string{PodUIDKey: "legacy-actor", SubstrateModeKey: "true"}
+	legacy := map[string]string{PodUIDKey: "legacy-actor"}
 	require.Equal(t, "legacy-actor", ActorUID(legacy))
-	current := map[string]string{ActorUIDKey: "actor-id", ActorNameKey: "actor-name", ActorNamespaceKey: "actor-space", PodUIDKey: "worker-id", SubstrateModeKey: "true"}
+	current := map[string]string{ActorUIDKey: "actor-id", ActorNameKey: "actor-name", ActorNamespaceKey: "actor-space", PodUIDKey: "worker-id"}
 	require.Equal(t, "actor-id", ActorUID(current))
-	require.Equal(t, "actor-id", MountOwnerUID(current))
 	delete(current, ActorUIDKey)
 	require.Empty(t, ActorUID(current))
-	current[SubstrateModeKey] = "false"
-	require.Equal(t, "worker-id", MountOwnerUID(current))
 }
 
 func TestActorUIDCannotBecomePathOrMountOption(t *testing.T) {

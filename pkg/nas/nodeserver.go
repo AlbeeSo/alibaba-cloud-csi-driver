@@ -206,7 +206,7 @@ func DetermineClientTypeAndMountProtocol(cnfs *v1beta1.ContainerNetworkFileSyste
 // returning the referenced CNFS name when one is set. Keys are matched
 // case-insensitively.
 func parseVolumeContext(volumeContext map[string]string) (*Options, string, error) {
-	opt := &Options{SubstrateMode: common.IsSubstrateVolumeContext(volumeContext)}
+	opt := &Options{SubstrateMode: utils.IsSubstrateVolumeContext(volumeContext)}
 	var cnfsName string
 	for key, value := range volumeContext {
 		switch strings.ToLower(key) {
@@ -374,7 +374,7 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	readOnly := mounterutils.ReadOnlyRequested(req.GetReadonly(), req.GetVolumeCapability().GetAccessMode().GetMode())
 
 	var runtimeVal string
-	if common.IsSubstrateVolumeContext(req.VolumeContext) {
+	if utils.IsSubstrateVolumeContext(req.VolumeContext) {
 		klog.InfoS("NodePublishVolume: substrate mode detected, skipping pod runtime lookup")
 	} else if ns.config.KubeClient != nil {
 		runtimeVal = utils.GetPodRunTime(ctx, req, ns.config.KubeClient)
@@ -537,7 +537,7 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		defer conn.Close()
 	}
 
-	if err := doMount(ns.mounter, opt, mountPath, req.VolumeId, agentidentity.MountOwnerUID(req.VolumeContext), ns.config.AgentMode); err != nil {
+	if err := doMount(ns.mounter, opt, mountPath, req.VolumeId, utils.MountOwnerUID(req.VolumeContext), ns.config.AgentMode); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 	if opt.MountProtocol == "efc" {

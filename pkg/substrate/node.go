@@ -19,12 +19,13 @@ package substrate
 import (
 	"context"
 	"encoding/json"
-	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils/agentidentity"
 	"path/filepath"
 	"regexp"
 	"sync"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils/agentidentity"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	mount "k8s.io/mount-utils"
@@ -36,7 +37,6 @@ const (
 	NASDriverName             = "nasplugin.csi.alibabacloud.com"
 	PublishRequestsAnnotation = "ate.dev/csi-volume-publish-requests"
 	PodUIDKey                 = agentidentity.PodUIDKey
-	SubstrateModeKey          = agentidentity.SubstrateModeKey
 	DefaultActorRoot          = "/var/lib/ateom-gvisor/actors"
 )
 
@@ -127,7 +127,7 @@ func (n *Node) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolume
 	}
 	real := resolved.Request
 	real.TargetPath = req.TargetPath
-	real.VolumeContext[SubstrateModeKey] = "true"
+	real.VolumeContext[utils.SubstrateModeKey] = "true"
 	setActorMetadata(real.VolumeContext, resolved.Actor)
 	for _, key := range []string{agentidentity.PodUIDKey, agentidentity.PodNameKey, agentidentity.PodNamespaceKey} {
 		if value := req.VolumeContext[key]; value != "" {

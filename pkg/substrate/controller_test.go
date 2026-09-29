@@ -30,7 +30,7 @@ func TestLogicalVolumeLifecycle(t *testing.T) {
 	require.Equal(t, int64(1024), created.Volume.CapacityBytes)
 	require.Equal(t, "true", created.Volume.VolumeContext["csi.alibabacloud.com/substrate-mode"])
 	wantContext := actorMetadataFixture()
-	wantContext[SubstrateModeKey] = "true"
+	wantContext["csi.alibabacloud.com/substrate-mode"] = "true"
 	require.Equal(t, wantContext, created.Volume.VolumeContext)
 	retried, err := controller.CreateVolume(t.Context(), req)
 	require.NoError(t, err)
@@ -48,7 +48,7 @@ func TestControllerDoesNotResolveBackendConfiguration(t *testing.T) {
 	created, err := (&Controller{}).CreateVolume(t.Context(), &csi.CreateVolumeRequest{Name: testID, Parameters: parameters, VolumeCapabilities: []*csi.VolumeCapability{publishFixture().VolumeCapability}})
 	require.NoError(t, err)
 	wantContext := actorMetadataFixture()
-	wantContext[SubstrateModeKey] = "true"
+	wantContext["csi.alibabacloud.com/substrate-mode"] = "true"
 	require.Equal(t, wantContext, created.Volume.VolumeContext)
 }
 

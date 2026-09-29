@@ -18,6 +18,7 @@ import (
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils/agentidentity"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -39,13 +40,10 @@ func (*Controller) CreateVolume(_ context.Context, req *csi.CreateVolumeRequest)
 	if capacity < 0 || limit < 0 || (limit > 0 && capacity > limit) {
 		return nil, status.Error(codes.InvalidArgument, "invalid capacity range")
 	}
-	if err := agentidentity.ValidateActorIdentity(req.Parameters); err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
 	if req.Parameters[agentidentity.ActorUIDKey] != parts[1] || req.Parameters[agentidentity.ActorNameKey] == "" || req.Parameters[agentidentity.ActorNamespaceKey] == "" {
 		return nil, status.Error(codes.InvalidArgument, "actor UID, name and namespace must identify the volume owner")
 	}
-	attributes := map[string]string{SubstrateModeKey: "true"}
+	attributes := map[string]string{utils.SubstrateModeKey: "true"}
 	for _, key := range []string{agentidentity.ActorUIDKey, agentidentity.ActorNameKey, agentidentity.ActorNamespaceKey} {
 		attributes[key] = req.Parameters[key]
 	}

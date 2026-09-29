@@ -75,12 +75,7 @@ const (
 	PodUIDKey         = "csi.storage.k8s.io/pod.uid"
 	PodNameKey        = "csi.storage.k8s.io/pod.name"
 	PodNamespaceKey   = "csi.storage.k8s.io/pod.namespace"
-	SubstrateModeKey  = "csi.alibabacloud.com/substrate-mode"
 )
-
-func IsSubstrateVolumeContext(values map[string]string) bool {
-	return values[SubstrateModeKey] == "true"
-}
 
 func HasActorIdentity(values map[string]string) bool {
 	for _, key := range []string{ActorUIDKey, ActorNameKey, ActorNamespaceKey} {
@@ -115,13 +110,6 @@ func ValidateActorIdentity(values map[string]string) error {
 func ActorUID(values map[string]string) string {
 	if HasActorIdentity(values) {
 		return values[ActorUIDKey]
-	}
-	return values[PodUIDKey]
-}
-
-func MountOwnerUID(values map[string]string) string {
-	if IsSubstrateVolumeContext(values) {
-		return ActorUID(values)
 	}
 	return values[PodUIDKey]
 }
