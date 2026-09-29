@@ -94,10 +94,10 @@ func (c *agenticfsController) findReusableAccessPoint(ctx context.Context, files
 		if id == "" {
 			continue
 		}
-		switch tea.StringValue(ap.Status) {
-		case accessPointStatusActive:
+		switch {
+		case strings.EqualFold(tea.StringValue(ap.Status), accessPointStatusActive):
 			return id, tea.StringValue(ap.DomainName), nil
-		case accessPointStatusDeleting, accessPointStatusInactive:
+		case strings.EqualFold(tea.StringValue(ap.Status), accessPointStatusDeleting), strings.EqualFold(tea.StringValue(ap.Status), accessPointStatusInactive):
 			unavailable = append(unavailable, fmt.Sprintf("%s(%s)", id, tea.StringValue(ap.Status)))
 		default:
 			if pending == nil {
@@ -262,7 +262,7 @@ func (c *agenticfsController) waitAccessPointActive(ctx context.Context, filesys
 			}
 		},
 		done: func(ap *sdk.DescribeAccessPointResponseBodyAccessPoint, notFound bool) bool {
-			return !notFound && ap != nil && tea.StringValue(ap.Status) == accessPointStatusActive
+			return !notFound && ap != nil && strings.EqualFold(tea.StringValue(ap.Status), accessPointStatusActive)
 		},
 		timeout: func(lastStatus string) error {
 			return status.Errorf(codes.DeadlineExceeded,
