@@ -15,76 +15,146 @@ package substrate
 
 import (
 	"context"
-	"errors"
-	"os"
-	"path/filepath"
+	"net"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	mount "k8s.io/mount-utils"
 )
 
-func TestGoldenPlaceholderLifecycleWithoutNAS(t *testing.T) {
-	root, err := filepath.EvalSymlinks(t.TempDir())
-	require.NoError(t, err)
-	state := t.TempDir()
-	target := filepath.Join(root, testUID, "volumes", "data")
-	mounter := mount.NewFakeMounter(nil)
-	nas := &recordingNAS{err: errors.New("golden must not call NAS")}
-	lookup := func(context.Context, ActorReference) (ActorInfo, error) {
-		return ActorInfo{UID: testUID, Atespace: "ate-golden", Name: "template-uid", TemplateUID: "template-uid", Golden: true}, nil
+type readonlyObservedNAS struct {
+	csi.UnimplementedNodeServer
+	published chan bool
+}
+
+func (n *readonlyObservedNAS) NodePublishVolume(_ context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
+	n.published <- req.Readonly
+	return &csi.NodePublishVolumeResponse{}, nil
+}
+
+func (*readonlyObservedNAS) NodeUnpublishVolume(context.Context, *csi.NodeUnpublishVolumeRequest) (*csi.NodeUnpublishVolumeResponse, error) {
+	return &csi.NodeUnpublishVolumeResponse{}, nil
+}
+
+func TestReadonlyPublishLifecycleThroughGRPC(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	t.Cleanup(cancel)
+	node, _, in := readonlyNodeFixture(t, writablePublishFixture())
+	readonlyAnnotation := annotationFixture(t, publishFixture())
+	writableAnnotation := annotationFixture(t, writablePublishFixture())
+	var innerReadonly atomic.Bool
+	innerReadonly.Store(true)
+	var lookups atomic.Int32
+	node.opts.Lookup = func(context.Context, ActorReference) (ActorInfo, error) {
+		lookups.Add(1)
+		annotation := writableAnnotation
+		if innerReadonly.Load() {
+			annotation = readonlyAnnotation
+		}
+		return ActorInfo{UID: testUID, Name: "actor", Atespace: "storage-test", Annotation: annotation}, nil
 	}
-	attributes := goldenMetadataFixture()
-	node := NewNode(NodeOptions{ActorRoot: root, StateDir: state, Mounter: mounter, NAS: nas, Lookup: lookup})
-	attributes[PodUIDKey] = "worker-uid"
-	in := &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: target, VolumeContext: attributes}
-	_, err = node.NodePublishVolume(t.Context(), in)
+	nas := &readonlyObservedNAS{published: make(chan bool, 1)}
+	node.opts.NAS = nas
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	require.Nil(t, nas.published)
-	require.DirExists(t, target)
-	require.Len(t, mounter.MountPoints, 1)
-	_, err = node.NodePublishVolume(t.Context(), in)
+	server := grpc.NewServer()
+	csi.RegisterControllerServer(server, &Controller{})
+	csi.RegisterNodeServer(server, node)
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(listener) }()
+	t.Cleanup(func() { server.Stop(); require.NoError(t, <-done) })
+	conn, err := grpc.NewClient(listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
-	require.Len(t, mounter.MountPoints, 1)
-	placeholder, err := node.placeholderSource(testID, target)
+	t.Cleanup(func() { require.NoError(t, conn.Close()) })
+	created, err := csi.NewControllerClient(conn).CreateVolume(ctx, &csi.CreateVolumeRequest{
+		Name: testID, Parameters: actorMetadataFixture(), VolumeCapabilities: []*csi.VolumeCapability{in.VolumeCapability},
+	})
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(placeholder, "build-output"), []byte("temporary"), 0600))
-	restarted := NewNode(NodeOptions{ActorRoot: root, StateDir: state, Mounter: mounter, NAS: nas})
-	_, err = restarted.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: target})
-	require.NoError(t, err)
-	require.Nil(t, nas.unpublished)
-	require.Empty(t, mounter.MountPoints)
-	require.NoDirExists(t, placeholder)
-	_, err = restarted.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: target})
-	require.NoError(t, err)
-}
-
-func TestUnpublishRetriesLiveMountWhenNASFails(t *testing.T) {
-	state := t.TempDir()
-	nas := &recordingNAS{err: status.Error(codes.Unavailable, "daemon unavailable")}
-	node := NewNode(NodeOptions{ActorRoot: DefaultActorRoot, StateDir: state, Mounter: mount.NewFakeMounter([]mount.MountPoint{{Path: testTarget, Device: "server:/", Type: "nfs"}}), NAS: nas, Lookup: func(context.Context, ActorReference) (ActorInfo, error) {
-		t.Fatal("unpublish must not query actor")
-		return ActorInfo{}, nil
-	}})
-	_, err := node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})
-	require.Equal(t, codes.Unavailable, status.Code(err))
-	nas.err = nil
-	node = NewNode(node.opts)
-	_, err = node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})
-	require.NoError(t, err)
-}
-
-func TestForeignFilesystemIsNotRemoved(t *testing.T) {
-	root := t.TempDir()
-	target := filepath.Join(root, testUID, "volumes", "data")
-	mounter := mount.NewFakeMounter([]mount.MountPoint{{Device: "unknown", Path: target, Type: "tmpfs"}})
-	node := NewNode(NodeOptions{ActorRoot: root, StateDir: t.TempDir(), Mounter: mounter, NAS: &recordingNAS{}})
-	_, err := node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: target})
+	in.VolumeContext = created.Volume.VolumeContext
+	require.Zero(t, lookups.Load())
+	in.VolumeContext[PodUIDKey] = "worker-uid"
+	in.Readonly = true
+	client := csi.NewNodeClient(conn)
+	_, err = client.NodePublishVolume(ctx, in)
 	require.Equal(t, codes.FailedPrecondition, status.Code(err))
-	require.Len(t, mounter.MountPoints, 1)
+	require.Zero(t, lookups.Load())
+	require.Empty(t, nas.published)
+	in.Readonly = false
+	_, err = client.NodePublishVolume(ctx, in)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), lookups.Load())
+	require.Len(t, nas.published, 1)
+	require.True(t, <-nas.published)
+	in.VolumeCapability.GetMount().MountFlags = []string{"ro"}
+	_, err = client.NodePublishVolume(ctx, in)
+	require.Equal(t, codes.FailedPrecondition, status.Code(err))
+	require.Equal(t, int32(1), lookups.Load())
+	require.Empty(t, nas.published)
+	in.VolumeCapability.GetMount().MountFlags = nil
+	_, err = client.NodePublishVolume(ctx, in)
+	require.NoError(t, err)
+	require.Len(t, nas.published, 1)
+	require.True(t, <-nas.published)
+	innerReadonly.Store(false)
+	_, err = client.NodePublishVolume(ctx, in)
+	require.NoError(t, err)
+	require.False(t, <-nas.published)
+	_, err = client.NodeUnpublishVolume(ctx, &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})
+	require.NoError(t, err)
+	_, err = client.NodePublishVolume(ctx, in)
+	require.NoError(t, err)
+	require.Len(t, nas.published, 1)
+	require.False(t, <-nas.published)
+}
+
+type waitingNAS struct {
+	csi.UnimplementedNodeServer
+	entered, release chan struct{}
+}
+
+func (n *waitingNAS) NodePublishVolume(context.Context, *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
+	close(n.entered)
+	<-n.release
+	return &csi.NodePublishVolumeResponse{}, nil
+}
+
+func TestStatelessTargetOperationsStaySerialized(t *testing.T) {
+	node, _, in := readonlyNodeFixture(t, writablePublishFixture())
+	nas := &waitingNAS{entered: make(chan struct{}), release: make(chan struct{})}
+	node.opts.NAS = nas
+	done := make(chan error, 1)
+	go func() { _, err := node.NodePublishVolume(t.Context(), in); done <- err }()
+	<-nas.entered
+	_, err := node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})
+	require.Equal(t, codes.Aborted, status.Code(err))
+	close(nas.release)
+	require.NoError(t, <-done)
+}
+
+func TestStatelessPublishAcceptsCorrectionAfterFailureAndRestart(t *testing.T) {
+	real := writablePublishFixture()
+	annotation := annotationFixture(t, real)
+	node, downstream, in := readonlyNodeFixture(t, real)
+	node.opts.Lookup = func(context.Context, ActorReference) (ActorInfo, error) {
+		return ActorInfo{UID: testUID, Name: "actor", Atespace: "storage-test", Annotation: annotation}, nil
+	}
+	downstream.err = status.Error(codes.Unavailable, "temporary failure")
+	_, err := node.NodePublishVolume(t.Context(), in)
+	require.Equal(t, codes.Unavailable, status.Code(err))
+	real.VolumeContext["path"] = "/corrected"
+	annotation = annotationFixture(t, real)
+	downstream.err = nil
+	node = NewNode(node.opts)
+	_, err = node.NodePublishVolume(t.Context(), in)
+	require.NoError(t, err)
+	require.Equal(t, "/corrected", downstream.published.VolumeContext["path"])
 }
 
 func TestFirstPublishUsesAnnotationChangedAfterCreate(t *testing.T) {
@@ -169,34 +239,4 @@ func TestPublishUsesCurrentConfigurationWithoutBindingConflicts(t *testing.T) {
 			require.Equal(t, "/changed-after-binding", nas.published.VolumeContext["path"])
 		})
 	}
-}
-
-func TestPlaceholderPathIsStableAndTargetScoped(t *testing.T) {
-	options := NodeOptions{StateDir: t.TempDir()}
-	one, err := NewNode(options).placeholderSource(testID, testTarget)
-	require.NoError(t, err)
-	again, err := NewNode(options).placeholderSource(testID, testTarget)
-	require.NoError(t, err)
-	require.Equal(t, one, again)
-	two, err := NewNode(options).placeholderSource(testID, "/another/target")
-	require.NoError(t, err)
-	require.NotEqual(t, one, two)
-}
-
-func TestMountedPlaceholderDoesNotRecreateMissingSource(t *testing.T) {
-	node := NewNode(NodeOptions{StateDir: t.TempDir(), Mounter: mount.NewFakeMounter(nil)})
-	source, err := node.placeholderSource(testID, testTarget)
-	require.NoError(t, err)
-	node.opts.Mounter = mount.NewFakeMounter([]mount.MountPoint{{Device: source, Path: testTarget, Type: "none"}})
-	require.Error(t, node.publishPlaceholder(testID, testTarget))
-	require.NoDirExists(t, source)
-}
-
-func TestPlaceholderRejectsSymlinkSource(t *testing.T) {
-	node := NewNode(NodeOptions{StateDir: t.TempDir(), Mounter: mount.NewFakeMounter(nil)})
-	source, err := node.placeholderSource(testID, testTarget)
-	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(filepath.Dir(source), 0700))
-	require.NoError(t, os.Symlink(t.TempDir(), source))
-	require.Error(t, node.publishPlaceholder(testID, testTarget))
 }

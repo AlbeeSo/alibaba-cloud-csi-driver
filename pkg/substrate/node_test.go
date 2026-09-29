@@ -1,12 +1,9 @@
 /*
 Copyright 2026 The Kubernetes Authors.
-
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
-
     http://www.apache.org/licenses/LICENSE-2.0
-
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,6 +16,8 @@ package substrate
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -31,7 +30,9 @@ import (
 )
 
 const testUID = "1c3d0394-02df-4aa9-b9ec-27604d5b7601"
+
 const testID = "substrate-" + testUID + "-data"
+
 const testTarget = "/var/lib/ateom-gvisor/actors/" + testUID + "/volumes/data"
 
 type recordingNAS struct {
@@ -98,6 +99,63 @@ func annotationFixture(t *testing.T, request *csi.NodePublishVolumeRequest) stri
 	encoded, err := json.Marshal([]publishEntry{{VolumeName: "data", Driver: NASDriverName, Request: raw}})
 	require.NoError(t, err)
 	return string(encoded)
+}
+
+func writablePublishFixture() *csi.NodePublishVolumeRequest {
+	req := publishFixture()
+	req.Readonly = false
+	req.VolumeCapability.AccessMode.Mode = csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER
+	return req
+}
+
+func readonlyNodeFixture(t *testing.T, real *csi.NodePublishVolumeRequest) (*Node, *recordingNAS, *csi.NodePublishVolumeRequest) {
+	t.Helper()
+	annotation := annotationFixture(t, real)
+	downstream := &recordingNAS{}
+	node := NewNode(NodeOptions{
+		ActorRoot: DefaultActorRoot, StateDir: t.TempDir(), NAS: downstream,
+		Mounter: mount.NewFakeMounter(nil),
+		Lookup: func(context.Context, ActorReference) (ActorInfo, error) {
+			return ActorInfo{UID: testUID, Atespace: "storage-test", Name: "actor", Annotation: annotation}, nil
+		},
+	})
+	downstream.mounts = func() mount.Interface { return node.opts.Mounter }
+	return node, downstream, &csi.NodePublishVolumeRequest{
+		VolumeId: testID, TargetPath: testTarget,
+		VolumeCapability: writablePublishFixture().VolumeCapability,
+		VolumeContext:    nodeContextFixture(),
+	}
+}
+
+func actorMetadataFixture() map[string]string {
+	return map[string]string{
+		"csi.alibabacloud.com/actor.uid":       testUID,
+		"csi.alibabacloud.com/actor.name":      "actor",
+		"csi.alibabacloud.com/actor.namespace": "storage-test",
+	}
+}
+
+func goldenMetadataFixture() map[string]string {
+	attributes := actorMetadataFixture()
+	attributes["csi.alibabacloud.com/actor.name"] = "template-uid"
+	attributes["csi.alibabacloud.com/actor.namespace"] = "ate-golden"
+	return attributes
+}
+
+func nodeContextFixture() map[string]string {
+	attributes := actorMetadataFixture()
+	attributes[PodUIDKey] = "worker-uid"
+	attributes["csi.storage.k8s.io/pod.name"] = "worker-name"
+	attributes["csi.storage.k8s.io/pod.namespace"] = "worker-space"
+	return attributes
+}
+
+func identifiedLookup(t *testing.T) ActorLookup {
+	t.Helper()
+	annotation := annotationFixture(t, writablePublishFixture())
+	return func(context.Context, ActorReference) (ActorInfo, error) {
+		return ActorInfo{UID: testUID, Name: "actor", Atespace: "storage-test", Annotation: annotation}, nil
+	}
 }
 
 func TestPublishPreservesRequestAndUsesActorIdentity(t *testing.T) {
@@ -192,4 +250,196 @@ func TestNodeGetInfoRequiresNodeIdentity(t *testing.T) {
 	info, err := NewNode(NodeOptions{NodeID: "worker-node"}).NodeGetInfo(t.Context(), &csi.NodeGetInfoRequest{})
 	require.NoError(t, err)
 	require.Equal(t, "worker-node", info.NodeId)
+}
+
+func TestPublishKeepsActorIdentityWhileWorkerChanges(t *testing.T) {
+	real := writablePublishFixture()
+	node, downstream, request := readonlyNodeFixture(t, real)
+	node.opts.Lookup = identifiedLookup(t)
+	for key, value := range actorMetadataFixture() {
+		request.VolumeContext[key] = value
+	}
+	for _, worker := range []string{"worker-one", "worker-two"} {
+		request.VolumeContext[PodUIDKey] = worker
+		request.VolumeContext["csi.storage.k8s.io/pod.name"] = worker + "-name"
+		request.VolumeContext["csi.storage.k8s.io/pod.namespace"] = worker + "-pool"
+		_, err := node.NodePublishVolume(t.Context(), request)
+		require.NoError(t, err)
+		require.Equal(t, worker, downstream.published.VolumeContext[PodUIDKey])
+		require.Equal(t, worker+"-name", downstream.published.VolumeContext["csi.storage.k8s.io/pod.name"])
+		require.Equal(t, worker+"-pool", downstream.published.VolumeContext["csi.storage.k8s.io/pod.namespace"])
+		for key, value := range actorMetadataFixture() {
+			require.Equal(t, value, downstream.published.VolumeContext[key])
+		}
+		require.Equal(t, testTarget, downstream.published.TargetPath)
+	}
+	_, err := node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})
+	require.NoError(t, err)
+	require.Equal(t, testID, downstream.unpublished.VolumeId)
+}
+
+func TestPublishRejectsIncompleteOrMismatchedActorMetadata(t *testing.T) {
+	for _, key := range []string{"csi.alibabacloud.com/actor.uid", "csi.alibabacloud.com/actor.name", "csi.alibabacloud.com/actor.namespace"} {
+		t.Run(key, func(t *testing.T) {
+			for _, value := range []string{"", "different"} {
+				node, downstream, request := readonlyNodeFixture(t, writablePublishFixture())
+				node.opts.Lookup = identifiedLookup(t)
+				for name, actual := range actorMetadataFixture() {
+					request.VolumeContext[name] = actual
+				}
+				request.VolumeContext[key] = value
+				_, err := node.NodePublishVolume(t.Context(), request)
+				require.Error(t, err)
+				require.Nil(t, downstream.published)
+			}
+		})
+	}
+}
+
+func TestPublishRejectsUseclientAndCNFS(t *testing.T) {
+	for _, key := range []string{"useclient", "UseClient", "containernetworkfilesystem", "ContainerNetworkFileSystem"} {
+		t.Run(key, func(t *testing.T) {
+			real := writablePublishFixture()
+			real.VolumeContext[key] = "efc"
+			annotation := annotationFixture(t, real)
+			node, _, in := readonlyNodeFixture(t, real)
+			node.opts.Lookup = func(context.Context, ActorReference) (ActorInfo, error) {
+				return ActorInfo{UID: testUID, Name: "actor", Atespace: "storage-test", Annotation: annotation}, nil
+			}
+			_, err := node.NodePublishVolume(t.Context(), in)
+			require.Equal(t, codes.FailedPrecondition, status.Code(err))
+			require.ErrorContains(t, err, "not supported through the Substrate bridge")
+		})
+	}
+}
+
+func TestPublishRejectsInvalidVolumeID(t *testing.T) {
+	node, _, _ := readonlyNodeFixture(t, writablePublishFixture())
+	_, err := node.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{
+		VolumeId:      "not-a-substrate-id",
+		TargetPath:    testTarget,
+		VolumeContext: nodeContextFixture(),
+	})
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+}
+
+func TestPublishRejectsMissingWorkerPodUID(t *testing.T) {
+	real := writablePublishFixture()
+	annotation := annotationFixture(t, real)
+	node, _, in := readonlyNodeFixture(t, real)
+	node.opts.Lookup = func(context.Context, ActorReference) (ActorInfo, error) {
+		return ActorInfo{UID: testUID, Name: "actor", Atespace: "storage-test", Annotation: annotation}, nil
+	}
+	delete(in.VolumeContext, PodUIDKey)
+	_, err := node.NodePublishVolume(t.Context(), in)
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+	require.ErrorContains(t, err, "worker Pod UID is required")
+}
+
+func TestPublishRejectsWhenNASNotConfigured(t *testing.T) {
+	real := writablePublishFixture()
+	annotation := annotationFixture(t, real)
+	node, _, in := readonlyNodeFixture(t, real)
+	node.opts.Lookup = func(context.Context, ActorReference) (ActorInfo, error) {
+		return ActorInfo{UID: testUID, Name: "actor", Atespace: "storage-test", Annotation: annotation}, nil
+	}
+	node.opts.NAS = nil
+	_, err := node.NodePublishVolume(t.Context(), in)
+	require.Equal(t, codes.FailedPrecondition, status.Code(err))
+	require.ErrorContains(t, err, "NAS forwarding is not configured")
+}
+
+func TestPublishRejectsUnsupportedFilesystemAtTarget(t *testing.T) {
+	real := writablePublishFixture()
+	annotation := annotationFixture(t, real)
+	node, _, in := readonlyNodeFixture(t, real)
+	node.opts.Lookup = func(context.Context, ActorReference) (ActorInfo, error) {
+		return ActorInfo{UID: testUID, Name: "actor", Atespace: "storage-test", Annotation: annotation}, nil
+	}
+	node.opts.Mounter = mount.NewFakeMounter([]mount.MountPoint{{Path: testTarget, Device: "/dev/sda1", Type: "ext4"}})
+	_, err := node.NodePublishVolume(t.Context(), in)
+	require.Equal(t, codes.FailedPrecondition, status.Code(err))
+	require.ErrorContains(t, err, "unsupported filesystem")
+}
+
+func TestUnpublishRejectsUnsupportedLiveMount(t *testing.T) {
+	node := NewNode(NodeOptions{
+		ActorRoot: DefaultActorRoot,
+		StateDir:  t.TempDir(),
+		Mounter:   mount.NewFakeMounter([]mount.MountPoint{{Path: testTarget, Device: "/dev/sda1", Type: "ext4"}}),
+		NAS:       &recordingNAS{},
+	})
+	_, err := node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})
+	require.Equal(t, codes.FailedPrecondition, status.Code(err))
+	require.ErrorContains(t, err, "refusing to unmount an unsupported live mount")
+}
+
+func TestUnpublishSucceedsWhenNothingMounted(t *testing.T) {
+	node := NewNode(NodeOptions{
+		ActorRoot: DefaultActorRoot,
+		StateDir:  t.TempDir(),
+		Mounter:   mount.NewFakeMounter(nil),
+		NAS:       &recordingNAS{},
+	})
+	_, err := node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})
+	require.NoError(t, err)
+}
+
+func TestUnpublishRetriesLiveMountWhenNASFails(t *testing.T) {
+	state := t.TempDir()
+	nas := &recordingNAS{err: status.Error(codes.Unavailable, "daemon unavailable")}
+	node := NewNode(NodeOptions{ActorRoot: DefaultActorRoot, StateDir: state, Mounter: mount.NewFakeMounter([]mount.MountPoint{{Path: testTarget, Device: "server:/", Type: "nfs"}}), NAS: nas, Lookup: func(context.Context, ActorReference) (ActorInfo, error) {
+		t.Fatal("unpublish must not query actor")
+		return ActorInfo{}, nil
+	}})
+	_, err := node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})
+	require.Equal(t, codes.Unavailable, status.Code(err))
+	nas.err = nil
+	node = NewNode(node.opts)
+	_, err = node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})
+	require.NoError(t, err)
+}
+
+func TestForeignFilesystemIsNotRemoved(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, testUID, "volumes", "data")
+	mounter := mount.NewFakeMounter([]mount.MountPoint{{Device: "unknown", Path: target, Type: "tmpfs"}})
+	node := NewNode(NodeOptions{ActorRoot: root, StateDir: t.TempDir(), Mounter: mounter, NAS: &recordingNAS{}})
+	_, err := node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: target})
+	require.Equal(t, codes.FailedPrecondition, status.Code(err))
+	require.Len(t, mounter.MountPoints, 1)
+}
+
+func TestStatelessPublishDoesNotWriteBindingFiles(t *testing.T) {
+	node, _, in := readonlyNodeFixture(t, writablePublishFixture())
+	_, err := node.NodePublishVolume(t.Context(), in)
+	require.NoError(t, err)
+	entries, err := os.ReadDir(node.opts.StateDir)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+}
+
+func TestStatelessUnpublishUsesLiveNASAndLogicalLockKey(t *testing.T) {
+	nas := &recordingNAS{}
+	node := NewNode(NodeOptions{ActorRoot: DefaultActorRoot, NAS: nas, Mounter: mount.NewFakeMounter([]mount.MountPoint{{Path: testTarget, Device: "server:/", Type: "nfs"}}), Lookup: func(context.Context, ActorReference) (ActorInfo, error) {
+		t.Fatal("unpublish must not query actor")
+		return ActorInfo{}, nil
+	}})
+	_, err := node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})
+	require.NoError(t, err)
+	require.Equal(t, testID, nas.unpublished.VolumeId)
+	require.Equal(t, testTarget, nas.unpublished.TargetPath)
+	stateFile := filepath.Join(t.TempDir(), "not-a-directory")
+	require.NoError(t, os.WriteFile(stateFile, []byte("unused for NAS"), 0600))
+	node.opts.StateDir = stateFile
+	_, err = node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})
+	require.NoError(t, err)
+}
+
+func TestStatelessUnpublishWithoutMountNeedsNoBackendOrState(t *testing.T) {
+	node := NewNode(NodeOptions{ActorRoot: DefaultActorRoot, Mounter: mount.NewFakeMounter(nil)})
+	for range 2 {
+		_, err := node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})
+		require.NoError(t, err)
+	}
 }

@@ -283,7 +283,7 @@ leave source placeholders mounted merely to make restore pass.
 The bridge has no binding persistence implementation. Its internal `ateapipb` package is a minimal generated
 projection of the deployed API plus one provenance file; most of its added lines
 are generated API definitions, not additional runtime components. The small
-metadata checks were folded into `resolve.go`, and shared identity helpers now
+metadata checks were folded into `utils.go`, and shared identity helpers now
 live in the existing `pkg/mounter/utils/agentidentity` package rather than a new
 `pkg/volumecontext`.
 
@@ -292,11 +292,9 @@ live in the existing `pkg/mounter/utils/agentidentity` package rather than a new
 | `actor_client.go` | TLS/token connection and generated API calls |
 | `internal/ateapipb/*` | Minimal generated API projection and provenance |
 | `controller.go` | Logical CSI Controller lifecycle |
-| `resolve.go` | Publish-time Actor validation and annotation selection |
 | `node.go` | Node publish/unpublish and target validation |
-| `placeholder.go` | Golden-only isolated bind mounts |
-| `readonly.go` | Outer read-only rejection and explicit inner read-only mount checks |
-| `*_test.go` | Unit, restart, gRPC, Linux mount and optional live-read coverage |
+| `utils.go` | Publish-time Actor validation and annotation selection, golden-only isolated bind mounts, outer read-only rejection and explicit inner read-only mount checks |
+| `*_test.go` | One test file per unit above, plus `integration_test.go` and `integration_linux_test.go` for cross-stage and real-mount coverage |
 | Helm `plugin.yaml` / `controller.yaml` | Shared processes, registrar, TLS sidecar and mounts |
 | Helm `_substrate.tpl` / `substrate-support.yaml` | One identity/flag definition, shared Service/TLS configuration and per-driver configs |
 

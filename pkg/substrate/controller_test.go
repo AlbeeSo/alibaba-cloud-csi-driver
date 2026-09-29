@@ -14,11 +14,12 @@ limitations under the License.
 package substrate
 
 import (
+	"testing"
+
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"testing"
 )
 
 func TestLogicalVolumeLifecycle(t *testing.T) {
@@ -88,4 +89,25 @@ func TestControllerRejectsMissingOrInconsistentActorParameters(t *testing.T) {
 	}
 	_, err := (&Controller{}).CreateVolume(t.Context(), &csi.CreateVolumeRequest{Name: testID, VolumeCapabilities: []*csi.VolumeCapability{publishFixture().VolumeCapability}})
 	require.Equal(t, codes.InvalidArgument, status.Code(err))
+}
+
+func TestCreateReturnsActorMetadataWithoutBindingWorker(t *testing.T) {
+	controller := &Controller{}
+	parameters := actorMetadataFixture()
+	parameters[PodUIDKey] = "worker-one"
+	request := &csi.CreateVolumeRequest{Name: testID, Parameters: parameters, VolumeCapabilities: []*csi.VolumeCapability{writablePublishFixture().VolumeCapability}}
+	first, err := controller.CreateVolume(t.Context(), request)
+	require.NoError(t, err)
+	for key, value := range actorMetadataFixture() {
+		require.Equal(t, value, first.Volume.VolumeContext[key])
+	}
+	require.NotContains(t, first.Volume.VolumeContext, PodUIDKey)
+	parameters[PodUIDKey] = "worker-two"
+	second, err := controller.CreateVolume(t.Context(), request)
+	require.NoError(t, err)
+	require.Equal(t, first.Volume.VolumeContext, second.Volume.VolumeContext)
+	parameters["csi.alibabacloud.com/actor.name"] = "wrong-actor"
+	third, err := controller.CreateVolume(t.Context(), request)
+	require.NoError(t, err)
+	require.Equal(t, "wrong-actor", third.Volume.VolumeContext["csi.alibabacloud.com/actor.name"])
 }
