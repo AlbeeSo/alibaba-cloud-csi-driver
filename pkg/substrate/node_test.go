@@ -39,16 +39,44 @@ type recordingNAS struct {
 	published   *csi.NodePublishVolumeRequest
 	unpublished *csi.NodeUnpublishVolumeRequest
 	err         error
+	mounts      func() mount.Interface
 }
 
 func (n *recordingNAS) NodePublishVolume(_ context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
 	n.published = req
+	if n.err == nil && n.mounts != nil {
+		if err := fakeNASMount(n.mounts(), req); err != nil {
+			return nil, err
+		}
+	}
 	return &csi.NodePublishVolumeResponse{}, n.err
 }
 
 func (n *recordingNAS) NodeUnpublishVolume(_ context.Context, req *csi.NodeUnpublishVolumeRequest) (*csi.NodeUnpublishVolumeResponse, error) {
 	n.unpublished = req
+	if n.err == nil && n.mounts != nil {
+		if err := n.mounts().Unmount(req.TargetPath); err != nil {
+			return nil, err
+		}
+	}
 	return &csi.NodeUnpublishVolumeResponse{}, n.err
+}
+
+func fakeNASMount(m mount.Interface, req *csi.NodePublishVolumeRequest) error {
+	entries, err := m.List()
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.Path == req.TargetPath {
+			return nil
+		}
+	}
+	mode := "rw"
+	if explicitReadOnly(req) {
+		mode = "ro"
+	}
+	return m.Mount("server:/", req.TargetPath, "nfs", []string{mode})
 }
 
 func publishFixture() *csi.NodePublishVolumeRequest {
@@ -139,24 +167,23 @@ func TestUnpublishResolvesIdentityWithoutVolumeContext(t *testing.T) {
 	}})
 	_, err := node.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: testTarget, VolumeContext: nodeContextFixture()})
 	require.NoError(t, err)
-	restarted := NewNode(NodeOptions{ActorRoot: DefaultActorRoot, StateDir: state, Mounter: mount.NewFakeMounter(nil), NAS: downstream})
+	restarted := NewNode(NodeOptions{ActorRoot: DefaultActorRoot, StateDir: state, Mounter: mount.NewFakeMounter([]mount.MountPoint{{Path: testTarget, Device: "server:/", Type: "nfs"}}), NAS: downstream})
 	_, err = restarted.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})
 	require.NoError(t, err)
-	require.Equal(t, "customer-pv-a1b2c3", downstream.unpublished.VolumeId)
+	require.Equal(t, testID, downstream.unpublished.VolumeId)
 	require.Equal(t, testTarget, downstream.unpublished.TargetPath)
 }
 
 func TestUnpublishDoesNotNeedActorLookup(t *testing.T) {
 	downstream := &recordingNAS{}
 	state := t.TempDir()
-	require.NoError(t, (bindingStore{root: state}).put(bindingFixture()))
-	node := NewNode(NodeOptions{ActorRoot: "/var/lib/ateom-gvisor/actors", NAS: downstream, StateDir: state, Mounter: mount.NewFakeMounter(nil), Lookup: func(context.Context, ActorReference) (ActorInfo, error) {
+	node := NewNode(NodeOptions{ActorRoot: "/var/lib/ateom-gvisor/actors", NAS: downstream, StateDir: state, Mounter: mount.NewFakeMounter([]mount.MountPoint{{Path: testTarget, Device: "server:/", Type: "nfs"}}), Lookup: func(context.Context, ActorReference) (ActorInfo, error) {
 		t.Fatal("unpublish must not call the Actor API")
 		return ActorInfo{}, status.Error(codes.Unavailable, "control plane unavailable")
 	}})
 	_, err := node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})
 	require.NoError(t, err)
-	require.Equal(t, "customer-pv", downstream.unpublished.VolumeId)
+	require.Equal(t, testID, downstream.unpublished.VolumeId)
 }
 
 func TestNodeGetInfoRequiresNodeIdentity(t *testing.T) {

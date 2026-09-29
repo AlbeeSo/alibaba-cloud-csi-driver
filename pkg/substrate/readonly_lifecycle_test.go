@@ -15,8 +15,7 @@ package substrate
 
 import (
 	"context"
-	"crypto/sha256"
-	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -27,7 +26,7 @@ import (
 	mount "k8s.io/mount-utils"
 )
 
-func TestInnerReadonlyModeCannotChangeAcrossRetriesOrRestart(t *testing.T) {
+func TestExplicitReadonlyStillChecksLiveModeAfterRestart(t *testing.T) {
 	for _, firstRO := range []bool{false, true} {
 		t.Run(map[bool]string{false: "rw to ro", true: "ro to rw"}[firstRO], func(t *testing.T) {
 			real := writablePublishFixture()
@@ -39,6 +38,12 @@ func TestInnerReadonlyModeCannotChangeAcrossRetriesOrRestart(t *testing.T) {
 			}
 			_, err := node.NodePublishVolume(t.Context(), in)
 			require.NoError(t, err)
+			mode := "rw"
+			if firstRO {
+				mode = "ro"
+			}
+			fake := node.opts.Mounter.(*mount.FakeMounter)
+			fake.MountPoints = []mount.MountPoint{{Device: "server:/", Path: testTarget, Type: "nfs", Opts: []string{mode}}}
 			node = NewNode(node.opts)
 			_, err = node.NodePublishVolume(t.Context(), in)
 			require.NoError(t, err)
@@ -46,10 +51,16 @@ func TestInnerReadonlyModeCannotChangeAcrossRetriesOrRestart(t *testing.T) {
 			real.Readonly = !firstRO
 			annotation = annotationFixture(t, real)
 			_, err = node.NodePublishVolume(t.Context(), in)
-			require.Equal(t, codes.AlreadyExists, status.Code(err))
-			require.Nil(t, downstream.published)
+			if firstRO {
+				require.NoError(t, err)
+				require.False(t, downstream.published.Readonly)
+			} else {
+				require.Equal(t, codes.AlreadyExists, status.Code(err))
+				require.Nil(t, downstream.published)
+			}
 			_, err = node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})
 			require.NoError(t, err)
+			fake.MountPoints = nil
 			_, err = node.NodePublishVolume(t.Context(), in)
 			require.NoError(t, err)
 			require.Equal(t, !firstRO, downstream.published.Readonly)
@@ -57,22 +68,15 @@ func TestInnerReadonlyModeCannotChangeAcrossRetriesOrRestart(t *testing.T) {
 	}
 }
 
-func TestLegacyReadonlyBindingRetainsItsDigest(t *testing.T) {
+func TestReadonlyPublishNeedsNoStateDirectory(t *testing.T) {
 	node, downstream, in := readonlyNodeFixture(t, publishFixture())
-	real := publishFixture()
-	resolved, err := resolveMount(t.Context(), node.opts.Lookup, testID, in.VolumeContext)
-	require.NoError(t, err)
-	legacy := binding{Version: 1, LogicalID: testID, Target: testTarget, ActorUID: testUID, VolumeName: "data", Kind: bindingNAS, Driver: NASDriverName, RealID: real.VolumeId, Digest: resolved.Digest}
-	require.NoError(t, (bindingStore{root: node.opts.StateDir}).put(legacy))
+	node.opts.StateDir = ""
 	for range 2 {
 		node = NewNode(node.opts)
 		_, err := node.NodePublishVolume(t.Context(), in)
 		require.NoError(t, err)
 		require.True(t, downstream.published.Readonly)
 	}
-	stored, err := (bindingStore{root: node.opts.StateDir}).load(testID, testTarget)
-	require.NoError(t, err)
-	require.Equal(t, legacy, *stored)
 }
 
 func TestMountedReadonlyCheckUsesOnlyExplicitInnerRequirements(t *testing.T) {
@@ -101,12 +105,8 @@ func TestMountedReadonlyCheckUsesOnlyExplicitInnerRequirements(t *testing.T) {
 			real := writablePublishFixture()
 			tc.mutate(real)
 			node, downstream, in := readonlyNodeFixture(t, real)
-			resolved, err := resolveMount(t.Context(), node.opts.Lookup, testID, in.VolumeContext)
-			require.NoError(t, err)
-			stored := binding{Version: 1, LogicalID: testID, Target: testTarget, ActorUID: testUID, VolumeName: "data", Kind: bindingNAS, Driver: NASDriverName, RealID: real.VolumeId, Digest: resolved.Digest}
-			require.NoError(t, (bindingStore{root: node.opts.StateDir}).put(stored))
 			node.opts.Mounter = mount.NewFakeMounter([]mount.MountPoint{{Path: testTarget, Type: "nfs", Opts: []string{tc.mountMode}}})
-			_, err = node.NodePublishVolume(t.Context(), in)
+			_, err := node.NodePublishVolume(t.Context(), in)
 			if tc.wantReject {
 				require.Equal(t, codes.AlreadyExists, status.Code(err))
 				require.Nil(t, downstream.published)
@@ -149,27 +149,15 @@ func TestGoldenPlaceholderRejectsOuterReadonlyAndRemainsWritable(t *testing.T) {
 	require.Empty(t, mounter.MountPoints)
 }
 
-func TestSaltedBindingRequiresUnpublishBeforeReuse(t *testing.T) {
+func TestObsoleteMetadataCannotBlockStatelessPublish(t *testing.T) {
 	real := writablePublishFixture()
 	node, downstream, in := readonlyNodeFixture(t, real)
-	resolved, err := resolveMount(t.Context(), node.opts.Lookup, testID, in.VolumeContext)
-	require.NoError(t, err)
-	legacy := binding{Version: 1, LogicalID: testID, Target: testTarget, ActorUID: testUID, VolumeName: "data", Kind: bindingNAS, Driver: NASDriverName, RealID: real.VolumeId,
-		Digest: fmt.Sprintf("%x", sha256.Sum256([]byte(resolved.Digest+"\x00readonly")))}
-	store := bindingStore{root: node.opts.StateDir}
-	require.NoError(t, store.put(legacy))
-	_, err = node.NodePublishVolume(t.Context(), in)
-	require.Equal(t, codes.AlreadyExists, status.Code(err))
-	require.Nil(t, downstream.published)
-	stored, err := store.load(testID, testTarget)
-	require.NoError(t, err)
-	require.Equal(t, legacy, *stored)
-	_, err = node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})
-	require.NoError(t, err)
-	_, err = node.NodePublishVolume(t.Context(), in)
+	path := filepath.Join(node.opts.StateDir, "legacy.json")
+	require.NoError(t, os.WriteFile(path, []byte("corrupt or obsolete metadata"), 0600))
+	_, err := node.NodePublishVolume(t.Context(), in)
 	require.NoError(t, err)
 	require.False(t, downstream.published.Readonly)
-	stored, err = store.load(testID, testTarget)
+	data, err := os.ReadFile(path)
 	require.NoError(t, err)
-	require.Equal(t, resolved.Digest, stored.Digest)
+	require.Equal(t, "corrupt or obsolete metadata", string(data))
 }

@@ -21,8 +21,8 @@ deployment. With the option enabled it extends the existing workloads:
   mTLS and accept Controller/Identity RPCs only.
 - One `csi-provisioner-substrate` ConfigMap defines both TLS listeners.
 - One additional bridge registrar is added to each existing Node Pod.
-- Actor hostPath mounts with bidirectional propagation and persistent node-local
-  state under the bridge's CSI socket directory.
+- Actor hostPath mounts with bidirectional propagation and persistent Golden
+  source directories under the bridge's CSI socket directory; no binding journal.
 - Both workloads retain Pod identity projections for TLS. Only the Node workload
   projects the Actor API token and Service DNS server trust; the Controller keeps
   its certificate and Pod identity client trust for inbound mTLS.
@@ -65,10 +65,10 @@ process competing for them. The NAS-only `--nas-mount-proxy-sock` override takes
 precedence over `--mount-proxy-sock` and the `AlinasMountProxy` default, without
 changing OSS's per-volume proxy selection.
 
-The state directory is `/csi/substrate.csi.alibabacloud.com/substrate-state`
-inside the shared Node container. It still maps to the same node-local bridge
-socket directory used by the standalone layout. Using an ephemeral directory
-instead breaks cleanup after a Pod restart. Never run the old standalone Node
+The `StateDir` is `/csi/substrate.csi.alibabacloud.com/substrate-state`
+inside the shared Node container. It is used only for Golden source data, not
+NAS metadata or binding JSON. Keep its existing node-local hostPath lifetime;
+an ephemeral replacement can lose a live Golden source. Never run the old standalone Node
 driver and the shared Node driver on the same node/socket during migration.
 
 The shared Service selects `app: csi-provisioner`. `substrate-nas` points the NAS
@@ -145,12 +145,12 @@ storage. Outer VolumeContext is not interpreted as read-only configuration.
 Configure business read-only access in the annotation producer, not in the
 bridge StorageClass's mountOptions.
 
-For a target with an existing binding, only an explicit inner `Readonly=true`
+For an existing mount, only an explicit inner `Readonly=true`
 or READER_ONLY mode requires an already-mounted filesystem to report `ro`.
 This catches writable remounts without a configuration change. The check does
 not infer requirements from inner options or mount flags, and does not require
-RW when no explicit read-only requirement exists. Untracked mounts still cannot
-be claimed. Golden placeholders are writable bind mounts; they do not inherit
+RW when no explicit read-only requirement exists. Unsupported live filesystem
+types are rejected. Golden placeholders are writable bind mounts; they do not inherit
 outer read-only constraints.
 
 ## Identity keys
@@ -179,38 +179,46 @@ lookup, annotation parsing, backend provisioning or driver-side state write.
 Missing or invalid annotations and unavailable Actor APIs are handled at publish,
 not at create.
 
-NodePublish reads the current Actor configuration and retains identity,
-annotation, target and protocol checks, with the read-only boundaries above. A legitimate annotation change
-after create and before the first local binding takes effect on first publish.
-There is no cross-stage digest in VolumeContext and no comparison against a
-Controller snapshot of the configuration.
+The bridge is stateless. NodePublish reads the current Actor annotation, validates
+it and forwards the inner request to the existing NAS Node service. Golden uses a
+deterministically named source directory and a normal bind mount. The in-memory
+active map serializes operations on one target within the CSI process.
 
-The node-local binding still stores a SHA256 of the canonical annotation request
-and backend driver (or the verified Golden association). It prevents rebinding
-the same target to different storage; identical requests remain retryable.
-Worker placement does not affect this digest. No outer read-only salt is added;
-the canonical annotation digest and persisted binding format remain unchanged.
-The digest is not a substitute for authorization.
-The binding is written before calling NAS, so even a failed publish can leave it
-in place. Changing that target's configuration requires Unpublish first; deleting
-and recreating the logical volume is not required.
+There is no configuration digest, write-ahead binding or persistent intent.
+Failed calls cannot leave such metadata behind to block a corrected request.
+The only retained SHA256 is a deterministic Golden directory name derived from
+logicalID and target; it is not a configuration fingerprint or conflict check.
 
-New publish calls need the Actor name and atespace. Older binding files remain
-readable and can still be unpublished without querying an Actor. Coordinate
-the Substrate API/atelet and bridge upgrade; do not expect the old UID-only
-caller to work with a name-based generated API client.
+Unpublish needs no Actor lookup. It validates logicalID/target and reads the live
+mount table: an absent mount succeeds; NFS/NFS4/alinas is passed to NAS unpublish
+with logicalID as its lock/log key; a verified Golden source is unmounted and
+cleaned up; other mounts are rejected. No broker protocol or server change is
+required. NAS does not depend on StateDir or any old JSON files.
+
+The trusted controller/atelet must perform Unpublish before changing the
+configuration of an already-mounted target. Backend idempotence does not prove
+that an existing NAS mount matches a new annotation; the stateless bridge does
+not attempt that comparison. The explicit inner readonly live check remains.
+The caller must preserve CreateVolume's `substrate-mode` and Actor identity keys
+while adding current worker PodInfo for publish.
 
 When upgrading from the cross-stage-digest implementation, upgrade all Node
 instances before the Controller. New Nodes ignore an old digest left in persisted
 VolumeContext; old Nodes still require one and cannot consume new Controller
 responses. A single Helm upgrade rolls both workloads concurrently, so a volume
 created during that window may fail its first publish until the Node restarts and
-the publish is retried. Keep node-local binding files intact throughout the
-upgrade.
+the publish is retried. Old binding JSON is ignored by this version. Do not remove
+the containing StateDir wholesale: its Golden source data is still needed.
 
-Targets previously tightened by outer read-only signals, such as manually adding
-`ro` to the bridge StorageClass, can have salted bindings. Unpublish them before
-republishing with the new behavior; do not bypass or rewrite those bindings.
+The broker-owned lifecycle alternative is archived on
+`backup/substrate-lifecycle-v1`, with `LIFECYCLE-DESIGN.md` and implementation
+evidence under this documentation directory on that branch. It is not included
+in this PR. Reconsider it only with production evidence or a changed lifecycle
+contract, rather than adding permanent broker interfaces to a temporary bridge.
+
+Substrate skips pod-oriented filesystem metrics files. It does not redirect them
+into actor directories or repeatedly overwrite worker labels. Generic CSI RPC
+metrics and the reviewed short `substrate` metric label remain enabled.
 
 ## API client provenance
 
@@ -232,8 +240,8 @@ only by re-extraction, never by hand-editing.
 
 Local tests cover inner read-only passthrough, early rejection of outer read-only
 signals, actual mount-mode checks, Actor/worker identity separation,
-current configuration on first publish, node-local binding conflicts, old binding
-cleanup, failed publish followed by restart,
+current annotation forwarding, live-based cleanup, corrected requests after
+failed publish/restart, target serialization and Golden source reuse,
 and generated-client TLS/token rotation. Helm tests cover disabled output,
 enabled resources, node-only API trust/token wiring, Controller-only operation
 without Actor API configuration, socket paths and component switches.
@@ -268,8 +276,7 @@ leave source placeholders mounted merely to make restore pass.
 
 ## File responsibilities
 
-The direct `pkg/substrate` directory now contains seven implementation files and
-eleven test files. Its internal `ateapipb` package is a minimal generated
+The bridge has no binding persistence implementation. Its internal `ateapipb` package is a minimal generated
 projection of the deployed API plus one provenance file; most of its added lines
 are generated API definitions, not additional runtime components. The small
 metadata checks were folded into `resolve.go`, and shared identity helpers now
@@ -281,9 +288,8 @@ live in the existing `pkg/mounter/utils/agentidentity` package rather than a new
 | `actor_client.go` | TLS/token connection and generated API calls |
 | `internal/ateapipb/*` | Minimal generated API projection and provenance |
 | `controller.go` | Logical CSI Controller lifecycle |
-| `resolve.go` | Publish-time Actor validation, annotation selection and node-local digest |
+| `resolve.go` | Publish-time Actor validation and annotation selection |
 | `node.go` | Node publish/unpublish and target validation |
-| `bindings.go` | Durable backend identity for restart/deletion-safe cleanup |
 | `placeholder.go` | Golden-only isolated bind mounts |
 | `readonly.go` | Outer read-only rejection and explicit inner read-only mount checks |
 | `*_test.go` | Unit, restart, gRPC, Linux mount and optional live-read coverage |
@@ -294,6 +300,6 @@ live in the existing `pkg/mounter/utils/agentidentity` package rather than a new
 mode key. The existing `common.IsSubstrateVolumeContext` delegates to it so
 existing callers keep their API. Only the exact string `true` enables the mode.
 
-Writing a binding before calling NAS, re-querying the Actor on publish, no-op
-logical Create/Attach/Stage, and Actor-independent Unpublish are deliberate
-design choices, not missing lifecycle implementations.
+Stateless forwarding, live mount inspection, Actor lookup on publish, no-op
+logical Create/Attach/Stage and Actor-independent Unpublish are the selected
+design. See [STATELESS-REVIEW.md](STATELESS-REVIEW.md) for scope and validation.

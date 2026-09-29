@@ -49,7 +49,8 @@ func TestGoldenPlaceholderLifecycleWithoutNAS(t *testing.T) {
 	_, err = node.NodePublishVolume(t.Context(), in)
 	require.NoError(t, err)
 	require.Len(t, mounter.MountPoints, 1)
-	placeholder := (bindingStore{root: state}).placeholder(testID, target)
+	placeholder, err := node.placeholderSource(testID, target)
+	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(placeholder, "build-output"), []byte("temporary"), 0600))
 	restarted := NewNode(NodeOptions{ActorRoot: root, StateDir: state, Mounter: mounter, NAS: nas})
 	_, err = restarted.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: target})
@@ -61,26 +62,25 @@ func TestGoldenPlaceholderLifecycleWithoutNAS(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestUnpublishKeepsBindingWhenNASFails(t *testing.T) {
+func TestUnpublishRetriesLiveMountWhenNASFails(t *testing.T) {
 	state := t.TempDir()
-	store := bindingStore{root: state}
-	b := bindingFixture()
-	require.NoError(t, store.put(b))
 	nas := &recordingNAS{err: status.Error(codes.Unavailable, "daemon unavailable")}
-	node := NewNode(NodeOptions{ActorRoot: DefaultActorRoot, StateDir: state, Mounter: mount.NewFakeMounter(nil), NAS: nas, Lookup: func(context.Context, ActorReference) (ActorInfo, error) {
+	node := NewNode(NodeOptions{ActorRoot: DefaultActorRoot, StateDir: state, Mounter: mount.NewFakeMounter([]mount.MountPoint{{Path: testTarget, Device: "server:/", Type: "nfs"}}), NAS: nas, Lookup: func(context.Context, ActorReference) (ActorInfo, error) {
 		t.Fatal("unpublish must not query actor")
 		return ActorInfo{}, nil
 	}})
 	_, err := node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})
 	require.Equal(t, codes.Unavailable, status.Code(err))
-	_, err = store.load(testID, testTarget)
+	nas.err = nil
+	node = NewNode(node.opts)
+	_, err = node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})
 	require.NoError(t, err)
 }
 
-func TestUntrackedMountIsNeverClaimedOrRemoved(t *testing.T) {
+func TestForeignFilesystemIsNotRemoved(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, testUID, "volumes", "data")
-	mounter := mount.NewFakeMounter([]mount.MountPoint{{Device: "unknown", Path: target, Type: "nfs"}})
+	mounter := mount.NewFakeMounter([]mount.MountPoint{{Device: "unknown", Path: target, Type: "tmpfs"}})
 	node := NewNode(NodeOptions{ActorRoot: root, StateDir: t.TempDir(), Mounter: mounter, NAS: &recordingNAS{}})
 	_, err := node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: target})
 	require.Equal(t, codes.FailedPrecondition, status.Code(err))
@@ -135,7 +135,7 @@ func TestCreateSucceedsBeforePublishConfigurationIsAvailable(t *testing.T) {
 	}
 }
 
-func TestLocalBindingRejectsConfigurationChangesUntilUnpublish(t *testing.T) {
+func TestPublishUsesCurrentConfigurationWithoutBindingConflicts(t *testing.T) {
 	for _, failedFirst := range []bool{false, true} {
 		t.Run(map[bool]string{false: "mounted", true: "failed publish"}[failedFirst], func(t *testing.T) {
 			real := writablePublishFixture()
@@ -160,8 +160,8 @@ func TestLocalBindingRejectsConfigurationChangesUntilUnpublish(t *testing.T) {
 			real.VolumeContext["path"] = "/changed-after-binding"
 			annotation = annotationFixture(t, real)
 			_, err = node.NodePublishVolume(t.Context(), request)
-			require.Equal(t, codes.AlreadyExists, status.Code(err))
-			require.Nil(t, nas.published)
+			require.NoError(t, err)
+			require.Equal(t, "/changed-after-binding", nas.published.VolumeContext["path"])
 			_, err = node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})
 			require.NoError(t, err)
 			_, err = node.NodePublishVolume(t.Context(), request)

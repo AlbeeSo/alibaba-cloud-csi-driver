@@ -4,19 +4,21 @@
 
 | Review item | Result |
 |---|---|
-| Unchecked binding file Close/Remove errors | Read/close errors are joined; temporary-file cleanup errors are propagated; directory Sync and Close are both checked |
+| Binding persistence | Removed from the PR; lifecycle implementation and its reviewed persistence logic are retained on the backup branch |
 | Uppercase error strings | Actor client errors now start with lowercase text |
 | Two-request responsibility | `node.go` states that the annotation owns backend configuration and that virtual capabilities must not be merged |
 | Create/publish responsibility | Create validates only the logical request, without Actor lookup or a cross-stage digest; first publish uses current configuration and retains all publish-side validation |
-| Local drift protection | Canonical annotation digests and persisted format remain unchanged; changed configurations require Unpublish once a binding exists, including after a failed publish; legacy salted bindings also require Unpublish, not an implicit rewrite |
+| Stateless lifecycle | No configuration digest or write-ahead record; corrected failed requests can retry, and live mount state drives Unpublish. The caller owns unpublish-before-reconfigure |
 | Read-only passthrough | Inner Readonly, access mode, mount flags and options remain unchanged, including conflicting options whose precedence belongs to NAS; outer Readonly, READER_ONLY and ro mount flags fail before lookup or mounting; no union, salt or normalization |
-| Mounted read-only consistency | Existing targets are checked for actual ro only when the inner request explicitly sets Readonly or READER_ONLY; no inference from options/flags, no writable-mode requirement, and no claim of untracked mounts |
+| Mounted read-only consistency | Existing targets are checked for actual ro only when the inner request explicitly sets Readonly or READER_ONLY; no inference from options/flags or writable-mode requirement |
 | Deployment wiring | `enableSubstrate` extends the original plugin/provisioner processes, reuses their ServiceAccounts, and adds a shared Envoy/Service/ConfigMap, bridge registrar and persistent state; Actor API client initialization, token and server trust are Node-only, while Controller inbound mTLS remains |
 | Deployment regressions | Default-disabled render stays byte-identical; enabled render, custom paths, component switches and server-side dry-run are checked |
 | Check execution | `hack/check-substrate-helm.sh` provides an opt-in local check; no dedicated GitHub Actions workflow |
 | Actor versus worker identity | Separate Actor keys; standard PodInfo carries the current worker, while credentials and EFC ownership remain Actor-scoped |
 | Shared identity helpers | Folded into the existing agentidentity utility package; one Substrate mode predicate, with the old common entry point retained |
 | Client API usage | Handwritten Invoke paths and the hand-written proto are removed; generated GetActor/GetActorTemplate are used and tested against the deployed API |
+| Filesystem metrics | Substrate skips pod-oriented files; short metric labels and shared NAS server initialization are retained |
+| Shared broker scope | No change to pkg/mounter/proxy or cmd/mount-proxy-server relative to the selected base; no lifecycle protocol in this PR |
 
 ## Explicit limitations
 
@@ -43,6 +45,10 @@
    standalone bridge resources deliberately; do not run duplicate Node drivers
    against the same socket. The shared-workload consolidation has render and
    build coverage, not a fresh live deployment result.
+6. **Stateless contract:** existing NAS mount equivalence is delegated to backend
+   idempotence and caller sequencing. This PR does not detect annotation drift on
+   an already-mounted target, journal intent, or reconcile orphan helpers. Those
+   capabilities and their limits are preserved on the lifecycle backup branch.
 
 ## Validation performed
 
@@ -67,14 +73,14 @@
 
 The implementation is split by responsibility rather than by an expanding set of
 runtime features: lookup/identity, logical Controller operations, Node forwarding,
-durable binding, Golden placeholder and read-only restrictions. Test files cover
+live mount cleanup, Golden source directories and read-only restrictions. Test files cover
 those boundaries and their lifecycle combinations. Helm files describe actual
 deployment responsibilities. The large API files are generated upstream API
 definitions with recorded hashes, not handwritten bridge business logic.
 
-After consolidation there are seven implementation files and eleven test files
-directly under `pkg/substrate`. The separate metadata helper file and the new
-`pkg/volumecontext` directory have been removed. Controller/Node workloads are
+The binding implementation and configuration digest have been removed. The
+separate metadata helper file and the new `pkg/volumecontext` directory have
+also been removed. Controller/Node workloads are
 the existing provisioner/plugin Pods, not a second deployment stack.
 
 See [README.md](README.md) for the field contract, deployment values, upgrade

@@ -19,9 +19,7 @@ package substrate
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils/agentidentity"
-	"os"
 	"path/filepath"
 	"regexp"
 	"sync"
@@ -83,7 +81,7 @@ func (n *Node) acquire(target string) bool {
 func (n *Node) release(target string) { n.mu.Lock(); delete(n.active, target); n.mu.Unlock() }
 
 func (n *Node) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
-	uid, name, err := n.identity(req.GetVolumeId(), req.GetTargetPath())
+	uid, _, err := n.identity(req.GetVolumeId(), req.GetTargetPath())
 	if err != nil {
 		return nil, err
 	}
@@ -108,42 +106,24 @@ func (n *Node) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolume
 		return nil, err
 	}
 	// req describes the virtual bridge volume; resolved.Request owns the backend configuration.
-	store := bindingStore{root: n.opts.StateDir}
-	if n.opts.Mounter == nil {
-		return nil, status.Error(codes.FailedPrecondition, "mount inspector is required")
-	}
-	if _, err := store.load(req.VolumeId, req.TargetPath); errors.Is(err, os.ErrNotExist) {
-		mounted, err := n.mounted(req.TargetPath)
-		if err != nil {
-			return nil, err
-		}
-		if mounted {
-			return nil, status.Error(codes.FailedPrecondition, "refusing to claim an untracked mount")
-		}
-	} else if err != nil {
-		return nil, status.Errorf(codes.FailedPrecondition, "cannot read binding: %v", err)
-	} else if err := n.checkMountedReadOnly(req.TargetPath, explicitReadOnly(resolved.Request)); err != nil {
-		return nil, err
-	}
-	b := binding{Version: 1, LogicalID: req.VolumeId, Target: req.TargetPath, ActorUID: uid, VolumeName: name, Kind: resolved.Kind, Digest: resolved.Digest}
-	if resolved.Kind == bindingNAS {
-		b.Driver = NASDriverName
-		b.RealID = resolved.Request.VolumeId
-	}
-	if err := store.put(b); err != nil {
-		if errors.Is(err, errBindingConflict) {
-			return nil, status.Error(codes.AlreadyExists, err.Error())
-		}
-		return nil, status.Errorf(codes.Internal, "persist mount binding: %v", err)
-	}
-	if resolved.Kind == bindingGolden {
-		if err := n.publishPlaceholder(store, b); err != nil {
+	if resolved.Actor.Golden {
+		if err := n.publishPlaceholder(req.VolumeId, req.TargetPath); err != nil {
 			return nil, status.Errorf(codes.Internal, "publish golden placeholder: %v", err)
 		}
 		return &csi.NodePublishVolumeResponse{}, nil
 	}
 	if n.opts.NAS == nil {
 		return nil, status.Error(codes.FailedPrecondition, "NAS forwarding is not configured")
+	}
+	live, err := n.mountAt(req.TargetPath)
+	if err != nil {
+		return nil, err
+	}
+	if live != nil && !nasMount(live) {
+		return nil, status.Error(codes.FailedPrecondition, "target is mounted with an unsupported filesystem")
+	}
+	if err := n.checkMountedReadOnly(req.TargetPath, explicitReadOnly(resolved.Request)); err != nil {
+		return nil, err
 	}
 	real := resolved.Request
 	real.TargetPath = req.TargetPath
@@ -168,41 +148,37 @@ func (n *Node) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublishVo
 		return nil, status.Error(codes.Aborted, "target operation already in progress")
 	}
 	defer n.release(req.TargetPath)
-	store := bindingStore{root: n.opts.StateDir}
-	b, err := store.load(req.VolumeId, req.TargetPath)
-	if errors.Is(err, os.ErrNotExist) {
-		mounted, checkErr := n.mounted(req.TargetPath)
-		if checkErr != nil {
-			return nil, checkErr
-		}
-		if mounted {
-			return nil, status.Error(codes.FailedPrecondition, "refusing to unmount an untracked target")
-		}
-		if err := os.Remove(req.TargetPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return nil, status.Errorf(codes.FailedPrecondition, "untracked target is not removable: %v", err)
-		}
+	live, err := n.mountAt(req.TargetPath)
+	if err != nil {
+		return nil, err
+	}
+	if live == nil {
 		return &csi.NodeUnpublishVolumeResponse{}, nil
 	}
-	if err != nil {
-		return nil, status.Errorf(codes.FailedPrecondition, "cannot read mount binding: %v", err)
+	if !nasMount(live) && filepath.IsAbs(n.opts.StateDir) && filepath.Clean(n.opts.StateDir) != "/" {
+		source, sourceErr := n.placeholderSource(req.VolumeId, req.TargetPath)
+		if sourceErr != nil {
+			return nil, sourceErr
+		}
+		owned, sourceErr := n.placeholderMounted(source, req.TargetPath)
+		if sourceErr != nil {
+			return nil, sourceErr
+		}
+		if owned {
+			if err := n.unpublishPlaceholder(source, req.TargetPath); err != nil {
+				return nil, status.Errorf(codes.Internal, "unpublish golden placeholder: %v", err)
+			}
+			return &csi.NodeUnpublishVolumeResponse{}, nil
+		}
 	}
-	switch b.Kind {
-	case bindingGolden:
-		if err := n.unpublishPlaceholder(store, *b); err != nil {
-			return nil, status.Errorf(codes.Internal, "unpublish golden placeholder: %v", err)
-		}
-	case bindingNAS:
-		if n.opts.NAS == nil {
-			return nil, status.Error(codes.FailedPrecondition, "NAS forwarding is not configured")
-		}
-		if _, err := n.opts.NAS.NodeUnpublishVolume(ctx, &csi.NodeUnpublishVolumeRequest{VolumeId: b.RealID, TargetPath: b.Target}); err != nil {
-			return nil, err
-		}
-	default:
-		return nil, status.Error(codes.FailedPrecondition, "unknown mount binding kind")
+	if !nasMount(live) {
+		return nil, status.Error(codes.FailedPrecondition, "refusing to unmount an unsupported live mount")
 	}
-	if err := store.remove(req.VolumeId, req.TargetPath); err != nil {
-		return nil, status.Errorf(codes.Internal, "remove mount binding: %v", err)
+	if n.opts.NAS == nil {
+		return nil, status.Error(codes.FailedPrecondition, "NAS forwarding is not configured")
+	}
+	if _, err := n.opts.NAS.NodeUnpublishVolume(ctx, &csi.NodeUnpublishVolumeRequest{VolumeId: req.VolumeId, TargetPath: req.TargetPath}); err != nil {
+		return nil, err
 	}
 	return &csi.NodeUnpublishVolumeResponse{}, nil
 }

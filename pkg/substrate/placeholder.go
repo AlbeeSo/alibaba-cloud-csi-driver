@@ -14,68 +14,133 @@ limitations under the License.
 package substrate
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	mount "k8s.io/mount-utils"
 )
 
-func (n *Node) mounted(target string) (bool, error) {
+func (n *Node) mountAt(target string) (*mount.MountPoint, error) {
 	if n.opts.Mounter == nil {
-		return false, status.Error(codes.FailedPrecondition, "mount inspector is required")
+		return nil, status.Error(codes.FailedPrecondition, "mount inspector is required")
 	}
 	entries, err := n.opts.Mounter.List()
 	if err != nil {
-		return false, status.Errorf(codes.Internal, "read mount table: %v", err)
+		return nil, status.Errorf(codes.Internal, "read mount table: %v", err)
 	}
 	for _, entry := range entries {
 		if entry.Path == target {
+			return &entry, nil
+		}
+	}
+	return nil, nil
+}
+
+func nasMount(entry *mount.MountPoint) bool {
+	return entry.Type == "nfs" || entry.Type == "nfs4" || entry.Type == "alinas"
+}
+
+func (n *Node) placeholderSource(volumeID, target string) (string, error) {
+	if !filepath.IsAbs(n.opts.StateDir) || filepath.Clean(n.opts.StateDir) == "/" {
+		return "", status.Error(codes.FailedPrecondition, "an absolute dedicated placeholder directory is required")
+	}
+	key := fmt.Sprintf("%x", sha256.Sum256([]byte(volumeID+"\x00"+target)))
+	return filepath.Join(n.opts.StateDir, "placeholders", key), nil
+}
+
+func (n *Node) placeholderMounted(source, target string) (bool, error) {
+	info, err := os.Lstat(source)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return false, status.Error(codes.FailedPrecondition, "placeholder source is not an owned directory")
+	}
+	entries, err := n.opts.Mounter.List()
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range entries {
+		if entry.Path == target && entry.Device == source {
+			return true, nil
+		}
+	}
+	refs, err := n.opts.Mounter.GetMountRefs(source)
+	if err != nil {
+		return false, err
+	}
+	for _, ref := range refs {
+		if ref == target {
 			return true, nil
 		}
 	}
 	return false, nil
 }
 
-func (n *Node) publishPlaceholder(store bindingStore, b binding) error {
-	mounted, err := n.mounted(b.Target)
-	if err != nil || mounted {
-		return err
-	}
-	source := store.placeholder(b.LogicalID, b.Target)
-	if err := os.MkdirAll(source, 0755); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(b.Target, 0755); err != nil {
-		return err
-	}
-	return n.opts.Mounter.Mount(source, b.Target, "", []string{"bind"})
-}
-
-func (n *Node) unpublishPlaceholder(store bindingStore, b binding) error {
-	mounted, err := n.mounted(b.Target)
+func (n *Node) publishPlaceholder(volumeID, target string) error {
+	live, err := n.mountAt(target)
 	if err != nil {
 		return err
 	}
-	if mounted {
-		if err := n.opts.Mounter.Unmount(b.Target); err != nil {
-			return err
-		}
-	}
-	if err := os.Remove(b.Target); err != nil && !errors.Is(err, os.ErrNotExist) {
+	source, err := n.placeholderSource(volumeID, target)
+	if err != nil {
 		return err
 	}
-	source := store.placeholder(b.LogicalID, b.Target)
+	if live != nil {
+		owned, err := n.placeholderMounted(source, target)
+		if err != nil {
+			return err
+		}
+		if !owned {
+			return status.Error(codes.FailedPrecondition, "Golden target does not reference its expected source")
+		}
+		return nil
+	}
+	if info, err := os.Lstat(source); err == nil && (!info.IsDir() || info.Mode()&os.ModeSymlink != 0) {
+		return status.Error(codes.FailedPrecondition, "placeholder source is not an owned directory")
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.MkdirAll(source, 0755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(target, 0755); err != nil {
+		return err
+	}
+	return n.opts.Mounter.Mount(source, target, "", []string{"bind"})
+}
+
+func (n *Node) unpublishPlaceholder(source, target string) error {
+	if err := n.opts.Mounter.Unmount(target); err != nil {
+		return err
+	}
+	if err := os.Remove(target); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	entries, err := n.opts.Mounter.List()
 	if err != nil {
 		return err
 	}
 	for _, entry := range entries {
-		if entry.Path == source || strings.HasPrefix(entry.Path, source+string(os.PathSeparator)) {
+		if entry.Device == source || entry.Path == source || strings.HasPrefix(entry.Path, source+string(os.PathSeparator)) {
 			return fmt.Errorf("refusing to remove mounted placeholder storage")
 		}
+	}
+	refs, err := n.opts.Mounter.GetMountRefs(source)
+	if err != nil {
+		return err
+	}
+	if len(refs) > 0 {
+		return fmt.Errorf("placeholder source still has mount references")
 	}
 	return os.RemoveAll(source)
 }

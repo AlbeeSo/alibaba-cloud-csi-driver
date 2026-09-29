@@ -96,7 +96,7 @@ func TestPublishKeepsActorIdentityWhileWorkerChanges(t *testing.T) {
 	}
 	_, err := node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})
 	require.NoError(t, err)
-	require.Equal(t, real.VolumeId, downstream.unpublished.VolumeId)
+	require.Equal(t, testID, downstream.unpublished.VolumeId)
 }
 
 func TestPublishRejectsIncompleteOrMismatchedActorMetadata(t *testing.T) {

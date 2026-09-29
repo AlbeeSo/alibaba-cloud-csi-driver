@@ -15,6 +15,7 @@ package substrate
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -43,6 +44,7 @@ func readonlyNodeFixture(t *testing.T, real *csi.NodePublishVolumeRequest) (*Nod
 			return ActorInfo{UID: testUID, Atespace: "storage-test", Name: "actor", Annotation: annotation}, nil
 		},
 	})
+	downstream.mounts = func() mount.Interface { return node.opts.Mounter }
 	return node, downstream, &csi.NodePublishVolumeRequest{
 		VolumeId: testID, TargetPath: testTarget,
 		VolumeCapability: writablePublishFixture().VolumeCapability,
@@ -144,7 +146,9 @@ func TestPublishRejectsOuterReadonlyBeforeLookupOrMount(t *testing.T) {
 			require.Equal(t, codes.FailedPrecondition, status.Code(err))
 			require.Zero(t, calls)
 			require.Nil(t, downstream.published)
-			require.NoFileExists(t, (bindingStore{root: node.opts.StateDir}).file(testID, testTarget))
+			entries, err := os.ReadDir(node.opts.StateDir)
+			require.NoError(t, err)
+			require.Empty(t, entries)
 		})
 	}
 }

@@ -15,9 +15,7 @@ package substrate
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
-	"fmt"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils/agentidentity"
 	"path/filepath"
 	"strings"
@@ -26,15 +24,12 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
-	"google.golang.org/protobuf/proto"
 )
 
 type resolvedMount struct {
 	Actor      ActorInfo
 	ActorUID   string
 	VolumeName string
-	Kind       bindingKind
-	Digest     string
 	Request    *csi.NodePublishVolumeRequest
 }
 
@@ -62,8 +57,6 @@ func resolveMount(ctx context.Context, lookup ActorLookup, id string, attributes
 		if actor.Atespace != "ate-golden" || actor.TemplateUID == "" || actor.Name != actor.TemplateUID {
 			return resolvedMount{}, status.Error(codes.FailedPrecondition, "golden actor association is invalid")
 		}
-		resolved.Kind = bindingGolden
-		resolved.Digest = fmt.Sprintf("%x", sha256.Sum256([]byte("golden\x00"+actor.UID+"\x00"+actor.TemplateUID+"\x00"+resolved.VolumeName)))
 		return resolved, nil
 	}
 	if actor.Atespace == "ate-golden" {
@@ -110,12 +103,6 @@ func resolveMount(ctx context.Context, lookup ActorLookup, id string, attributes
 	if err := validateActorMetadata(req.VolumeContext, actor); err != nil {
 		return resolvedMount{}, err
 	}
-	canonical, err := proto.MarshalOptions{Deterministic: true}.Marshal(req)
-	if err != nil {
-		return resolvedMount{}, status.Error(codes.FailedPrecondition, "cannot encode publish request")
-	}
-	resolved.Kind = bindingNAS
-	resolved.Digest = fmt.Sprintf("%x", sha256.Sum256(append([]byte(NASDriverName+"\x00"), canonical...)))
 	resolved.Request = req
 	return resolved, nil
 }

@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/stretchr/testify/require"
@@ -73,7 +74,9 @@ func TestGoldenPlaceholderRealMountThroughGRPC(t *testing.T) {
 	_, err = client.NodePublishVolume(t.Context(), in)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(target, "probe"), []byte("golden-placeholder"), 0600))
-	read, err := os.ReadFile(filepath.Join((bindingStore{root: state}).placeholder(testID, target), "probe"))
+	source, err := node.placeholderSource(testID, target)
+	require.NoError(t, err)
+	read, err := os.ReadFile(filepath.Join(source, "probe"))
 	require.NoError(t, err)
 	require.Equal(t, []byte("golden-placeholder"), read)
 	unavailable.Store(true)
@@ -100,7 +103,9 @@ func TestGoldenRealMountRejectsReadonlyAndRemainsWritable(t *testing.T) {
 	_, err = node.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: target, VolumeContext: attributes})
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		_, cleanupErr := node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: target})
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, cleanupErr := node.NodeUnpublishVolume(cleanupCtx, &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: target})
 		require.NoError(t, cleanupErr)
 	})
 	require.NoError(t, os.WriteFile(filepath.Join(target, "probe"), []byte("writable placeholder"), 0600))
