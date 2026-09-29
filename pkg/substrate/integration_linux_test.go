@@ -62,7 +62,7 @@ func TestGoldenPlaceholderRealMountThroughGRPC(t *testing.T) {
 	created, err := csi.NewControllerClient(conn).CreateVolume(t.Context(), &csi.CreateVolumeRequest{Name: testID, Parameters: goldenMetadataFixture(), VolumeCapabilities: []*csi.VolumeCapability{publishFixture().VolumeCapability}})
 	require.NoError(t, err)
 	vc := created.Volume.VolumeContext
-	vc[PodUIDKey] = testUID
+	vc[PodUIDKey] = "worker-pod-uid"
 	client := csi.NewNodeClient(conn)
 	in := &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: target, VolumeContext: vc}
 	_, err = client.NodePublishVolume(t.Context(), in)
@@ -95,7 +95,7 @@ func TestGoldenRealMountIgnoresOuterReadonlyAndStaysWritable(t *testing.T) {
 		return ActorInfo{UID: testUID, Atespace: "ate-golden", Name: "template-uid", TemplateUID: "template-uid", Golden: true}, nil
 	}
 	attributes := goldenMetadataFixture()
-	attributes[PodUIDKey] = testUID
+	attributes[PodUIDKey] = "worker-pod-uid"
 	node := NewNode(NodeOptions{ActorRoot: filepath.Join(root, "actors"), StateDir: filepath.Join(root, "state"), Lookup: lookup, Mounter: mount.New("")})
 	_, err := node.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: target, Readonly: true, VolumeContext: attributes})
 	require.NoError(t, err)
@@ -106,4 +106,59 @@ func TestGoldenRealMountIgnoresOuterReadonlyAndStaysWritable(t *testing.T) {
 		require.NoError(t, cleanupErr)
 	})
 	require.NoError(t, os.WriteFile(filepath.Join(target, "probe"), []byte("writable placeholder"), 0600))
+}
+
+func TestGoldenRealStackedMountOwnership(t *testing.T) {
+	if os.Getenv("BRIDGE_REAL_MOUNT_TEST") != "1" {
+		t.Skip("requires an explicitly enabled isolated privileged Linux test")
+	}
+	for _, scenario := range []string{"covered publish", "covered unpublish", "lower mount remains"} {
+		t.Run(scenario, func(t *testing.T) {
+			root, state := t.TempDir(), t.TempDir()
+			target := filepath.Join(root, testUID, "volumes", "data")
+			mounter := mount.NewWithoutSystemd("")
+			node := NewNode(NodeOptions{ActorRoot: root, StateDir: state, Mounter: mounter})
+			source, err := node.placeholderSource(testID, target)
+			require.NoError(t, err)
+			require.NoError(t, os.MkdirAll(source, 0755))
+			require.NoError(t, os.MkdirAll(target, 0755))
+			require.NoError(t, os.WriteFile(filepath.Join(source, "retain"), []byte("source data"), 0600))
+			t.Cleanup(func() {
+				for range 2 {
+					live, err := node.mountAt(target)
+					require.NoError(t, err)
+					if live == nil {
+						return
+					}
+					require.NoError(t, mounter.Unmount(target))
+				}
+			})
+			if scenario == "lower mount remains" {
+				require.NoError(t, mounter.Mount("tmpfs", target, "tmpfs", nil))
+				require.NoError(t, os.WriteFile(filepath.Join(target, "foreign"), []byte("foreign data"), 0600))
+				require.NoError(t, mounter.Mount(source, target, "", []string{"bind"}))
+			} else {
+				require.NoError(t, mounter.Mount(source, target, "", []string{"bind"}))
+				require.NoError(t, mounter.Mount("tmpfs", target, "tmpfs", nil))
+				require.NoError(t, os.WriteFile(filepath.Join(target, "foreign"), []byte("foreign data"), 0600))
+			}
+
+			if scenario == "covered publish" {
+				err = node.publishPlaceholder(testID, target)
+			} else {
+				_, err = node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: target})
+			}
+			require.Error(t, err)
+			live, err := node.mountAt(target)
+			require.NoError(t, err)
+			require.NotNil(t, live)
+			require.Equal(t, "tmpfs", live.Type)
+			foreign, err := os.ReadFile(filepath.Join(target, "foreign"))
+			require.NoError(t, err)
+			require.Equal(t, "foreign data", string(foreign))
+			retained, err := os.ReadFile(filepath.Join(source, "retain"))
+			require.NoError(t, err)
+			require.Equal(t, "source data", string(retained))
+		})
+	}
 }

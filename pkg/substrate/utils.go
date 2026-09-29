@@ -238,25 +238,20 @@ func (n *Node) placeholderMounted(source, target string) (bool, error) {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return false, status.Error(codes.FailedPrecondition, "placeholder source is not an owned directory")
 	}
-	entries, err := n.opts.Mounter.List()
+	live, err := n.mountAt(target)
+	if err != nil || live == nil {
+		return false, err
+	}
+	if live.Device == source {
+		return true, nil
+	}
+	// Bind sources may appear as their backing device in the table. Compare the
+	// visible target inode instead of any hidden lower mount or historical reference.
+	targetInfo, err := os.Stat(target)
 	if err != nil {
 		return false, err
 	}
-	for _, entry := range entries {
-		if entry.Path == target && entry.Device == source {
-			return true, nil
-		}
-	}
-	refs, err := n.opts.Mounter.GetMountRefs(source)
-	if err != nil {
-		return false, err
-	}
-	for _, ref := range refs {
-		if ref == target {
-			return true, nil
-		}
-	}
-	return false, nil
+	return os.SameFile(info, targetInfo), nil
 }
 
 func (n *Node) publishPlaceholder(volumeID, target string) error {
@@ -295,6 +290,11 @@ func (n *Node) publishPlaceholder(volumeID, target string) error {
 func (n *Node) unpublishPlaceholder(source, target string) error {
 	if err := n.opts.Mounter.Unmount(target); err != nil {
 		return err
+	}
+	if remaining, err := n.mountAt(target); err != nil {
+		return err
+	} else if remaining != nil {
+		return fmt.Errorf("target still has a mount after removing the Golden placeholder")
 	}
 	if err := os.Remove(target); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
