@@ -34,6 +34,7 @@ deployment. With the option enabled it extends the existing workloads:
 helm upgrade --install csi deploy/charts/alibaba-cloud-csi-driver \
   --namespace kube-system \
   --set enableSubstrate=true \
+  --set deploy.featureGates=AlinasMountProxy=true \
   --set images.plugin.tag=<image-containing-this-change> \
   --set images.controller.tag=<image-containing-this-change> \
   --set deploy.regionID=<region>
@@ -51,7 +52,6 @@ Key values:
 | `substrate.apiEndpoint` | `api.ate-system.svc:443` | Substrate API TLS endpoint, required only for Node |
 | `substrate.apiAudience` | `api.ate-system.svc` | Audience of the Node's projected API token |
 | `substrate.actorRoot` | `/var/lib/ateom-gvisor/actors` | Must match atelet's host target layout |
-| `substrate.mountProxySocket` | `/run/cnfs/alinas-mounter.sock` | NAS-specific broker socket shared by native NAS and bridge |
 | `substrate.createDriverConfig` | `true` | Create the native NAS and bridge configs for enabled Controllers |
 | `substrate.storageClass.create` | `true` | Create the bridge reference class |
 | `substrate.storageClass.name` | `ate-storage` | Must match the annotation producer's template slots |
@@ -61,9 +61,11 @@ Key values:
 `deploy.kubeletRootDir`, and `imagePullSecrets` are also honored. Node pools must
 be non-overlapping and use the same kubelet root for the global driver config.
 The original process health ports are unchanged; there is no second bridge
-process competing for them. The NAS-only `--nas-mount-proxy-sock` override takes
-precedence over `--mount-proxy-sock` and the `AlinasMountProxy` default, without
-changing OSS's per-volume proxy selection.
+process competing for them. NAS uses the existing socket selection: an explicit
+`--mount-proxy-sock` takes precedence; otherwise `AlinasMountProxy=true` selects
+`/run/cnfs/alinas-mounter.sock`. The feature gate is off by default, so enable it
+for this deployment as shown above. The chart does not inject a socket override
+into the shared CSI process. OSS retains its original flag/per-volume selection.
 
 The `StateDir` is `/csi/substrate.csi.alibabacloud.com/substrate-state`
 inside the shared Node container. It is used only for Golden source data, not
@@ -252,7 +254,7 @@ with Go and Helm installed:
 bash hack/check-substrate-helm.sh
 ```
 
-It runs the render/socket-selection tests and Helm lint with Substrate disabled and enabled. It
+It runs the render tests and Helm lint with Substrate disabled and enabled. It
 does not require a cluster or deploy resources, and has no dedicated workflow.
 
 On an isolated privileged Linux container, set `BRIDGE_REAL_MOUNT_TEST=1` to run

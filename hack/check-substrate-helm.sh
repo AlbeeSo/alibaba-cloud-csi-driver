@@ -26,6 +26,6 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/.."
 
-go test ./pkg/options ./deploy/charts/alibaba-cloud-csi-driver -run 'TestSubstrate|TestResolveNASMountProxySocket' -count=1
+go test ./deploy/charts/alibaba-cloud-csi-driver -run 'TestSubstrate' -count=1
 helm lint deploy/charts/alibaba-cloud-csi-driver
 helm lint deploy/charts/alibaba-cloud-csi-driver --set enableSubstrate=true

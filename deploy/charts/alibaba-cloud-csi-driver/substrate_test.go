@@ -96,7 +96,7 @@ func TestSubstrateDisabledDoesNotAddResources(t *testing.T) {
 }
 
 func TestSubstrateEnabledWiresControllerNodeAndTrust(t *testing.T) {
-	resources := renderChart(t, "--set", "enableSubstrate=true")
+	resources := renderChart(t, "--set", "enableSubstrate=true", "--set", "deploy.featureGates=AlinasMountProxy=true")
 	for _, resource := range resources {
 		if (resource.Kind == "Deployment" && resource.Metadata.Name == "csi-substrate-controller") || (resource.Kind == "DaemonSet" && resource.Metadata.Name == "csi-plugin-substrate") || (resource.Kind == "ServiceAccount" && resource.Metadata.Name == "alicloud-csi-substrate") {
 			t.Fatalf("unexpected standalone bridge resource %s/%s", resource.Kind, resource.Metadata.Name)
@@ -144,8 +144,11 @@ func TestSubstrateEnabledWiresControllerNodeAndTrust(t *testing.T) {
 	if strings.Contains(strings.Join(node.Args, " "), "--mount-proxy-sock=") {
 		t.Fatal("Substrate must not override the shared OSS proxy flag")
 	}
-	if !strings.Contains(strings.Join(node.Args, " "), "--nas-mount-proxy-sock=/run/cnfs/alinas-mounter.sock") {
-		t.Fatal("NAS-specific broker socket is required")
+	if strings.Contains(strings.Join(node.Args, " "), "--nas-mount-proxy-sock=") {
+		t.Fatal("Substrate must not introduce a NAS-specific socket override")
+	}
+	if !slices.Contains(node.Args, "--feature-gates=AlinasMountProxy=true") {
+		t.Fatal("the existing NAS feature gate must be preserved")
 	}
 	if daemon.Template.Spec.ServiceAccountName != "alicloud-csi-node" {
 		t.Fatal("node service account must be preserved")

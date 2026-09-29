@@ -91,7 +91,8 @@ const (
 	// TypePluginCustomFuse custom FUSE type plugin
 	TypePluginCustomFuse = "customfuseplugin.csi.alibabacloud.com"
 	// ExtenderAgent agent component
-	ExtenderAgent = "agent"
+	ExtenderAgent           = "agent"
+	defaultMountProxySocket = "/run/cnfs/alinas-mounter.sock"
 )
 
 var (
@@ -117,7 +118,6 @@ var (
 	//
 	// --customfuse-mount-proxy-sock: the same resolution for customfuse mounts.
 	mountProxySock           = flag.String("mount-proxy-sock", "", "socket path of mount proxy server for alinas/cpfs/oss mounts")
-	nasMountProxySock        = flag.String("nas-mount-proxy-sock", "", "NAS-only mount proxy socket override; takes precedence over mount-proxy-sock")
 	customfuseMountProxySock = flag.String("customfuse-mount-proxy-sock", "", "socket path of mount proxy server for customfuse mounts")
 	substrateEndpoint        = flag.String("substrate-api-endpoint", "", "Substrate control API TLS endpoint for the bridge driver")
 	substrateCA              = flag.String("substrate-api-ca-file", "", "CA bundle verifying the Substrate control API")
@@ -249,7 +249,10 @@ func main() {
 
 	csiCfg := getCSIPluginConfig()
 
-	resolvedNasMountProxySock := options.ResolveNASMountProxySocket(*nasMountProxySock, *mountProxySock, features.FunctionalMutableFeatureGate.Enabled(features.AlinasMountProxy))
+	resolvedNasMountProxySock := *mountProxySock
+	if resolvedNasMountProxySock == "" && features.FunctionalMutableFeatureGate.Enabled(features.AlinasMountProxy) {
+		resolvedNasMountProxySock = defaultMountProxySocket
+	}
 
 	// OSS and CustomFuse take their flag values as-is. Each driver's
 	// NodePublishVolume resolves the socket with ResolveMountProxySocket: a
