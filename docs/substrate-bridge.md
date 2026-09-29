@@ -51,7 +51,7 @@ Key values:
 | `enableSubstrate` | `false` | Enable all bridge resources |
 | `substrate.apiEndpoint` | `api.ate-system.svc:443` | Substrate API TLS endpoint, required only for Node |
 | `substrate.apiAudience` | `api.ate-system.svc` | Audience of the Node's projected API token |
-| `substrate.actorRoot` | `/var/lib/ateom-gvisor/actors` | Must match atelet's host target layout |
+| `substrate.actorRoot` | `/var/lib/ateom-gvisor/actors` | Must match atelet's host target layout; identity carrier, see Identity keys |
 | `substrate.createDriverConfig` | `true` | Create the native NAS and bridge configs for enabled Controllers |
 | `substrate.storageClass.create` | `true` | Create the bridge reference class |
 | `substrate.storageClass.name` | `ate-storage` | Must match the annotation producer's template slots |
@@ -131,9 +131,15 @@ AgenticFS/AgentIdentity attributes and its credential provider. The encoded
 array is limited to 256 KiB. Never put credentials in annotations/VolumeContext.
 
 The actual request remains authoritative for backend ID, server/path, fsType,
-mount options, provider and PublishContext. The bridge sets the host target and
-validated identity metadata. It does not merge arbitrary outer VolumeContext,
-fsType or mount flags into the actual request.
+mount options, provider and PublishContext. The bridge changes exactly three
+things in it: `targetPath` becomes the host directory the caller gave,
+`substrate-mode` is added so that NAS skips kubelet semantics, and the Actor
+identity keys are added where the stored request is silent about identity. The
+last one is not optional: the annotation is generated without knowing which Actor
+the volume will be mounted for, while NAS refuses a publish without a Pod UID and
+exchanges the Agent Identity credential under the Actor UID as its resource ID.
+Nothing else is merged from the outer request: no arbitrary VolumeContext entry,
+no fsType, no mount flag.
 
 Read-only configuration belongs to the annotation request. Its `Readonly`,
 access mode, mount flags and `VolumeContext.options` are forwarded unchanged.
@@ -141,58 +147,91 @@ The NAS driver applies their semantics and option precedence; the bridge does
 not normalize conflicting `rw` options or reinterpret options overridden by
 mount flags.
 
-Outer `Readonly=true`, either READER_ONLY access mode, or an outer mount flag
-containing `ro` is unsupported. The bridge returns `FailedPrecondition` before
-Actor lookup or downstream mounting rather than silently publishing writable
-storage. Outer VolumeContext is not interpreted as read-only configuration.
-Configure business read-only access in the annotation producer, not in the
-bridge StorageClass's mountOptions.
+The outer request contributes no read-only configuration. The bridge does not
+read its `Readonly`, access mode, mount flags or `VolumeContext.options`, and it
+does not reject them either: whatever the Substrate StorageClass, PVC or caller
+asks for, the forwarded request keeps the read-only state of the Actor publish
+request. This is the passthrough rule of the design document, whose purpose is
+that the Substrate and ACS Sandbox forms reach the NAS driver with the same
+read-only configuration; a bridge that "corrects" the request would make the two
+forms differ exactly where neither form can see the difference. The cost is a
+deviation from the CSI wording that the SP MUST honour `readonly` on publish: an
+outer read-only request against a writable Actor request is published writable
+rather than honoured or refused. Configure business read-only access in the
+annotation producer, and treat a bridge StorageClass `mountOptions: [ro]`, a
+`ReadOnlyMany` PVC or a caller-set `readonly` as unconfigured, not as
+enforcement. Golden placeholders are writable bind mounts.
 
 For an existing mount, only an explicit inner `Readonly=true`
 or READER_ONLY mode requires an already-mounted filesystem to report `ro`.
 This catches writable remounts without a configuration change. The check does
 not infer requirements from inner options or mount flags, and does not require
 RW when no explicit read-only requirement exists. Unsupported live filesystem
-types are rejected. Golden placeholders are writable bind mounts; they do not inherit
-outer read-only constraints.
+types are rejected.
 
 ## Identity keys
 
 | Key | Meaning / producer |
 |---|---|
-| `csi.alibabacloud.com/actor.uid` | Actor UID, checked against logical volume ID; also checked against the API response at publish |
+| `csi.alibabacloud.com/actor.uid` | Actor UID; at publish checked against the Actor directory in the mount target and against the Actor API response |
 | `csi.alibabacloud.com/actor.name` | Actor name used for `GetActor` |
 | `csi.alibabacloud.com/actor.namespace` | Actor atespace, not the Kubernetes namespace |
-| `csi.storage.k8s.io/pod.uid` | Current worker Pod UID |
-| `csi.storage.k8s.io/pod.name` | Current worker Pod name |
-| `csi.storage.k8s.io/pod.namespace` | Current worker Pod Kubernetes namespace |
+| `csi.storage.k8s.io/pod.uid` | Actor UID. The ACK-adapted atelet injects it per publish (`volumeContextForActor`); when present it must equal the Actor directory of the target, and the bridge fills it into the forwarded request only if the stored request has none |
+| `csi.storage.k8s.io/pod.name` / `pod.namespace` | Not injected by atelet and not injected by the bridge. Under `substrate-mode` NAS does not resolve a Pod from them, so any values the stored request carries are forwarded as they are |
 | `csi.alibabacloud.com/substrate-mode` | Selects Substrate path/credential handling |
 
-The Actor keys are sent as CreateVolume parameters and returned in
-VolumeContext. Worker PodInfo is injected on each Run/Restore from the current
-assignment, not stored as immutable volume identity. On the storage side,
-`sandboxId`/credential `ResourceID` and EFC ownership remain Actor-scoped;
-restoring real PodInfo must not change the identity used to access data.
+The Actor keys are sent as CreateVolume parameters and returned in VolumeContext.
+Actor identity is per-volume-stable; there is no per-publish worker Pod identity in
+the Substrate request path, because the mount is driven by the Actor, not by a
+Kubernetes Pod object. On the storage side, `sandboxId`/credential `ResourceID`,
+volume limits and EFC ownership all resolve to the Actor UID
+(`utils.MountOwnerUID`), which is what keeps the Substrate and the ACS Sandbox forms
+on the same data-access identity.
 
-CreateVolume validates only its request: logical volume name, filesystem
-capabilities, capacity range, absence of content source/secrets, and complete
-Actor parameters whose UID matches the volume name. It returns the logical ID,
+The mount target, not the VolumeId, carries volume identity. Substrate has not
+stabilized its logical volume naming, so `substrate.actorRoot` is the only layout
+the bridge reads: a publish or unpublish target must be a clean absolute path
+inside the actor root with at least two elements below it, whose first element is
+the Actor UID and whose last element selects the Actor publish-request entry.
+The VolumeId is opaque to the bridge; it is echoed back from `CreateVolume` and
+forwarded to NAS as a lock and log key. This keeps unpublish workable without a
+VolumeContext or an Actor lookup, which `NodeUnpublishVolumeRequest` provides
+neither of.
+
+CreateVolume validates only its request: capacity range,
+absence of content source/secrets, and non-empty Actor parameters. It does not
+interpret the caller's declared volume capabilities: the shape that is actually
+mounted is the inner request validated at publish, and only
+`ValidateVolumeCapabilities` answers the filesystem-only question. Nor does it
+compare the declared identity with the Actor API; the
+parameters are echoed into VolumeContext and verified at publish, where
+`GetActor` is the authority and a value that disagrees with the Actor directory
+in the target is rejected. It returns the logical ID,
 requested capacity, Substrate mode and Actor keys. It performs no Actor/template
 lookup, annotation parsing, backend provisioning or driver-side state write.
 Missing or invalid annotations and unavailable Actor APIs are handled at publish,
-not at create.
+not at create. Reaching this RPC requires a client certificate from the Substrate
+pod-identity CA (`require_client_certificate` on the bridge listener), and Envoy
+applies no per-method authorization beyond that, so every holder of such a
+certificate may create logical volumes for any Actor. Placement authority is the
+trust boundary here: the bridge treats "the Actor API confirms this identity owns
+that template volume" as sufficient, and does not decide whether the requester
+may access the Actor.
 
 The bridge is stateless. NodePublish reads the current Actor annotation, validates
 it and forwards the inner request to the existing NAS Node service. Golden uses a
 deterministically named source directory and a normal bind mount. The in-memory
-active map serializes operations on one target within the CSI process.
+per-target lock (`utils.VolumeLocks`, the same helper the NAS, disk, OSS, BMCPFS
+and customfuse servers use) serializes operations on one target within the CSI
+process.
 
 There is no configuration digest, write-ahead binding or persistent intent.
 Failed calls cannot leave such metadata behind to block a corrected request.
 The only retained SHA256 is a deterministic Golden directory name derived from
 logicalID and target; it is not a configuration fingerprint or conflict check.
 
-Unpublish needs no Actor lookup. It validates logicalID/target and reads the live
+Unpublish needs no Actor lookup. It validates the target against the actor root
+and reads the live
 mount table: an absent mount succeeds; NFS/NFS4/alinas is passed to NAS unpublish
 with logicalID as its lock/log key; a verified Golden source is unmounted and
 cleaned up; other mounts are rejected. No broker protocol or server change is
@@ -201,9 +240,10 @@ required. NAS does not depend on StateDir or any old JSON files.
 The trusted controller/atelet must perform Unpublish before changing the
 configuration of an already-mounted target. Backend idempotence does not prove
 that an existing NAS mount matches a new annotation; the stateless bridge does
-not attempt that comparison. The explicit inner readonly live check remains.
-The caller must preserve CreateVolume's `substrate-mode` and Actor identity keys
-while adding current worker PodInfo for publish.
+not attempt that comparison. The explicit inner readonly live check remains. The
+caller must preserve the `substrate-mode` and Actor identity keys returned by
+CreateVolume; the Actor UID it injects as `csi.storage.k8s.io/pod.uid` must be the
+Actor that owns the target directory.
 
 When upgrading from the cross-stage-digest implementation, upgrade all Node
 instances before the Controller. New Nodes ignore an old digest left in persisted
@@ -221,8 +261,8 @@ in this PR. Reconsider it only with production evidence or a changed lifecycle
 contract, rather than adding permanent broker interfaces to a temporary bridge.
 
 Substrate skips pod-oriented filesystem metrics files. It does not redirect them
-into actor directories or repeatedly overwrite worker labels. Generic CSI RPC
-metrics and the reviewed short `substrate` metric label remain enabled.
+into actor directories. Generic CSI RPC metrics and the reviewed short
+`substrate` metric label remain enabled.
 
 ## API client provenance
 
@@ -242,8 +282,9 @@ only by re-extraction, never by hand-editing.
 
 ## Validation and remaining system work
 
-Local tests cover inner read-only passthrough, early rejection of outer read-only
-signals, actual mount-mode checks, Actor/worker identity separation,
+Local tests cover inner read-only passthrough, outer read-only signals being
+ignored, actual mount-mode checks, the Actor identity of the target directory
+against the caller's and the Actor API's claims,
 current annotation forwarding, live-based cleanup, corrected requests after
 failed publish/restart, target serialization and Golden source reuse,
 and generated-client TLS/token rotation. Helm tests cover disabled output,
@@ -260,8 +301,8 @@ It runs the render tests and Helm lint with Substrate disabled and enabled. It
 does not require a cluster or deploy resources, and has no dedicated workflow.
 
 On an isolated privileged Linux container, set `BRIDGE_REAL_MOUNT_TEST=1` to run
-the real Golden placeholder bind/unbind, writable access and read-only request
-rejection tests. The optional
+the real Golden placeholder bind/unbind, writable access and ignored read-only
+request tests. The optional
 `TestActorLookupLive` performs only API reads when `SUBSTRATE_LIVE_*` is set.
 
 These do not prove the full system sequence:
