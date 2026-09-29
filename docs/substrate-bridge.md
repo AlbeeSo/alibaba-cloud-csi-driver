@@ -132,13 +132,14 @@ size limit on the annotation of its own accord. Never put credentials in
 annotations/VolumeContext.
 
 The actual request remains authoritative for backend ID, server/path, fsType,
-mount options, provider and PublishContext. The bridge changes exactly three
-things in it: `targetPath` becomes the host directory the caller gave,
+mount options, provider and PublishContext. The bridge changes only routing and
+identity metadata: `targetPath` becomes the host directory the caller gave,
 `substrate-mode` is added so that NAS skips kubelet semantics, and the Actor
-identity keys are added where the stored request is silent about identity. The
-last one is not optional: the annotation is generated without knowing which Actor
-the volume will be mounted for, while NAS refuses a publish without a Pod UID and
-exchanges the Agent Identity credential under the Actor UID as its resource ID.
+identity keys are set from the verified Actor, while standard PodInfo comes from
+the current worker assignment. Storage ownership and credential ResourceID remain
+Actor-scoped; the worker UID/name/namespace describe placement and can change on
+resume. Stored PodInfo is not a source of current placement labels; missing
+outer Pod name/namespace labels remove their stored counterparts.
 Nothing else is merged from the outer request: no arbitrary VolumeContext entry,
 no fsType, no mount flag.
 
@@ -182,14 +183,14 @@ publish into one that only a manual unpublish can clear.
 | `csi.alibabacloud.com/actor.uid` | Actor UID; at publish checked against the Actor directory in the mount target and against the Actor API response |
 | `csi.alibabacloud.com/actor.name` | Actor name used for `GetActor` |
 | `csi.alibabacloud.com/actor.namespace` | Actor atespace, not the Kubernetes namespace |
-| `csi.storage.k8s.io/pod.uid` | Actor UID. The ACK-adapted atelet injects it per publish (`volumeContextForActor`); when present it must equal the Actor directory of the target, and the bridge fills it into the forwarded request only if the stored request has none |
-| `csi.storage.k8s.io/pod.name` / `pod.namespace` | Not injected by atelet and not injected by the bridge. Under `substrate-mode` NAS does not resolve a Pod from them, so any values the stored request carries are forwarded as they are |
+| `csi.storage.k8s.io/pod.uid` | Current worker Pod UID, required on publish; supplied by atelet's worker assignment |
+| `csi.storage.k8s.io/pod.name` | Current worker Pod name, when supplied by the control plane |
+| `csi.storage.k8s.io/pod.namespace` | Current worker Pod Kubernetes namespace, not the Actor atespace |
 | `csi.alibabacloud.com/substrate-mode` | Selects Substrate path/credential handling |
 
 The Actor keys are sent as CreateVolume parameters and returned in VolumeContext.
-Actor identity is per-volume-stable; there is no per-publish worker Pod identity in
-the Substrate request path, because the mount is driven by the Actor, not by a
-Kubernetes Pod object. On the storage side, `sandboxId`/credential `ResourceID`,
+Actor identity is per-volume-stable; worker PodInfo is supplied on each Run/Restore
+and must not be confused with Actor identity. On the storage side, `sandboxId`/credential `ResourceID`,
 volume limits and EFC ownership all resolve to the Actor UID
 (`utils.MountOwnerUID`), which is what keeps the Substrate and the ACS Sandbox forms
 on the same data-access identity.
@@ -248,8 +249,9 @@ configuration of an already-mounted target. Backend idempotence does not prove
 that an existing NAS mount matches a new annotation; the stateless bridge does
 not attempt that comparison. The
 caller must preserve the `substrate-mode` and Actor identity keys returned by
-CreateVolume; the Actor UID it injects as `csi.storage.k8s.io/pod.uid` must be the
-Actor that owns the target directory.
+CreateVolume and add the current worker PodInfo. The integrated atelet writes
+`GetTargetAteomUid()` into `pod.uid`; older PoC builds that wrote the Actor UID
+must not be used as evidence for this worker-identity contract.
 
 When upgrading from the cross-stage-digest implementation, upgrade all Node
 instances before the Controller. New Nodes ignore an old digest left in persisted
@@ -341,7 +343,7 @@ live in the existing `pkg/mounter/utils/agentidentity` package rather than a new
 | `internal/ateapipb/*` | Minimal generated API projection and provenance |
 | `controller.go` | Logical CSI Controller lifecycle |
 | `node.go` | Node publish/unpublish and target validation |
-| `utils.go` | Publish-time Actor validation and annotation selection, golden-only isolated bind mounts, outer read-only rejection and explicit inner read-only mount checks |
+| `utils.go` | Publish-time Actor validation and annotation selection, live mount inspection and Golden source verification; no readonly union or live readonly comparison |
 | `*_test.go` | One test file per unit above, plus `integration_test.go` and `integration_linux_test.go` for cross-stage and real-mount coverage |
 | Helm `plugin.yaml` / `controller.yaml` | Shared processes, registrar, TLS sidecar and mounts |
 | Helm `_substrate.tpl` / `substrate-support.yaml` | One identity/flag definition, shared Service/TLS configuration and per-driver configs |

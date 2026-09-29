@@ -144,9 +144,7 @@ func goldenMetadataFixture() map[string]string {
 
 func nodeContextFixture() map[string]string {
 	attributes := actorMetadataFixture()
-	// The ACK-adapted atelet injects the actor UID under the pod UID key
-	// (volumeContextForActor), and nothing under the pod name or namespace keys.
-	attributes[PodUIDKey] = testUID
+	attributes[PodUIDKey] = "worker-pod-uid"
 	return attributes
 }
 
@@ -255,19 +253,18 @@ func TestNodeGetInfoRequiresNodeIdentity(t *testing.T) {
 	require.Equal(t, "worker-node", info.NodeId)
 }
 
-// TestPublishAddsOnlyIdentityToStoredPodMetadata pins the passthrough rule: pod metadata that
-// the Actor's own request carries is forwarded as it is, and the bridge only fills in the
-// actor identity the stored request cannot know.
-func TestPublishAddsOnlyIdentityToStoredPodMetadata(t *testing.T) {
+// Stored PodInfo is not the current placement. Missing caller labels must not retain
+// a previous worker's name or namespace, while Actor ownership stays unchanged.
+func TestPublishDoesNotRetainStoredWorkerLabels(t *testing.T) {
 	real := writablePublishFixture()
 	real.VolumeContext["csi.storage.k8s.io/pod.name"] = "stored-pod-name"
 	real.VolumeContext["csi.storage.k8s.io/pod.namespace"] = "stored-pod-space"
 	node, downstream, request := readonlyNodeFixture(t, real)
 	_, err := node.NodePublishVolume(t.Context(), request)
 	require.NoError(t, err)
-	require.Equal(t, "stored-pod-name", downstream.published.VolumeContext["csi.storage.k8s.io/pod.name"])
-	require.Equal(t, "stored-pod-space", downstream.published.VolumeContext["csi.storage.k8s.io/pod.namespace"])
-	require.Equal(t, testUID, downstream.published.VolumeContext[PodUIDKey])
+	require.NotContains(t, downstream.published.VolumeContext, "csi.storage.k8s.io/pod.name")
+	require.NotContains(t, downstream.published.VolumeContext, "csi.storage.k8s.io/pod.namespace")
+	require.Equal(t, "worker-pod-uid", downstream.published.VolumeContext[PodUIDKey])
 	for key, value := range actorMetadataFixture() {
 		require.Equal(t, value, downstream.published.VolumeContext[key])
 	}
@@ -335,17 +332,17 @@ func TestPublishTreatsVolumeIDAsOpaqueAndUsesTargetLayout(t *testing.T) {
 	require.Equal(t, testUID, downstream.published.VolumeContext["csi.alibabacloud.com/actor.uid"])
 }
 
-func TestPublishRejectsPodUIDThatIsNotTheActor(t *testing.T) {
+func TestPublishRequiresWorkerPodUID(t *testing.T) {
 	real := writablePublishFixture()
 	annotation := annotationFixture(t, real)
 	node, _, in := readonlyNodeFixture(t, real)
 	node.opts.Lookup = func(context.Context, ActorReference) (ActorInfo, error) {
 		return ActorInfo{UID: testUID, Name: "actor", Atespace: "storage-test", Annotation: annotation}, nil
 	}
-	in.VolumeContext[PodUIDKey] = "00000000-0000-0000-0000-000000000000"
+	delete(in.VolumeContext, PodUIDKey)
 	_, err := node.NodePublishVolume(t.Context(), in)
 	require.Equal(t, codes.InvalidArgument, status.Code(err))
-	require.ErrorContains(t, err, "pod UID must be the actor UID")
+	require.ErrorContains(t, err, "worker Pod UID is required")
 }
 
 func TestPublishRejectsWhenNASNotConfigured(t *testing.T) {
@@ -501,19 +498,19 @@ func TestCheckCallerMetadataMatchesTheTargetActor(t *testing.T) {
 		mutate  func(map[string]string)
 		wantErr codes.Code
 	}{
-		{"matching actor and pod", func(map[string]string) {}, codes.OK},
+		{"actor and distinct worker", func(map[string]string) {}, codes.OK},
 		{"legacy pod UID only", func(context map[string]string) {
 			delete(context, "csi.alibabacloud.com/actor.uid")
 			delete(context, "csi.alibabacloud.com/actor.name")
 			delete(context, "csi.alibabacloud.com/actor.namespace")
-		}, codes.OK},
+		}, codes.InvalidArgument},
 		{"foreign actor", func(context map[string]string) {
 			context["csi.alibabacloud.com/actor.uid"] = "00000000-0000-0000-0000-000000000000"
 		}, codes.InvalidArgument},
-		{"foreign pod", func(context map[string]string) {
+		{"different worker", func(context map[string]string) {
 			context[PodUIDKey] = "00000000-0000-0000-0000-000000000000"
-		}, codes.InvalidArgument},
-		{"no pod claim", func(context map[string]string) { delete(context, PodUIDKey) }, codes.OK},
+		}, codes.OK},
+		{"missing worker", func(context map[string]string) { delete(context, PodUIDKey) }, codes.InvalidArgument},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := &csi.NodePublishVolumeRequest{VolumeContext: nodeContextFixture()}
@@ -523,14 +520,14 @@ func TestCheckCallerMetadataMatchesTheTargetActor(t *testing.T) {
 	}
 }
 
-func TestBackendRequestChangesOnlyTargetModeAndMissingIdentity(t *testing.T) {
+func TestBackendRequestChangesOnlyTargetModeAndIdentity(t *testing.T) {
 	actor := ActorInfo{UID: testUID, Name: "actor", Atespace: "storage-test"}
 	in := &csi.NodePublishVolumeRequest{
 		VolumeId:         "whatever-the-caller-called-it",
 		TargetPath:       testTarget,
 		Readonly:         true,
 		VolumeCapability: publishFixture().VolumeCapability,
-		VolumeContext:    map[string]string{"server": "must-not-replace-the-bound-server", PodUIDKey: testUID},
+		VolumeContext:    map[string]string{"server": "must-not-replace-the-bound-server", PodUIDKey: "worker-pod-uid", "csi.storage.k8s.io/pod.namespace": "worker-space"},
 	}
 	for _, tc := range []struct {
 		name        string
@@ -545,20 +542,22 @@ func TestBackendRequestChangesOnlyTargetModeAndMissingIdentity(t *testing.T) {
 			if tc.storedPodID != "" {
 				real.VolumeContext[PodUIDKey] = tc.storedPodID
 			}
+			want := proto.Clone(real).(*csi.NodePublishVolumeRequest)
 			got := backendRequest(in, resolvedMount{Actor: actor, Request: real})
 			require.Equal(t, "customer-pv-a1b2c3", got.VolumeId)
 			require.False(t, got.Readonly)
 			require.Equal(t, csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER, got.VolumeCapability.GetAccessMode().GetMode())
 			require.Equal(t, "ap-example.fs.cn-beijing.agenticfs.aliyuncs.com", got.VolumeContext["server"])
-			require.Equal(t, "stored-pod-name", got.VolumeContext["csi.storage.k8s.io/pod.name"])
-			require.Equal(t, testUID, got.VolumeContext[PodUIDKey])
-			want := proto.Clone(real).(*csi.NodePublishVolumeRequest)
+			require.NotContains(t, got.VolumeContext, "csi.storage.k8s.io/pod.name")
+			require.Equal(t, "worker-pod-uid", got.VolumeContext[PodUIDKey])
 			want.TargetPath = testTarget
 			want.VolumeContext["csi.alibabacloud.com/substrate-mode"] = "true"
 			want.VolumeContext["csi.alibabacloud.com/actor.uid"] = testUID
 			want.VolumeContext["csi.alibabacloud.com/actor.name"] = "actor"
 			want.VolumeContext["csi.alibabacloud.com/actor.namespace"] = "storage-test"
-			want.VolumeContext[PodUIDKey] = testUID
+			want.VolumeContext[PodUIDKey] = "worker-pod-uid"
+			want.VolumeContext["csi.storage.k8s.io/pod.namespace"] = "worker-space"
+			delete(want.VolumeContext, "csi.storage.k8s.io/pod.name")
 			require.True(t, proto.Equal(want, got), "the forwarded request is not the stored request")
 		})
 	}

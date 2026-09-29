@@ -151,8 +151,8 @@ func validateBackendRequest(request *csi.NodePublishVolumeRequest, actor ActorIn
 	}
 	// NAS takes the access-key pair straight from the request (pkg/nas/nodeserver.go:305),
 	// whatever the authentication is set to, and the annotation is Actor metadata with a much
-	// wider readership than a Secret. This is the one place a credential can be stopped from
-	// being written into an Actor object.
+	// wider readership than a Secret. Reject credentials before forwarding; the producer
+	// must separately prevent persisting them in the Actor annotation in the first place.
 	if len(request.Secrets) != 0 {
 		return status.Error(codes.FailedPrecondition, "publish request must not carry credentials")
 	}
@@ -172,7 +172,8 @@ func validateBackendRequest(request *csi.NodePublishVolumeRequest, actor ActorIn
 				return status.Error(codes.FailedPrecondition, "NAS client selection and CNFS routing are not supported through the Substrate bridge")
 			}
 		}
-		if (strings.EqualFold(key, "sandboxId") || key == PodUIDKey) && value != "" && value != actor.UID {
+		// Stored PodInfo is replaced with current placement, not used as ownership.
+		if strings.EqualFold(key, "sandboxId") && value != "" && value != actor.UID {
 			return status.Error(codes.PermissionDenied, "publish request carries a different actor identity")
 		}
 	}

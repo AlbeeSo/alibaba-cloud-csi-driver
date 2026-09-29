@@ -108,16 +108,15 @@ func (n *Node) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolume
 	return n.opts.NAS.NodePublishVolume(ctx, backendRequest(req, resolved))
 }
 
-// checkCallerMetadata validates the part of the request the caller controls: it has to name
-// the Actor that owns the target directory. Pod identity is only injected by the ACK-adapted
-// atelet as the actor UID itself (volumeContextForActor in Substrate's cmd/atelet/volumes.go),
-// so when it is present it must agree with that directory.
+// checkCallerMetadata keeps storage ownership separate from placement: Actor metadata
+// names the target owner, while atelet supplies the current worker Pod UID. The worker
+// can change on resume and must not be compared with the Actor UID.
 func checkCallerMetadata(req *csi.NodePublishVolumeRequest, id volumeIdentity) error {
-	if agentidentity.ActorUID(req.GetVolumeContext()) != id.ActorUID {
+	if req.GetVolumeContext()[agentidentity.ActorUIDKey] != id.ActorUID {
 		return status.Error(codes.InvalidArgument, "actor UID must match the target actor directory")
 	}
-	if uid := req.GetVolumeContext()[PodUIDKey]; uid != "" && uid != id.ActorUID {
-		return status.Error(codes.InvalidArgument, "pod UID must be the actor UID of the target directory")
+	if req.GetVolumeContext()[PodUIDKey] == "" {
+		return status.Error(codes.InvalidArgument, "worker Pod UID is required")
 	}
 	return nil
 }
@@ -145,13 +144,12 @@ func (n *Node) checkBackendTarget(target string) error {
 // backendRequest turns the Actor's stored publish request into the one handed to NAS: the target
 // becomes the host directory the caller gave us, and the substrate-mode marker tells NAS to skip
 // kubelet semantics. Everything else — volume ID, capability, read-only state, mount options,
-// every other volume context entry — passes through untouched, which is what keeps a Substrate
+// other backend volume context entries — pass through untouched, which keeps a Substrate
 // mount equivalent to the ACS Sandbox mount of the same volume.
 //
-// The actor identity is the one addition, and it is not optional: the stored request is generated
-// without knowing which Actor it will be mounted for, and NAS refuses a request without a pod UID
-// (pkg/nas/nodeserver.go:526) and exchanges the agent-identity credential under the actor UID as
-// its resource ID. It is filled in only where the stored request is silent about identity.
+// Identity metadata is supplied separately: validated Actor keys own storage and credential
+// exchange. PodInfo describes the current worker assignment, never a placement cached in the
+// stored request.
 //
 // By design the caller's own read-only request is not carried over, which is a deliberate
 // deviation from the CSI wording that the SP MUST honour readonly on publish: the Actor's request
@@ -162,8 +160,12 @@ func backendRequest(req *csi.NodePublishVolumeRequest, resolved resolvedMount) *
 	real.TargetPath = req.TargetPath
 	real.VolumeContext[utils.SubstrateModeKey] = "true"
 	setActorMetadata(real.VolumeContext, resolved.Actor)
-	if real.VolumeContext[agentidentity.PodUIDKey] == "" {
-		real.VolumeContext[agentidentity.PodUIDKey] = resolved.Actor.UID
+	for _, key := range []string{agentidentity.PodUIDKey, agentidentity.PodNameKey, agentidentity.PodNamespaceKey} {
+		if value := req.VolumeContext[key]; value != "" {
+			real.VolumeContext[key] = value
+		} else {
+			delete(real.VolumeContext, key)
+		}
 	}
 	return real
 }
@@ -260,8 +262,9 @@ func (n *Node) identity(target string) (volumeIdentity, error) {
 // NodeStage and NodeUnstage answer successfully and do nothing: the bridge mounts at publish and
 // has no stage of its own. By design the answer is a success rather than Unimplemented, because
 // atelet only skips staging when the driver reports Unimplemented (internal/volume/csi/plugin.go)
-// and would otherwise fail the mount; the consequence is that its publish carries a staging path
-// the NAS driver never reads, so that path is forwarded and not validated.
+// and would otherwise fail the mount. Atelet consequently supplies an outer staging path;
+// that outer field is not merged into the stored request. A stored inner staging path is
+// independently permitted because NAS does not consume it during NodePublishVolume.
 func (*Node) NodeStageVolume(context.Context, *csi.NodeStageVolumeRequest) (*csi.NodeStageVolumeResponse, error) {
 	return &csi.NodeStageVolumeResponse{}, nil
 }

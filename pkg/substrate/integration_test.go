@@ -79,7 +79,7 @@ func TestReadonlyPublishLifecycleThroughGRPC(t *testing.T) {
 	require.NoError(t, err)
 	in.VolumeContext = created.Volume.VolumeContext
 	require.Zero(t, lookups.Load())
-	in.VolumeContext[PodUIDKey] = testUID
+	in.VolumeContext[PodUIDKey] = "worker-pod-uid"
 	client := csi.NewNodeClient(conn)
 	// The Actor request is readonly, so the volume publishes readonly with or without the
 	// outer request asking for it.
@@ -177,7 +177,7 @@ func TestFirstPublishUsesAnnotationChangedAfterCreate(t *testing.T) {
 	nas := &recordingNAS{}
 	node := NewNode(NodeOptions{ActorRoot: DefaultActorRoot, StateDir: t.TempDir(), Mounter: mount.NewFakeMounter(nil), Lookup: lookup, NAS: nas})
 	context := created.Volume.VolumeContext
-	context[PodUIDKey] = testUID
+	context[PodUIDKey] = "worker-pod-uid"
 	_, err = node.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: testTarget, VolumeContext: context})
 	require.NoError(t, err)
 	require.Equal(t, "/another-tenant", nas.published.VolumeContext["path"])
@@ -203,7 +203,7 @@ func TestCreateSucceedsBeforePublishConfigurationIsAvailable(t *testing.T) {
 				calls++
 				return ActorInfo{UID: testUID, Name: "actor", Atespace: "storage-test", Annotation: tc.annotation}, tc.lookupErr
 			}})
-			created.Volume.VolumeContext[PodUIDKey] = testUID
+			created.Volume.VolumeContext[PodUIDKey] = "worker-pod-uid"
 			_, err = node.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: testTarget, VolumeContext: created.Volume.VolumeContext})
 			require.Equal(t, tc.wantCode, status.Code(err))
 			require.Equal(t, 1, calls)
