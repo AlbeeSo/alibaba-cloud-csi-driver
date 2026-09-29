@@ -33,90 +33,120 @@ import (
 )
 
 type resolvedMount struct {
-	Actor      ActorInfo
-	ActorUID   string
-	VolumeName string
-	Request    *csi.NodePublishVolumeRequest
+	Actor   ActorInfo
+	Request *csi.NodePublishVolumeRequest
 }
 
-func resolveMount(ctx context.Context, lookup ActorLookup, id string, attributes map[string]string) (resolvedMount, error) {
-	parts := volumeIdentity.FindStringSubmatch(id)
-	if len(parts) != 3 {
-		return resolvedMount{}, status.Error(codes.InvalidArgument, "expected a Substrate actor volume identity")
-	}
-	if lookup == nil {
-		return resolvedMount{}, status.Error(codes.FailedPrecondition, "actor lookup must be configured")
-	}
-	ref := ActorReference{UID: parts[1], Name: attributes[agentidentity.ActorNameKey], Atespace: attributes[agentidentity.ActorNamespaceKey]}
-	if attributes[agentidentity.ActorUIDKey] != ref.UID || ref.Name == "" || ref.Atespace == "" {
-		return resolvedMount{}, status.Error(codes.InvalidArgument, "actor UID, name and namespace must identify the volume owner")
-	}
-	actor, err := lookup(ctx, ref)
+// resolveMount asks the Actor API what the volume actually is and returns the publish
+// request that describes it. The identity read off the mount target is the question; the
+// Actor API is the only authority on the answer.
+func resolveMount(ctx context.Context, lookup ActorLookup, id volumeIdentity, attributes map[string]string) (resolvedMount, error) {
+	// 1. Find the Actor that owns the actor directory in the target.
+	actor, err := lookupActor(ctx, lookup, id, attributes)
 	if err != nil {
 		return resolvedMount{}, err
 	}
-	if actor.UID != parts[1] {
-		return resolvedMount{}, status.Error(codes.PermissionDenied, "actor lookup returned a different identity")
-	}
-	resolved := resolvedMount{Actor: actor, ActorUID: parts[1], VolumeName: parts[2]}
+	resolved := resolvedMount{Actor: actor}
+	// 2. A Golden Actor is building its image, so it has no backend request to select yet.
 	if actor.Golden {
 		if actor.Atespace != "ate-golden" || actor.TemplateUID == "" || actor.Name != actor.TemplateUID {
 			return resolvedMount{}, status.Error(codes.FailedPrecondition, "golden actor association is invalid")
 		}
 		return resolved, nil
 	}
+	// 3. An Actor in the golden atespace that is not golden itself is not verified.
 	if actor.Atespace == "ate-golden" {
 		return resolvedMount{}, status.Error(codes.FailedPrecondition, "unverified golden actor")
 	}
-	if len(actor.Annotation) == 0 || len(actor.Annotation) > 256*1024 {
-		return resolvedMount{}, status.Error(codes.FailedPrecondition, "missing or oversized actor publish requests")
+	// 4. Pick this template volume's request out of the Actor annotation.
+	request, err := selectPublishEntry(actor.Annotation, id.VolumeName)
+	if err != nil {
+		return resolvedMount{}, err
+	}
+	// 5. Refuse anything the bridge may not forward to NAS.
+	if err := validateBackendRequest(request, actor); err != nil {
+		return resolvedMount{}, err
+	}
+	resolved.Request = request
+	return resolved, nil
+}
+
+func lookupActor(ctx context.Context, lookup ActorLookup, id volumeIdentity, attributes map[string]string) (ActorInfo, error) {
+	if lookup == nil {
+		return ActorInfo{}, status.Error(codes.FailedPrecondition, "actor lookup must be configured")
+	}
+	ref := ActorReference{UID: id.ActorUID, Name: attributes[agentidentity.ActorNameKey], Atespace: attributes[agentidentity.ActorNamespaceKey]}
+	if ref.Name == "" || ref.Atespace == "" {
+		return ActorInfo{}, status.Error(codes.InvalidArgument, "actor name and namespace are required")
+	}
+	actor, err := lookup(ctx, ref)
+	if err != nil {
+		return ActorInfo{}, err
+	}
+	if actor.UID != id.ActorUID {
+		return ActorInfo{}, status.Error(codes.PermissionDenied, "actor lookup returned a different identity")
+	}
+	return actor, nil
+}
+
+// selectPublishEntry decodes the Actor annotation and returns the entry of one template
+// volume. The annotation carries the request that the shared generator produced for the ACS
+// Sandbox form, so the bridge reads it instead of reconstructing it.
+func selectPublishEntry(annotation, volumeName string) (*csi.NodePublishVolumeRequest, error) {
+	if len(annotation) == 0 || len(annotation) > 256*1024 {
+		return nil, status.Error(codes.FailedPrecondition, "missing or oversized actor publish requests")
 	}
 	var entries []publishEntry
-	if err := json.Unmarshal([]byte(actor.Annotation), &entries); err != nil {
-		return resolvedMount{}, status.Error(codes.FailedPrecondition, "invalid actor publish requests JSON")
+	if err := json.Unmarshal([]byte(annotation), &entries); err != nil {
+		return nil, status.Error(codes.FailedPrecondition, "invalid actor publish requests JSON")
 	}
 	var matched *publishEntry
 	for i := range entries {
-		if entries[i].VolumeName != resolved.VolumeName {
+		if entries[i].VolumeName != volumeName {
 			continue
 		}
 		if matched != nil {
-			return resolvedMount{}, status.Error(codes.FailedPrecondition, "duplicate actor volume publish request")
+			return nil, status.Error(codes.FailedPrecondition, "duplicate actor volume publish request")
 		}
 		matched = &entries[i]
 	}
 	if matched == nil || matched.Driver != NASDriverName {
-		return resolvedMount{}, status.Error(codes.FailedPrecondition, "a NAS publish request is required for the template volume")
+		return nil, status.Error(codes.FailedPrecondition, "a NAS publish request is required for the template volume")
 	}
-	req := new(csi.NodePublishVolumeRequest)
-	if err := protojson.Unmarshal(matched.Request, req); err != nil {
-		return resolvedMount{}, status.Error(codes.FailedPrecondition, "invalid CSI publish request")
+	request := new(csi.NodePublishVolumeRequest)
+	if err := protojson.Unmarshal(matched.Request, request); err != nil {
+		return nil, status.Error(codes.FailedPrecondition, "invalid CSI publish request")
 	}
-	if req.VolumeId == "" || req.GetVolumeCapability().GetMount() == nil || req.GetVolumeCapability().GetAccessMode().GetMode() == csi.VolumeCapability_AccessMode_UNKNOWN || len(req.Secrets) != 0 {
-		return resolvedMount{}, status.Error(codes.FailedPrecondition, "a filesystem request without secrets is required")
+	return request, nil
+}
+
+// validateBackendRequest keeps the bridge on one storage path: an AgenticFS filesystem
+// mounted through Agent Identity, without secrets and without an identity other than the
+// Actor's own.
+func validateBackendRequest(request *csi.NodePublishVolumeRequest, actor ActorInfo) error {
+	if request.VolumeId == "" || request.GetVolumeCapability().GetMount() == nil ||
+		request.GetVolumeCapability().GetAccessMode().GetMode() == csi.VolumeCapability_AccessMode_UNKNOWN ||
+		len(request.Secrets) != 0 {
+		return status.Error(codes.FailedPrecondition, "a filesystem request without secrets is required")
 	}
-	if !filepath.IsAbs(req.TargetPath) || filepath.Clean(req.TargetPath) != req.TargetPath || req.StagingTargetPath != "" {
-		return resolvedMount{}, status.Error(codes.FailedPrecondition, "publish request requires a clean guest target and no staging path")
+	if !filepath.IsAbs(request.TargetPath) || filepath.Clean(request.TargetPath) != request.TargetPath || request.StagingTargetPath != "" {
+		return status.Error(codes.FailedPrecondition, "publish request requires a clean guest target and no staging path")
 	}
-	if !strings.EqualFold(req.VolumeContext["authType"], "agent-identity") || req.VolumeContext["mountProtocol"] != "alinas" {
-		return resolvedMount{}, status.Error(codes.FailedPrecondition, "only AgenticFS with Agent Identity is supported")
+	if !strings.EqualFold(request.VolumeContext["authType"], "agent-identity") || request.VolumeContext["mountProtocol"] != "alinas" {
+		return status.Error(codes.FailedPrecondition, "only AgenticFS with Agent Identity is supported")
 	}
-	for key, value := range req.VolumeContext {
+	for key, value := range request.VolumeContext {
 		switch strings.ToLower(key) {
 		case "useclient", "containernetworkfilesystem":
 			if value != "" {
-				return resolvedMount{}, status.Error(codes.FailedPrecondition, "NAS client selection and CNFS routing are not supported through the Substrate bridge")
+				return status.Error(codes.FailedPrecondition, "NAS client selection and CNFS routing are not supported through the Substrate bridge")
 			}
 		}
 		if (strings.EqualFold(key, "sandboxId") || key == PodUIDKey) && value != "" && value != actor.UID {
-			return resolvedMount{}, status.Error(codes.PermissionDenied, "publish request carries a different actor identity")
+			return status.Error(codes.PermissionDenied, "publish request carries a different actor identity")
 		}
 	}
-	if err := validateActorMetadata(req.VolumeContext, actor); err != nil {
-		return resolvedMount{}, err
-	}
-	resolved.Request = req
-	return resolved, nil
+	return validateActorMetadata(request.VolumeContext, actor)
 }
 
 func validateActorMetadata(values map[string]string, actor ActorInfo) error {
@@ -135,10 +165,8 @@ func setActorMetadata(values map[string]string, actor ActorInfo) {
 	values[agentidentity.ActorNamespaceKey] = actor.Atespace
 }
 
-func requestReadOnly(req *csi.NodePublishVolumeRequest) bool {
-	return explicitReadOnly(req) || flagsContain(req.GetVolumeCapability().GetMount().GetMountFlags(), "ro")
-}
-
+// explicitReadOnly reports the read-only requirement stated by the CSI flag or a
+// READER_ONLY access mode. Mount flags stay with the NAS driver.
 func explicitReadOnly(req *csi.NodePublishVolumeRequest) bool {
 	return mounterutils.ReadOnlyRequested(req.GetReadonly(), req.GetVolumeCapability().GetAccessMode().GetMode())
 }

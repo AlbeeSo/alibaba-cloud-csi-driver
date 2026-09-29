@@ -27,27 +27,48 @@ type Controller struct {
 	csi.UnimplementedControllerServer
 }
 
+// CreateVolume hands back the identity of an existing volume. It provisions nothing: the
+// backend volume already exists because the shared generator built its publish request when
+// the Actor was created.
 func (*Controller) CreateVolume(_ context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
-	parts := volumeIdentity.FindStringSubmatch(req.GetName())
-	if len(parts) != 3 || req.GetVolumeContentSource() != nil || len(req.GetSecrets()) != 0 {
-		return nil, status.Error(codes.InvalidArgument, "expected an existing-volume reference without content source or secrets")
+	// 1. Requests that ask the bridge to create or copy storage are refused.
+	if err := checkCreateRequest(req); err != nil {
+		return nil, err
 	}
-	if !filesystemCapabilities(req.VolumeCapabilities) {
-		return nil, status.Error(codes.InvalidArgument, "filesystem volume capabilities are required")
+	// 2. The logical volume ID is whatever the caller chose; the capacity is echoed back
+	// unverified, and the Actor metadata travels to publish through VolumeContext.
+	return &csi.CreateVolumeResponse{Volume: &csi.Volume{
+		VolumeId:      req.GetName(),
+		CapacityBytes: req.GetCapacityRange().GetRequiredBytes(),
+		VolumeContext: actorAttributes(req.GetParameters()),
+	}}, nil
+}
+
+// checkCreateRequest rejects the requests the bridge cannot satisfy. It does not compare the
+// declared Actor with the Actor API: that answer is only trustworthy at publish time, when
+// the volume is actually mounted.
+func checkCreateRequest(req *csi.CreateVolumeRequest) error {
+	if req.GetVolumeContentSource() != nil || len(req.GetSecrets()) != 0 {
+		return status.Error(codes.InvalidArgument, "expected an existing-volume reference without content source or secrets")
 	}
-	capacity := req.GetCapacityRange().GetRequiredBytes()
-	limit := req.GetCapacityRange().GetLimitBytes()
+	capacity, limit := req.GetCapacityRange().GetRequiredBytes(), req.GetCapacityRange().GetLimitBytes()
 	if capacity < 0 || limit < 0 || (limit > 0 && capacity > limit) {
-		return nil, status.Error(codes.InvalidArgument, "invalid capacity range")
+		return status.Error(codes.InvalidArgument, "invalid capacity range")
 	}
-	if req.Parameters[agentidentity.ActorUIDKey] != parts[1] || req.Parameters[agentidentity.ActorNameKey] == "" || req.Parameters[agentidentity.ActorNamespaceKey] == "" {
-		return nil, status.Error(codes.InvalidArgument, "actor UID, name and namespace must identify the volume owner")
+	if req.GetParameters()[agentidentity.ActorUIDKey] == "" || req.GetParameters()[agentidentity.ActorNameKey] == "" || req.GetParameters()[agentidentity.ActorNamespaceKey] == "" {
+		return status.Error(codes.InvalidArgument, "actor UID, name and namespace parameters are required")
 	}
+	return nil
+}
+
+// actorAttributes is the VolumeContext that travels unchanged to NodePublishVolume, where
+// the bridge checks it against the Actor API.
+func actorAttributes(parameters map[string]string) map[string]string {
 	attributes := map[string]string{utils.SubstrateModeKey: "true"}
 	for _, key := range []string{agentidentity.ActorUIDKey, agentidentity.ActorNameKey, agentidentity.ActorNamespaceKey} {
-		attributes[key] = req.Parameters[key]
+		attributes[key] = parameters[key]
 	}
-	return &csi.CreateVolumeResponse{Volume: &csi.Volume{VolumeId: req.Name, CapacityBytes: capacity, VolumeContext: attributes}}, nil
+	return attributes
 }
 
 func (*Controller) DeleteVolume(_ context.Context, req *csi.DeleteVolumeRequest) (*csi.DeleteVolumeResponse, error) {
@@ -57,10 +78,10 @@ func (*Controller) DeleteVolume(_ context.Context, req *csi.DeleteVolumeRequest)
 	return &csi.DeleteVolumeResponse{}, nil
 }
 
-func (*Controller) ControllerPublishVolume(_ context.Context, req *csi.ControllerPublishVolumeRequest) (*csi.ControllerPublishVolumeResponse, error) {
-	if !volumeIdentity.MatchString(req.GetVolumeId()) || req.GetNodeId() == "" || !filesystemCapabilities([]*csi.VolumeCapability{req.GetVolumeCapability()}) {
-		return nil, status.Error(codes.InvalidArgument, "volume identity, node ID and filesystem capability are required")
-	}
+// Attach is a no-op by design: the bridge holds no per-node state, and the
+// chart's CSIDriver object sets attachRequired=false, so nothing may depend on
+// this answer. NodePublishVolume is where the Actor API decides reachability.
+func (*Controller) ControllerPublishVolume(context.Context, *csi.ControllerPublishVolumeRequest) (*csi.ControllerPublishVolumeResponse, error) {
 	return &csi.ControllerPublishVolumeResponse{}, nil
 }
 
@@ -72,9 +93,6 @@ func (*Controller) ControllerUnpublishVolume(_ context.Context, req *csi.Control
 }
 
 func (*Controller) ValidateVolumeCapabilities(_ context.Context, req *csi.ValidateVolumeCapabilitiesRequest) (*csi.ValidateVolumeCapabilitiesResponse, error) {
-	if !volumeIdentity.MatchString(req.GetVolumeId()) {
-		return nil, status.Error(codes.InvalidArgument, "expected a Substrate volume identity")
-	}
 	if !filesystemCapabilities(req.GetVolumeCapabilities()) {
 		return &csi.ValidateVolumeCapabilitiesResponse{Message: "only filesystem capabilities are supported"}, nil
 	}

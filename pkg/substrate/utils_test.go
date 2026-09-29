@@ -92,7 +92,10 @@ func TestPublishPreservesInnerReadonlyConfiguration(t *testing.T) {
 	}
 }
 
-func TestPublishRejectsOuterReadonlyBeforeLookupOrMount(t *testing.T) {
+// TestOuterReadonlyNeverReachesTheForwardedRequest pins the passthrough rule: the read-only
+// state of a Substrate volume comes from the Actor publish request, and the outer request is
+// neither honoured nor rejected.
+func TestOuterReadonlyNeverReachesTheForwardedRequest(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		mutate func(*csi.NodePublishVolumeRequest)
@@ -108,9 +111,11 @@ func TestPublishRejectsOuterReadonlyBeforeLookupOrMount(t *testing.T) {
 		{"combined mount flags", func(in *csi.NodePublishVolumeRequest) {
 			in.VolumeCapability.GetMount().MountFlags = []string{"tls, ro ,rw"}
 		}},
+		{"volume context options", func(in *csi.NodePublishVolumeRequest) { in.VolumeContext["options"] = "tls,ram,ro" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			node, downstream, in := readonlyNodeFixture(t, writablePublishFixture())
+			real := writablePublishFixture()
+			node, downstream, in := readonlyNodeFixture(t, real)
 			lookup := node.opts.Lookup
 			calls := 0
 			node.opts.Lookup = func(ctx context.Context, ref ActorReference) (ActorInfo, error) {
@@ -119,12 +124,16 @@ func TestPublishRejectsOuterReadonlyBeforeLookupOrMount(t *testing.T) {
 			}
 			tc.mutate(in)
 			_, err := node.NodePublishVolume(t.Context(), in)
-			require.Equal(t, codes.FailedPrecondition, status.Code(err))
-			require.Zero(t, calls)
-			require.Nil(t, downstream.published)
-			entries, err := os.ReadDir(node.opts.StateDir)
 			require.NoError(t, err)
-			require.Empty(t, entries)
+			require.Equal(t, 1, calls)
+			want := proto.Clone(real).(*csi.NodePublishVolumeRequest)
+			want.TargetPath = testTarget
+			want.VolumeContext["csi.alibabacloud.com/substrate-mode"] = "true"
+			for key, value := range nodeContextFixture() {
+				want.VolumeContext[key] = value
+			}
+			require.True(t, proto.Equal(want, downstream.published), "the outer request changed the forwarded request")
+			require.False(t, downstream.published.Readonly)
 		})
 	}
 }
@@ -184,44 +193,61 @@ func TestReadonlyPublishNeedsNoStateDirectory(t *testing.T) {
 
 func TestMountedReadonlyCheckUsesOnlyExplicitInnerRequirements(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		mutate     func(*csi.NodePublishVolumeRequest)
-		mountMode  string
-		wantReject bool
+		name          string
+		mutate        func(*csi.NodePublishVolumeRequest)
+		mutateOuter   func(*csi.NodePublishVolumeRequest)
+		mountMode     string
+		wantReject    bool
+		wantForwarded bool
 	}{
-		{"boolean requires ro", func(real *csi.NodePublishVolumeRequest) { real.Readonly = true }, "rw", true},
-		{"single reader requires ro", func(real *csi.NodePublishVolumeRequest) {
+		{name: "boolean requires ro", mutate: func(real *csi.NodePublishVolumeRequest) { real.Readonly = true }, mountMode: "rw", wantReject: true},
+		{name: "single reader requires ro", mutate: func(real *csi.NodePublishVolumeRequest) {
 			real.VolumeCapability.AccessMode.Mode = csi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY
-		}, "rw", true},
-		{"multi reader requires ro", func(real *csi.NodePublishVolumeRequest) {
+		}, mountMode: "rw", wantReject: true},
+		{name: "multi reader requires ro", mutate: func(real *csi.NodePublishVolumeRequest) {
 			real.VolumeCapability.AccessMode.Mode = csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY
-		}, "rw", true},
-		{"matching readonly", func(real *csi.NodePublishVolumeRequest) { real.Readonly = true }, "ro", false},
-		{"readonly options overridden by flags", func(real *csi.NodePublishVolumeRequest) {
+		}, mountMode: "rw", wantReject: true},
+		{name: "matching readonly", mutate: func(real *csi.NodePublishVolumeRequest) { real.Readonly = true }, mountMode: "ro", wantForwarded: true},
+		{name: "readonly options overridden by flags", mutate: func(real *csi.NodePublishVolumeRequest) {
 			real.VolumeContext["options"] = "tls,ram,ro"
 			real.VolumeCapability.GetMount().MountFlags = []string{"tls", "ram", "rw"}
-		}, "rw", false},
-		{"flags are delegated to NAS", func(real *csi.NodePublishVolumeRequest) { real.VolumeCapability.GetMount().MountFlags = []string{"ro"} }, "rw", false},
-		{"no explicit writable requirement", func(*csi.NodePublishVolumeRequest) {}, "ro", false},
+		}, mountMode: "rw"},
+		{name: "flags are delegated to NAS", mutate: func(real *csi.NodePublishVolumeRequest) {
+			real.VolumeCapability.GetMount().MountFlags = []string{"ro"}
+		}, mountMode: "rw"},
+		{name: "no explicit writable requirement", mutate: func(*csi.NodePublishVolumeRequest) {}, mountMode: "ro"},
+		{name: "outer boolean does not require ro", mutateOuter: func(in *csi.NodePublishVolumeRequest) { in.Readonly = true }, mountMode: "rw"},
+		{name: "outer reader does not require ro", mutateOuter: func(in *csi.NodePublishVolumeRequest) {
+			in.VolumeCapability.AccessMode.Mode = csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY
+		}, mountMode: "rw"},
+		{name: "outer flag does not require ro", mutateOuter: func(in *csi.NodePublishVolumeRequest) {
+			in.VolumeCapability.GetMount().MountFlags = []string{"ro"}
+		}, mountMode: "rw"},
+		{name: "inner requirement survives an outer writable request", mutate: func(real *csi.NodePublishVolumeRequest) { real.Readonly = true }, mountMode: "ro", wantForwarded: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			real := writablePublishFixture()
-			tc.mutate(real)
+			if tc.mutate != nil {
+				tc.mutate(real)
+			}
 			node, downstream, in := readonlyNodeFixture(t, real)
 			node.opts.Mounter = mount.NewFakeMounter([]mount.MountPoint{{Path: testTarget, Type: "nfs", Opts: []string{tc.mountMode}}})
+			if tc.mutateOuter != nil {
+				tc.mutateOuter(in)
+			}
 			_, err := node.NodePublishVolume(t.Context(), in)
 			if tc.wantReject {
 				require.Equal(t, codes.AlreadyExists, status.Code(err))
 				require.Nil(t, downstream.published)
 			} else {
 				require.NoError(t, err)
-				require.Equal(t, real.Readonly, downstream.published.Readonly)
+				require.Equal(t, tc.wantForwarded, downstream.published.Readonly)
 			}
 		})
 	}
 }
 
-func TestGoldenPlaceholderRejectsOuterReadonlyAndRemainsWritable(t *testing.T) {
+func TestGoldenPlaceholderIgnoresOuterReadonlyAndStaysWritable(t *testing.T) {
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	require.NoError(t, err)
 	target := filepath.Join(root, testUID, "volumes", "data")
@@ -233,20 +259,19 @@ func TestGoldenPlaceholderRejectsOuterReadonlyAndRemainsWritable(t *testing.T) {
 	}
 	node := NewNode(NodeOptions{ActorRoot: root, StateDir: t.TempDir(), Lookup: lookup, Mounter: mounter})
 	attributes := goldenMetadataFixture()
-	attributes[PodUIDKey] = "worker-uid"
+	attributes[PodUIDKey] = testUID
 	in := &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: target, Readonly: true, VolumeContext: attributes}
 	_, err = node.NodePublishVolume(t.Context(), in)
-	require.Equal(t, codes.FailedPrecondition, status.Code(err))
-	require.Zero(t, lookups)
-	require.Empty(t, mounter.MountPoints)
-	in.Readonly = false
-	_, err = node.NodePublishVolume(t.Context(), in)
 	require.NoError(t, err)
+	require.Equal(t, 1, lookups)
 	require.Len(t, mounter.MountPoints, 1)
 	require.Equal(t, []string{"bind"}, mounter.MountPoints[0].Opts)
+	in.Readonly = false
 	node = NewNode(node.opts)
 	_, err = node.NodePublishVolume(t.Context(), in)
 	require.NoError(t, err)
+	require.Equal(t, 2, lookups)
+	require.Len(t, mounter.MountPoints, 1)
 	_, err = node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: target})
 	require.NoError(t, err)
 	require.Empty(t, mounter.MountPoints)
@@ -277,7 +302,7 @@ func TestGoldenPlaceholderLifecycleWithoutNAS(t *testing.T) {
 	}
 	attributes := goldenMetadataFixture()
 	node := NewNode(NodeOptions{ActorRoot: root, StateDir: state, Mounter: mounter, NAS: nas, Lookup: lookup})
-	attributes[PodUIDKey] = "worker-uid"
+	attributes[PodUIDKey] = testUID
 	in := &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: target, VolumeContext: attributes}
 	_, err = node.NodePublishVolume(t.Context(), in)
 	require.NoError(t, err)

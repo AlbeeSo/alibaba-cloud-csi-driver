@@ -144,9 +144,9 @@ func goldenMetadataFixture() map[string]string {
 
 func nodeContextFixture() map[string]string {
 	attributes := actorMetadataFixture()
-	attributes[PodUIDKey] = "worker-uid"
-	attributes["csi.storage.k8s.io/pod.name"] = "worker-name"
-	attributes["csi.storage.k8s.io/pod.namespace"] = "worker-space"
+	// The ACK-adapted atelet injects the actor UID under the pod UID key
+	// (volumeContextForActor), and nothing under the pod name or namespace keys.
+	attributes[PodUIDKey] = testUID
 	return attributes
 }
 
@@ -188,9 +188,12 @@ func TestPublishRejectsInvalidBoundary(t *testing.T) {
 		code   codes.Code
 		reason string
 	}{
-		{"missing actor UID", func(in, _ *csi.NodePublishVolumeRequest) { delete(in.VolumeContext, "csi.alibabacloud.com/actor.uid") }, codes.InvalidArgument, "actor UID must match the volume identity"},
-		{"foreign target", func(in, _ *csi.NodePublishVolumeRequest) { in.TargetPath = "/etc/data" }, codes.InvalidArgument, "target must be the actor volume path"},
-		{"wrong volume ID", func(in, _ *csi.NodePublishVolumeRequest) { in.VolumeId = "unrelated-volume" }, codes.InvalidArgument, "expected a Substrate actor volume identity"},
+		{"missing actor UID", func(in, _ *csi.NodePublishVolumeRequest) { delete(in.VolumeContext, "csi.alibabacloud.com/actor.uid") }, codes.InvalidArgument, "actor UID must match the target actor directory"},
+		{"foreign target", func(in, _ *csi.NodePublishVolumeRequest) { in.TargetPath = "/etc/data" }, codes.InvalidArgument, "target must be inside the actor root"},
+		{"actor directory itself", func(in, _ *csi.NodePublishVolumeRequest) { in.TargetPath = "/var/lib/ateom-gvisor/actors/" + testUID }, codes.InvalidArgument, "target must be an actor volume directory"},
+		{"non-clean target", func(in, _ *csi.NodePublishVolumeRequest) {
+			in.TargetPath = "/var/lib/ateom-gvisor/actors/" + testUID + "/volumes/data/.."
+		}, codes.InvalidArgument, "target must be a clean absolute path"},
 		{"secrets", func(_, real *csi.NodePublishVolumeRequest) {
 			real.Secrets = map[string]string{"key": "must-not-persist"}
 		}, codes.FailedPrecondition, "a filesystem request without secrets is required"},
@@ -252,28 +255,24 @@ func TestNodeGetInfoRequiresNodeIdentity(t *testing.T) {
 	require.Equal(t, "worker-node", info.NodeId)
 }
 
-func TestPublishKeepsActorIdentityWhileWorkerChanges(t *testing.T) {
+// TestPublishAddsOnlyIdentityToStoredPodMetadata pins the passthrough rule: pod metadata that
+// the Actor's own request carries is forwarded as it is, and the bridge only fills in the
+// actor identity the stored request cannot know.
+func TestPublishAddsOnlyIdentityToStoredPodMetadata(t *testing.T) {
 	real := writablePublishFixture()
+	real.VolumeContext["csi.storage.k8s.io/pod.name"] = "stored-pod-name"
+	real.VolumeContext["csi.storage.k8s.io/pod.namespace"] = "stored-pod-space"
 	node, downstream, request := readonlyNodeFixture(t, real)
-	node.opts.Lookup = identifiedLookup(t)
+	_, err := node.NodePublishVolume(t.Context(), request)
+	require.NoError(t, err)
+	require.Equal(t, "stored-pod-name", downstream.published.VolumeContext["csi.storage.k8s.io/pod.name"])
+	require.Equal(t, "stored-pod-space", downstream.published.VolumeContext["csi.storage.k8s.io/pod.namespace"])
+	require.Equal(t, testUID, downstream.published.VolumeContext[PodUIDKey])
 	for key, value := range actorMetadataFixture() {
-		request.VolumeContext[key] = value
+		require.Equal(t, value, downstream.published.VolumeContext[key])
 	}
-	for _, worker := range []string{"worker-one", "worker-two"} {
-		request.VolumeContext[PodUIDKey] = worker
-		request.VolumeContext["csi.storage.k8s.io/pod.name"] = worker + "-name"
-		request.VolumeContext["csi.storage.k8s.io/pod.namespace"] = worker + "-pool"
-		_, err := node.NodePublishVolume(t.Context(), request)
-		require.NoError(t, err)
-		require.Equal(t, worker, downstream.published.VolumeContext[PodUIDKey])
-		require.Equal(t, worker+"-name", downstream.published.VolumeContext["csi.storage.k8s.io/pod.name"])
-		require.Equal(t, worker+"-pool", downstream.published.VolumeContext["csi.storage.k8s.io/pod.namespace"])
-		for key, value := range actorMetadataFixture() {
-			require.Equal(t, value, downstream.published.VolumeContext[key])
-		}
-		require.Equal(t, testTarget, downstream.published.TargetPath)
-	}
-	_, err := node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})
+	require.Equal(t, testTarget, downstream.published.TargetPath)
+	_, err = node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})
 	require.NoError(t, err)
 	require.Equal(t, testID, downstream.unpublished.VolumeId)
 }
@@ -313,27 +312,40 @@ func TestPublishRejectsUseclientAndCNFS(t *testing.T) {
 	}
 }
 
-func TestPublishRejectsInvalidVolumeID(t *testing.T) {
-	node, _, _ := readonlyNodeFixture(t, writablePublishFixture())
-	_, err := node.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{
-		VolumeId:      "not-a-substrate-id",
-		TargetPath:    testTarget,
-		VolumeContext: nodeContextFixture(),
-	})
+func TestPublishRejectsTargetOutsideActorRoot(t *testing.T) {
+	node, _, in := readonlyNodeFixture(t, writablePublishFixture())
+	in.TargetPath = "/var/lib/ateom-gvisor/actors/11111111-2222-3333-4444-555555555555/volumes/data"
+	_, err := node.NodePublishVolume(t.Context(), in)
 	require.Equal(t, codes.InvalidArgument, status.Code(err))
+	require.ErrorContains(t, err, "actor UID must match the target actor directory")
 }
 
-func TestPublishRejectsMissingWorkerPodUID(t *testing.T) {
+func TestPublishTreatsVolumeIDAsOpaqueAndUsesTargetLayout(t *testing.T) {
+	// Substrate's logical volume naming is not a contract: the VolumeId is only
+	// forwarded as an opaque label, while the Actor and the publish request key
+	// come from the target's position under the actor root.
+	real := writablePublishFixture()
+	node, downstream, in := readonlyNodeFixture(t, real)
+	node.opts.Lookup = identifiedLookup(t)
+	in.VolumeId = "whatever-ateapi-chose"
+	in.TargetPath = filepath.Join("/var/lib/ateom-gvisor/actors", testUID, "mnt", "data")
+	_, err := node.NodePublishVolume(t.Context(), in)
+	require.NoError(t, err)
+	require.Equal(t, in.TargetPath, downstream.published.TargetPath)
+	require.Equal(t, testUID, downstream.published.VolumeContext["csi.alibabacloud.com/actor.uid"])
+}
+
+func TestPublishRejectsPodUIDThatIsNotTheActor(t *testing.T) {
 	real := writablePublishFixture()
 	annotation := annotationFixture(t, real)
 	node, _, in := readonlyNodeFixture(t, real)
 	node.opts.Lookup = func(context.Context, ActorReference) (ActorInfo, error) {
 		return ActorInfo{UID: testUID, Name: "actor", Atespace: "storage-test", Annotation: annotation}, nil
 	}
-	delete(in.VolumeContext, PodUIDKey)
+	in.VolumeContext[PodUIDKey] = "00000000-0000-0000-0000-000000000000"
 	_, err := node.NodePublishVolume(t.Context(), in)
 	require.Equal(t, codes.InvalidArgument, status.Code(err))
-	require.ErrorContains(t, err, "worker Pod UID is required")
+	require.ErrorContains(t, err, "pod UID must be the actor UID")
 }
 
 func TestPublishRejectsWhenNASNotConfigured(t *testing.T) {
@@ -441,5 +453,126 @@ func TestStatelessUnpublishWithoutMountNeedsNoBackendOrState(t *testing.T) {
 	for range 2 {
 		_, err := node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})
 		require.NoError(t, err)
+	}
+}
+
+func TestIdentityReadsVolumeIdentityFromTheTarget(t *testing.T) {
+	node := NewNode(NodeOptions{ActorRoot: DefaultActorRoot})
+	for _, tc := range []struct {
+		name    string
+		target  string
+		want    volumeIdentity
+		wantErr codes.Code
+	}{
+		{"actor volume directory", testTarget, volumeIdentity{ActorUID: testUID, VolumeName: "data"}, codes.OK},
+		{"deeper layout", testTarget + "/mnt/inner", volumeIdentity{ActorUID: testUID, VolumeName: "inner"}, codes.OK},
+		{"actor directory itself", "/var/lib/ateom-gvisor/actors/" + testUID, volumeIdentity{}, codes.InvalidArgument},
+		{"outside the actor root", "/var/lib/kubelet/pods/x/volumes/kubernetes.io~csi/y/mount", volumeIdentity{}, codes.InvalidArgument},
+		{"relative target", "var/lib/ateom-gvisor/actors/" + testUID + "/volumes/data", volumeIdentity{}, codes.InvalidArgument},
+		{"non-clean target", "/var/lib/ateom-gvisor/actors/" + testUID + "/volumes/../data", volumeIdentity{}, codes.InvalidArgument},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id, err := node.identity(tc.target)
+			require.Equal(t, tc.wantErr, status.Code(err))
+			require.Equal(t, tc.want, id)
+		})
+	}
+	_, err := NewNode(NodeOptions{ActorRoot: "relative/actor/root"}).identity(testTarget)
+	require.Equal(t, codes.FailedPrecondition, status.Code(err))
+}
+
+func TestCheckCallerMetadataMatchesTheTargetActor(t *testing.T) {
+	id := volumeIdentity{ActorUID: testUID, VolumeName: "data"}
+	for _, tc := range []struct {
+		name    string
+		mutate  func(map[string]string)
+		wantErr codes.Code
+	}{
+		{"matching actor and pod", func(map[string]string) {}, codes.OK},
+		{"legacy pod UID only", func(context map[string]string) {
+			delete(context, "csi.alibabacloud.com/actor.uid")
+			delete(context, "csi.alibabacloud.com/actor.name")
+			delete(context, "csi.alibabacloud.com/actor.namespace")
+		}, codes.OK},
+		{"foreign actor", func(context map[string]string) {
+			context["csi.alibabacloud.com/actor.uid"] = "00000000-0000-0000-0000-000000000000"
+		}, codes.InvalidArgument},
+		{"foreign pod", func(context map[string]string) {
+			context[PodUIDKey] = "00000000-0000-0000-0000-000000000000"
+		}, codes.InvalidArgument},
+		{"no pod claim", func(context map[string]string) { delete(context, PodUIDKey) }, codes.OK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &csi.NodePublishVolumeRequest{VolumeContext: nodeContextFixture()}
+			tc.mutate(req.VolumeContext)
+			require.Equal(t, tc.wantErr, status.Code(checkCallerMetadata(req, id)))
+		})
+	}
+}
+
+func TestBackendRequestChangesOnlyTargetModeAndMissingIdentity(t *testing.T) {
+	actor := ActorInfo{UID: testUID, Name: "actor", Atespace: "storage-test"}
+	in := &csi.NodePublishVolumeRequest{
+		VolumeId:         "whatever-the-caller-called-it",
+		TargetPath:       testTarget,
+		Readonly:         true,
+		VolumeCapability: publishFixture().VolumeCapability,
+		VolumeContext:    map[string]string{"server": "must-not-replace-the-bound-server", PodUIDKey: testUID},
+	}
+	for _, tc := range []struct {
+		name        string
+		storedPodID string
+	}{
+		{"stored request without pod identity", ""},
+		{"stored request that already names the actor", testUID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			real := writablePublishFixture()
+			real.VolumeContext["csi.storage.k8s.io/pod.name"] = "stored-pod-name"
+			if tc.storedPodID != "" {
+				real.VolumeContext[PodUIDKey] = tc.storedPodID
+			}
+			got := backendRequest(in, resolvedMount{Actor: actor, Request: real})
+			require.Equal(t, "customer-pv-a1b2c3", got.VolumeId)
+			require.False(t, got.Readonly)
+			require.Equal(t, csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER, got.VolumeCapability.GetAccessMode().GetMode())
+			require.Equal(t, "ap-example.fs.cn-beijing.agenticfs.aliyuncs.com", got.VolumeContext["server"])
+			require.Equal(t, "stored-pod-name", got.VolumeContext["csi.storage.k8s.io/pod.name"])
+			require.Equal(t, testUID, got.VolumeContext[PodUIDKey])
+			want := proto.Clone(real).(*csi.NodePublishVolumeRequest)
+			want.TargetPath = testTarget
+			want.VolumeContext["csi.alibabacloud.com/substrate-mode"] = "true"
+			want.VolumeContext["csi.alibabacloud.com/actor.uid"] = testUID
+			want.VolumeContext["csi.alibabacloud.com/actor.name"] = "actor"
+			want.VolumeContext["csi.alibabacloud.com/actor.namespace"] = "storage-test"
+			want.VolumeContext[PodUIDKey] = testUID
+			require.True(t, proto.Equal(want, got), "the forwarded request is not the stored request")
+		})
+	}
+}
+
+func TestCheckBackendTargetRejectsWhatItCannotMountOver(t *testing.T) {
+	readonly := writablePublishFixture()
+	readonly.Readonly = true
+	for _, tc := range []struct {
+		name     string
+		node     *Node
+		resolved resolvedMount
+		wantErr  string
+	}{
+		{"clear", NewNode(NodeOptions{NAS: &recordingNAS{}, Mounter: mount.NewFakeMounter(nil)}), resolvedMount{Request: writablePublishFixture()}, ""},
+		{"no NAS server", NewNode(NodeOptions{Mounter: mount.NewFakeMounter(nil)}), resolvedMount{Request: writablePublishFixture()}, "NAS forwarding is not configured"},
+		{"foreign filesystem", NewNode(NodeOptions{NAS: &recordingNAS{}, Mounter: mount.NewFakeMounter([]mount.MountPoint{{Path: testTarget, Type: "ext4"}})}), resolvedMount{Request: writablePublishFixture()}, "unsupported filesystem"},
+		{"writable mount under a readonly request", NewNode(NodeOptions{NAS: &recordingNAS{}, Mounter: mount.NewFakeMounter([]mount.MountPoint{{Path: testTarget, Type: "nfs", Opts: []string{"rw"}}})}), resolvedMount{Request: readonly}, "target access mode differs"},
+		{"readonly mount under a readonly request", NewNode(NodeOptions{NAS: &recordingNAS{}, Mounter: mount.NewFakeMounter([]mount.MountPoint{{Path: testTarget, Type: "nfs", Opts: []string{"ro"}}})}), resolvedMount{Request: readonly}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.node.checkBackendTarget(testTarget, tc.resolved)
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tc.wantErr)
+		})
 	}
 }

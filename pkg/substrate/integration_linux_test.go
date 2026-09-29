@@ -85,7 +85,7 @@ func TestGoldenPlaceholderRealMountThroughGRPC(t *testing.T) {
 	require.NoDirExists(t, target)
 }
 
-func TestGoldenRealMountRejectsReadonlyAndRemainsWritable(t *testing.T) {
+func TestGoldenRealMountIgnoresOuterReadonlyAndStaysWritable(t *testing.T) {
 	if os.Getenv("BRIDGE_REAL_MOUNT_TEST") != "1" {
 		t.Skip("set BRIDGE_REAL_MOUNT_TEST=1 inside an isolated privileged Linux container")
 	}
@@ -95,12 +95,9 @@ func TestGoldenRealMountRejectsReadonlyAndRemainsWritable(t *testing.T) {
 		return ActorInfo{UID: testUID, Atespace: "ate-golden", Name: "template-uid", TemplateUID: "template-uid", Golden: true}, nil
 	}
 	attributes := goldenMetadataFixture()
-	attributes[PodUIDKey] = "worker-uid"
+	attributes[PodUIDKey] = testUID
 	node := NewNode(NodeOptions{ActorRoot: filepath.Join(root, "actors"), StateDir: filepath.Join(root, "state"), Lookup: lookup, Mounter: mount.New("")})
 	_, err := node.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: target, Readonly: true, VolumeContext: attributes})
-	require.Equal(t, codes.FailedPrecondition, status.Code(err))
-	require.NoDirExists(t, target)
-	_, err = node.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: target, VolumeContext: attributes})
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

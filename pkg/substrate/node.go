@@ -20,8 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
-	"regexp"
-	"sync"
+	"strings"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils/agentidentity"
@@ -40,8 +39,6 @@ const (
 	DefaultActorRoot          = "/var/lib/ateom-gvisor/actors"
 )
 
-var volumeIdentity = regexp.MustCompile(`^substrate-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-([a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)$`)
-
 type publishEntry struct {
 	VolumeName string          `json:"volumeName"`
 	Driver     string          `json:"driver"`
@@ -59,95 +56,123 @@ type NodeOptions struct {
 	Mounter   mount.Interface
 }
 
+// Node serializes operations per mount target, not per VolumeId: the VolumeId is
+// opaque to the bridge, and two logical volumes reaching one target must still
+// serialize. The lock is process-local, like the rest of the bridge's state.
 type Node struct {
 	csi.UnimplementedNodeServer
-	opts   NodeOptions
-	mu     sync.Mutex
-	active map[string]bool
+	opts  NodeOptions
+	locks *utils.VolumeLocks
 }
 
-func NewNode(opts NodeOptions) *Node { return &Node{opts: opts, active: map[string]bool{}} }
-
-func (n *Node) acquire(target string) bool {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if n.active[target] {
-		return false
-	}
-	n.active[target] = true
-	return true
-}
-
-func (n *Node) release(target string) { n.mu.Lock(); delete(n.active, target); n.mu.Unlock() }
+func NewNode(opts NodeOptions) *Node { return &Node{opts: opts, locks: utils.NewVolumeLocks()} }
 
 func (n *Node) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
-	uid, _, err := n.identity(req.GetVolumeId(), req.GetTargetPath())
+	// 1. The mount target, not the VolumeId, says which Actor volume this is.
+	id, err := n.identity(req.GetTargetPath())
 	if err != nil {
 		return nil, err
 	}
-	if agentidentity.ActorUID(req.GetVolumeContext()) != uid {
-		return nil, status.Error(codes.InvalidArgument, "actor UID must match the volume identity")
+	// 2. What the caller claims about itself has to line up with that directory.
+	if err := checkCallerMetadata(req, id); err != nil {
+		return nil, err
 	}
-	if req.GetVolumeContext()[PodUIDKey] == "" {
-		return nil, status.Error(codes.InvalidArgument, "worker Pod UID is required")
-	}
-	if requestReadOnly(req) {
-		return nil, status.Error(codes.FailedPrecondition, "outer readonly constraints are unsupported; configure readonly in the Actor publish request")
-	}
-	if !n.acquire(req.TargetPath) {
+	// 3. One operation per target at a time; the lock is process-local.
+	if !n.locks.TryAcquire(req.TargetPath) {
 		return nil, status.Error(codes.Aborted, "target operation already in progress")
 	}
-	defer n.release(req.TargetPath)
-	resolved, err := resolveMount(ctx, n.opts.Lookup, req.VolumeId, req.VolumeContext)
+	defer n.locks.Release(req.TargetPath)
+	// 4. The Actor API decides what this volume really is, and which request describes it.
+	resolved, err := resolveMount(ctx, n.opts.Lookup, id, req.VolumeContext)
 	if err != nil {
 		return nil, err
 	}
+	// 5. Actor metadata the caller brought along must describe the same Actor the API named.
 	if err := validateActorMetadata(req.VolumeContext, resolved.Actor); err != nil {
 		return nil, err
 	}
-	// req describes the virtual bridge volume; resolved.Request owns the backend configuration.
+	// 6. A Golden Actor is building its image, so it gets a local placeholder rather than
+	// backend storage that would be shared with the running Actor.
 	if resolved.Actor.Golden {
 		if err := n.publishPlaceholder(req.VolumeId, req.TargetPath); err != nil {
 			return nil, status.Errorf(codes.Internal, "publish golden placeholder: %v", err)
 		}
 		return &csi.NodePublishVolumeResponse{}, nil
 	}
-	if n.opts.NAS == nil {
-		return nil, status.Error(codes.FailedPrecondition, "NAS forwarding is not configured")
-	}
-	live, err := n.mountAt(req.TargetPath)
-	if err != nil {
+	// 7. The target must be able to host the mount the Actor asks for.
+	if err := n.checkBackendTarget(req.TargetPath, resolved); err != nil {
 		return nil, err
+	}
+	// 8. NAS does the mount, with the Actor's own request.
+	return n.opts.NAS.NodePublishVolume(ctx, backendRequest(req, resolved))
+}
+
+// checkCallerMetadata validates the part of the request the caller controls: it has to name
+// the Actor that owns the target directory. Pod identity is only injected by the ACK-adapted
+// atelet as the actor UID itself (volumeContextForActor in Substrate's cmd/atelet/volumes.go),
+// so when it is present it must agree with that directory.
+func checkCallerMetadata(req *csi.NodePublishVolumeRequest, id volumeIdentity) error {
+	if agentidentity.ActorUID(req.GetVolumeContext()) != id.ActorUID {
+		return status.Error(codes.InvalidArgument, "actor UID must match the target actor directory")
+	}
+	if uid := req.GetVolumeContext()[PodUIDKey]; uid != "" && uid != id.ActorUID {
+		return status.Error(codes.InvalidArgument, "pod UID must be the actor UID of the target directory")
+	}
+	return nil
+}
+
+// checkBackendTarget rejects a target that cannot carry this Actor's mount: no NAS server
+// to forward to, a live mount on a filesystem the bridge does not own, or a live mount whose
+// read-only state contradicts the Actor's request.
+func (n *Node) checkBackendTarget(target string, resolved resolvedMount) error {
+	if n.opts.NAS == nil {
+		return status.Error(codes.FailedPrecondition, "NAS forwarding is not configured")
+	}
+	live, err := n.mountAt(target)
+	if err != nil {
+		return err
 	}
 	if live != nil && !nasMount(live) {
-		return nil, status.Error(codes.FailedPrecondition, "target is mounted with an unsupported filesystem")
+		return status.Error(codes.FailedPrecondition, "target is mounted with an unsupported filesystem")
 	}
-	if err := n.checkMountedReadOnly(req.TargetPath, explicitReadOnly(resolved.Request)); err != nil {
-		return nil, err
-	}
+	return n.checkMountedReadOnly(target, explicitReadOnly(resolved.Request))
+}
+
+// backendRequest turns the Actor's stored publish request into the one handed to NAS.
+// The design document (§3.4) permits exactly two changes: the target path becomes the host
+// directory the caller gave us, and the substrate-mode marker tells NAS to skip kubelet
+// semantics. Volume id, capability, read-only state, mount options and every other volume
+// context entry pass through untouched, which is what keeps the Substrate and the ACS
+// Sandbox forms equivalent (§3.2).
+//
+// The actor identity is the one exception, and it is not optional: the stored request is
+// generated without knowing which Actor it will be mounted for, and NAS refuses a request
+// without a pod UID and exchanges the agent-identity credential under the actor UID as its
+// resource ID. It is filled in only where the stored request is silent about identity.
+func backendRequest(req *csi.NodePublishVolumeRequest, resolved resolvedMount) *csi.NodePublishVolumeRequest {
 	real := resolved.Request
 	real.TargetPath = req.TargetPath
 	real.VolumeContext[utils.SubstrateModeKey] = "true"
 	setActorMetadata(real.VolumeContext, resolved.Actor)
-	for _, key := range []string{agentidentity.PodUIDKey, agentidentity.PodNameKey, agentidentity.PodNamespaceKey} {
-		if value := req.VolumeContext[key]; value != "" {
-			real.VolumeContext[key] = value
-		} else {
-			delete(real.VolumeContext, key)
-		}
+	if real.VolumeContext[agentidentity.PodUIDKey] == "" {
+		real.VolumeContext[agentidentity.PodUIDKey] = resolved.Actor.UID
 	}
-	return n.opts.NAS.NodePublishVolume(ctx, real)
+	return real
 }
 
 func (n *Node) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublishVolumeRequest) (*csi.NodeUnpublishVolumeResponse, error) {
-	_, _, err := n.identity(req.GetVolumeId(), req.GetTargetPath())
-	if err != nil {
+	// 1. The target still has to be one of the bridge's actor volume directories. No Actor
+	// is looked up: unpublish decides from the mount table alone, which is what keeps it
+	// working after the Actor is gone.
+	if _, err := n.identity(req.GetTargetPath()); err != nil {
 		return nil, err
 	}
-	if !n.acquire(req.TargetPath) {
+	// 2. One operation per target at a time.
+	if !n.locks.TryAcquire(req.TargetPath) {
 		return nil, status.Error(codes.Aborted, "target operation already in progress")
 	}
-	defer n.release(req.TargetPath)
+	defer n.locks.Release(req.TargetPath)
+	// 3. An absent mount is already unpublished.
 	live, err := n.mountAt(req.TargetPath)
 	if err != nil {
 		return nil, err
@@ -155,25 +180,11 @@ func (n *Node) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublishVo
 	if live == nil {
 		return &csi.NodeUnpublishVolumeResponse{}, nil
 	}
-	if !nasMount(live) && filepath.IsAbs(n.opts.StateDir) && filepath.Clean(n.opts.StateDir) != "/" {
-		source, sourceErr := n.placeholderSource(req.VolumeId, req.TargetPath)
-		if sourceErr != nil {
-			return nil, sourceErr
-		}
-		owned, sourceErr := n.placeholderMounted(source, req.TargetPath)
-		if sourceErr != nil {
-			return nil, sourceErr
-		}
-		if owned {
-			if err := n.unpublishPlaceholder(source, req.TargetPath); err != nil {
-				return nil, status.Errorf(codes.Internal, "unpublish golden placeholder: %v", err)
-			}
-			return &csi.NodeUnpublishVolumeResponse{}, nil
-		}
-	}
+	// 4. A non-NAS mount can only be the bridge's own Golden placeholder.
 	if !nasMount(live) {
-		return nil, status.Error(codes.FailedPrecondition, "refusing to unmount an unsupported live mount")
+		return n.unpublishBackendPlaceholder(req)
 	}
+	// 5. NAS owns its mounts.
 	if n.opts.NAS == nil {
 		return nil, status.Error(codes.FailedPrecondition, "NAS forwarding is not configured")
 	}
@@ -183,18 +194,57 @@ func (n *Node) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublishVo
 	return &csi.NodeUnpublishVolumeResponse{}, nil
 }
 
-func (n *Node) identity(volumeID, target string) (string, string, error) {
-	parts := volumeIdentity.FindStringSubmatch(volumeID)
-	if len(parts) != 3 {
-		return "", "", status.Error(codes.InvalidArgument, "expected a Substrate actor volume identity")
+// unpublishBackendPlaceholder removes a Golden placeholder and the directory behind it.
+// Anything else mounted there is refused: the bridge never unmounts storage it did not
+// create.
+func (n *Node) unpublishBackendPlaceholder(req *csi.NodeUnpublishVolumeRequest) (*csi.NodeUnpublishVolumeResponse, error) {
+	const unsupported = "refusing to unmount an unsupported live mount"
+	if !filepath.IsAbs(n.opts.StateDir) || filepath.Clean(n.opts.StateDir) == "/" {
+		return nil, status.Error(codes.FailedPrecondition, unsupported)
 	}
-	if !filepath.IsAbs(n.opts.ActorRoot) || filepath.Clean(n.opts.ActorRoot) == "/" {
-		return "", "", status.Error(codes.FailedPrecondition, "an absolute actor root is required")
+	source, err := n.placeholderSource(req.VolumeId, req.TargetPath)
+	if err != nil {
+		return nil, err
 	}
-	if target != filepath.Join(n.opts.ActorRoot, parts[1], "volumes", parts[2]) {
-		return "", "", status.Error(codes.InvalidArgument, "target must be the actor volume path")
+	owned, err := n.placeholderMounted(source, req.TargetPath)
+	if err != nil {
+		return nil, err
 	}
-	return parts[1], parts[2], nil
+	if !owned {
+		return nil, status.Error(codes.FailedPrecondition, unsupported)
+	}
+	if err := n.unpublishPlaceholder(source, req.TargetPath); err != nil {
+		return nil, status.Errorf(codes.Internal, "unpublish golden placeholder: %v", err)
+	}
+	return &csi.NodeUnpublishVolumeResponse{}, nil
+}
+
+// volumeIdentity is what a mount target says about the volume it holds.
+type volumeIdentity struct {
+	ActorUID   string
+	VolumeName string
+}
+
+// identity reads the Actor UID and the publish-request key out of the mount
+// target instead of the VolumeId: Substrate has not stabilized its logical
+// volume naming, so only its host directory layout is treated as a contract.
+func (n *Node) identity(target string) (volumeIdentity, error) {
+	root := filepath.Clean(n.opts.ActorRoot)
+	if !filepath.IsAbs(n.opts.ActorRoot) || root == "/" {
+		return volumeIdentity{}, status.Error(codes.FailedPrecondition, "an absolute actor root is required")
+	}
+	if !filepath.IsAbs(target) || filepath.Clean(target) != target {
+		return volumeIdentity{}, status.Error(codes.InvalidArgument, "target must be a clean absolute path")
+	}
+	rel, ok := strings.CutPrefix(target, root+"/")
+	if !ok {
+		return volumeIdentity{}, status.Error(codes.InvalidArgument, "target must be inside the actor root")
+	}
+	segments := strings.Split(rel, "/")
+	if len(segments) < 2 {
+		return volumeIdentity{}, status.Error(codes.InvalidArgument, "target must be an actor volume directory")
+	}
+	return volumeIdentity{ActorUID: segments[0], VolumeName: segments[len(segments)-1]}, nil
 }
 
 func (*Node) NodeStageVolume(context.Context, *csi.NodeStageVolumeRequest) (*csi.NodeStageVolumeResponse, error) {

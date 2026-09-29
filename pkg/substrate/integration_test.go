@@ -79,33 +79,40 @@ func TestReadonlyPublishLifecycleThroughGRPC(t *testing.T) {
 	require.NoError(t, err)
 	in.VolumeContext = created.Volume.VolumeContext
 	require.Zero(t, lookups.Load())
-	in.VolumeContext[PodUIDKey] = "worker-uid"
-	in.Readonly = true
+	in.VolumeContext[PodUIDKey] = testUID
 	client := csi.NewNodeClient(conn)
+	// The Actor request is readonly, so the volume publishes readonly with or without the
+	// outer request asking for it.
+	in.Readonly = true
 	_, err = client.NodePublishVolume(ctx, in)
-	require.Equal(t, codes.FailedPrecondition, status.Code(err))
-	require.Zero(t, lookups.Load())
-	require.Empty(t, nas.published)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), lookups.Load())
+	require.Len(t, nas.published, 1)
+	require.True(t, <-nas.published)
 	in.Readonly = false
 	_, err = client.NodePublishVolume(ctx, in)
 	require.NoError(t, err)
-	require.Equal(t, int32(1), lookups.Load())
-	require.Len(t, nas.published, 1)
+	require.Equal(t, int32(2), lookups.Load())
 	require.True(t, <-nas.published)
 	in.VolumeCapability.GetMount().MountFlags = []string{"ro"}
 	_, err = client.NodePublishVolume(ctx, in)
-	require.Equal(t, codes.FailedPrecondition, status.Code(err))
-	require.Equal(t, int32(1), lookups.Load())
-	require.Empty(t, nas.published)
+	require.NoError(t, err)
+	require.True(t, <-nas.published)
 	in.VolumeCapability.GetMount().MountFlags = nil
 	_, err = client.NodePublishVolume(ctx, in)
 	require.NoError(t, err)
-	require.Len(t, nas.published, 1)
 	require.True(t, <-nas.published)
+	// A writable Actor request publishes writable: the outer request is not consulted, in
+	// either direction.
 	innerReadonly.Store(false)
 	_, err = client.NodePublishVolume(ctx, in)
 	require.NoError(t, err)
 	require.False(t, <-nas.published)
+	in.Readonly = true
+	_, err = client.NodePublishVolume(ctx, in)
+	require.NoError(t, err)
+	require.False(t, <-nas.published)
+	in.Readonly = false
 	_, err = client.NodeUnpublishVolume(ctx, &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})
 	require.NoError(t, err)
 	_, err = client.NodePublishVolume(ctx, in)
@@ -170,7 +177,7 @@ func TestFirstPublishUsesAnnotationChangedAfterCreate(t *testing.T) {
 	nas := &recordingNAS{}
 	node := NewNode(NodeOptions{ActorRoot: DefaultActorRoot, StateDir: t.TempDir(), Mounter: mount.NewFakeMounter(nil), Lookup: lookup, NAS: nas})
 	context := created.Volume.VolumeContext
-	context[PodUIDKey] = "worker-uid"
+	context[PodUIDKey] = testUID
 	_, err = node.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: testTarget, VolumeContext: context})
 	require.NoError(t, err)
 	require.Equal(t, "/another-tenant", nas.published.VolumeContext["path"])
@@ -196,7 +203,7 @@ func TestCreateSucceedsBeforePublishConfigurationIsAvailable(t *testing.T) {
 				calls++
 				return ActorInfo{UID: testUID, Name: "actor", Atespace: "storage-test", Annotation: tc.annotation}, tc.lookupErr
 			}})
-			created.Volume.VolumeContext[PodUIDKey] = "worker-uid"
+			created.Volume.VolumeContext[PodUIDKey] = testUID
 			_, err = node.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: testTarget, VolumeContext: created.Volume.VolumeContext})
 			require.Equal(t, tc.wantCode, status.Code(err))
 			require.Equal(t, 1, calls)
