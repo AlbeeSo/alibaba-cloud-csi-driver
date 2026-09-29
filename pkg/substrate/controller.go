@@ -71,6 +71,9 @@ func actorAttributes(parameters map[string]string) map[string]string {
 	return attributes
 }
 
+// DeleteVolume answers successfully and deletes nothing. By design: the storage behind a
+// Substrate volume is the Actor template's own volume, created and owned outside the bridge, so
+// removing the logical volume must not remove shared storage.
 func (*Controller) DeleteVolume(_ context.Context, req *csi.DeleteVolumeRequest) (*csi.DeleteVolumeResponse, error) {
 	if req.GetVolumeId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "volume ID is required")
@@ -99,6 +102,11 @@ func (*Controller) ValidateVolumeCapabilities(_ context.Context, req *csi.Valida
 	return &csi.ValidateVolumeCapabilitiesResponse{Confirmed: &csi.ValidateVolumeCapabilitiesResponse_Confirmed{VolumeCapabilities: req.VolumeCapabilities, VolumeContext: req.VolumeContext, Parameters: req.Parameters}}, nil
 }
 
+// ControllerGetCapabilities announces the RPCs the bridge answers, not work it does: attach,
+// create and delete are no-ops or logical only. By design the answer stays truthful about the
+// methods rather than advertising nothing, because atelet decides whether to skip attach and
+// staging on an Unimplemented error rather than on this list (internal/volume/csi/plugin.go),
+// while kubelet does read it and the chart's attachRequired=false keeps that path closed.
 func (*Controller) ControllerGetCapabilities(context.Context, *csi.ControllerGetCapabilitiesRequest) (*csi.ControllerGetCapabilitiesResponse, error) {
 	capabilities := []*csi.ControllerServiceCapability{}
 	for _, capability := range []csi.ControllerServiceCapability_RPC_Type{csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME, csi.ControllerServiceCapability_RPC_PUBLISH_UNPUBLISH_VOLUME} {

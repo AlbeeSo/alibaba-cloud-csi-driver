@@ -92,7 +92,8 @@ func (n *Node) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolume
 		return nil, err
 	}
 	// 6. A Golden Actor is building its image, so it gets a local placeholder rather than
-	// backend storage that would be shared with the running Actor.
+	// backend storage that would be shared with the running Actor. By design the placeholder is
+	// writable whatever the request asked for: it exists to receive the image being built.
 	if resolved.Actor.Golden {
 		if err := n.publishPlaceholder(req.VolumeId, req.TargetPath); err != nil {
 			return nil, status.Errorf(codes.Internal, "publish golden placeholder: %v", err)
@@ -100,7 +101,7 @@ func (n *Node) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolume
 		return &csi.NodePublishVolumeResponse{}, nil
 	}
 	// 7. The target must be able to host the mount the Actor asks for.
-	if err := n.checkBackendTarget(req.TargetPath, resolved); err != nil {
+	if err := n.checkBackendTarget(req.TargetPath); err != nil {
 		return nil, err
 	}
 	// 8. NAS does the mount, with the Actor's own request.
@@ -121,10 +122,13 @@ func checkCallerMetadata(req *csi.NodePublishVolumeRequest, id volumeIdentity) e
 	return nil
 }
 
-// checkBackendTarget rejects a target that cannot carry this Actor's mount: no NAS server
-// to forward to, a live mount on a filesystem the bridge does not own, or a live mount whose
-// read-only state contradicts the Actor's request.
-func (n *Node) checkBackendTarget(target string, resolved resolvedMount) error {
+// checkBackendTarget rejects a target that cannot carry this Actor's mount: no NAS server to
+// forward to, or a live mount on a filesystem the bridge does not own. By design nothing else is
+// compared. A live mount the NAS driver recognises is left to NAS, which answers an
+// already-mounted target with success, so a retry stays retryable and matching a live mount
+// against a new request stays the caller's unpublish-first obligation instead of a refusal the
+// bridge invents.
+func (n *Node) checkBackendTarget(target string) error {
 	if n.opts.NAS == nil {
 		return status.Error(codes.FailedPrecondition, "NAS forwarding is not configured")
 	}
@@ -135,20 +139,24 @@ func (n *Node) checkBackendTarget(target string, resolved resolvedMount) error {
 	if live != nil && !nasMount(live) {
 		return status.Error(codes.FailedPrecondition, "target is mounted with an unsupported filesystem")
 	}
-	return n.checkMountedReadOnly(target, explicitReadOnly(resolved.Request))
+	return nil
 }
 
-// backendRequest turns the Actor's stored publish request into the one handed to NAS.
-// The design document (§3.4) permits exactly two changes: the target path becomes the host
-// directory the caller gave us, and the substrate-mode marker tells NAS to skip kubelet
-// semantics. Volume id, capability, read-only state, mount options and every other volume
-// context entry pass through untouched, which is what keeps the Substrate and the ACS
-// Sandbox forms equivalent (§3.2).
+// backendRequest turns the Actor's stored publish request into the one handed to NAS: the target
+// becomes the host directory the caller gave us, and the substrate-mode marker tells NAS to skip
+// kubelet semantics. Everything else — volume ID, capability, read-only state, mount options,
+// every other volume context entry — passes through untouched, which is what keeps a Substrate
+// mount equivalent to the ACS Sandbox mount of the same volume.
 //
-// The actor identity is the one exception, and it is not optional: the stored request is
-// generated without knowing which Actor it will be mounted for, and NAS refuses a request
-// without a pod UID and exchanges the agent-identity credential under the actor UID as its
-// resource ID. It is filled in only where the stored request is silent about identity.
+// The actor identity is the one addition, and it is not optional: the stored request is generated
+// without knowing which Actor it will be mounted for, and NAS refuses a request without a pod UID
+// (pkg/nas/nodeserver.go:526) and exchanges the agent-identity credential under the actor UID as
+// its resource ID. It is filled in only where the stored request is silent about identity.
+//
+// By design the caller's own read-only request is not carried over, which is a deliberate
+// deviation from the CSI wording that the SP MUST honour readonly on publish: the Actor's request
+// decides access, not a Pod object that does not exist here, and a bridge that "corrected" the
+// request would make the Substrate and ACS Sandbox forms differ where neither can see it.
 func backendRequest(req *csi.NodePublishVolumeRequest, resolved resolvedMount) *csi.NodePublishVolumeRequest {
 	real := resolved.Request
 	real.TargetPath = req.TargetPath
@@ -184,7 +192,9 @@ func (n *Node) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublishVo
 	if !nasMount(live) {
 		return n.unpublishBackendPlaceholder(req)
 	}
-	// 5. NAS owns its mounts.
+	// 5. NAS owns its mounts. The volume ID here is the caller's, not the one publish forwarded:
+	// NAS uses it as a lock and log key only and the bridge keeps no per-ID state, which is by
+	// design so unpublish still works once the Actor and its annotation are gone.
 	if n.opts.NAS == nil {
 		return nil, status.Error(codes.FailedPrecondition, "NAS forwarding is not configured")
 	}
@@ -247,6 +257,11 @@ func (n *Node) identity(target string) (volumeIdentity, error) {
 	return volumeIdentity{ActorUID: segments[0], VolumeName: segments[len(segments)-1]}, nil
 }
 
+// NodeStage and NodeUnstage answer successfully and do nothing: the bridge mounts at publish and
+// has no stage of its own. By design the answer is a success rather than Unimplemented, because
+// atelet only skips staging when the driver reports Unimplemented (internal/volume/csi/plugin.go)
+// and would otherwise fail the mount; the consequence is that its publish carries a staging path
+// the NAS driver never reads, so that path is forwarded and not validated.
 func (*Node) NodeStageVolume(context.Context, *csi.NodeStageVolumeRequest) (*csi.NodeStageVolumeResponse, error) {
 	return &csi.NodeStageVolumeResponse{}, nil
 }

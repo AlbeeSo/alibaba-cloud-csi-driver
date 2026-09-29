@@ -22,8 +22,6 @@ import (
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	mount "k8s.io/mount-utils"
 )
@@ -138,48 +136,6 @@ func TestOuterReadonlyNeverReachesTheForwardedRequest(t *testing.T) {
 	}
 }
 
-func TestExplicitReadonlyStillChecksLiveModeAfterRestart(t *testing.T) {
-	for _, firstRO := range []bool{false, true} {
-		t.Run(map[bool]string{false: "rw to ro", true: "ro to rw"}[firstRO], func(t *testing.T) {
-			real := writablePublishFixture()
-			real.Readonly = firstRO
-			annotation := annotationFixture(t, real)
-			node, downstream, in := readonlyNodeFixture(t, real)
-			node.opts.Lookup = func(context.Context, ActorReference) (ActorInfo, error) {
-				return ActorInfo{UID: testUID, Name: "actor", Atespace: "storage-test", Annotation: annotation}, nil
-			}
-			_, err := node.NodePublishVolume(t.Context(), in)
-			require.NoError(t, err)
-			mode := "rw"
-			if firstRO {
-				mode = "ro"
-			}
-			fake := node.opts.Mounter.(*mount.FakeMounter)
-			fake.MountPoints = []mount.MountPoint{{Device: "server:/", Path: testTarget, Type: "nfs", Opts: []string{mode}}}
-			node = NewNode(node.opts)
-			_, err = node.NodePublishVolume(t.Context(), in)
-			require.NoError(t, err)
-			downstream.published = nil
-			real.Readonly = !firstRO
-			annotation = annotationFixture(t, real)
-			_, err = node.NodePublishVolume(t.Context(), in)
-			if firstRO {
-				require.NoError(t, err)
-				require.False(t, downstream.published.Readonly)
-			} else {
-				require.Equal(t, codes.AlreadyExists, status.Code(err))
-				require.Nil(t, downstream.published)
-			}
-			_, err = node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})
-			require.NoError(t, err)
-			fake.MountPoints = nil
-			_, err = node.NodePublishVolume(t.Context(), in)
-			require.NoError(t, err)
-			require.Equal(t, !firstRO, downstream.published.Readonly)
-		})
-	}
-}
-
 func TestReadonlyPublishNeedsNoStateDirectory(t *testing.T) {
 	node, downstream, in := readonlyNodeFixture(t, publishFixture())
 	node.opts.StateDir = ""
@@ -188,62 +144,6 @@ func TestReadonlyPublishNeedsNoStateDirectory(t *testing.T) {
 		_, err := node.NodePublishVolume(t.Context(), in)
 		require.NoError(t, err)
 		require.True(t, downstream.published.Readonly)
-	}
-}
-
-func TestMountedReadonlyCheckUsesOnlyExplicitInnerRequirements(t *testing.T) {
-	for _, tc := range []struct {
-		name          string
-		mutate        func(*csi.NodePublishVolumeRequest)
-		mutateOuter   func(*csi.NodePublishVolumeRequest)
-		mountMode     string
-		wantReject    bool
-		wantForwarded bool
-	}{
-		{name: "boolean requires ro", mutate: func(real *csi.NodePublishVolumeRequest) { real.Readonly = true }, mountMode: "rw", wantReject: true},
-		{name: "single reader requires ro", mutate: func(real *csi.NodePublishVolumeRequest) {
-			real.VolumeCapability.AccessMode.Mode = csi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY
-		}, mountMode: "rw", wantReject: true},
-		{name: "multi reader requires ro", mutate: func(real *csi.NodePublishVolumeRequest) {
-			real.VolumeCapability.AccessMode.Mode = csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY
-		}, mountMode: "rw", wantReject: true},
-		{name: "matching readonly", mutate: func(real *csi.NodePublishVolumeRequest) { real.Readonly = true }, mountMode: "ro", wantForwarded: true},
-		{name: "readonly options overridden by flags", mutate: func(real *csi.NodePublishVolumeRequest) {
-			real.VolumeContext["options"] = "tls,ram,ro"
-			real.VolumeCapability.GetMount().MountFlags = []string{"tls", "ram", "rw"}
-		}, mountMode: "rw"},
-		{name: "flags are delegated to NAS", mutate: func(real *csi.NodePublishVolumeRequest) {
-			real.VolumeCapability.GetMount().MountFlags = []string{"ro"}
-		}, mountMode: "rw"},
-		{name: "no explicit writable requirement", mutate: func(*csi.NodePublishVolumeRequest) {}, mountMode: "ro"},
-		{name: "outer boolean does not require ro", mutateOuter: func(in *csi.NodePublishVolumeRequest) { in.Readonly = true }, mountMode: "rw"},
-		{name: "outer reader does not require ro", mutateOuter: func(in *csi.NodePublishVolumeRequest) {
-			in.VolumeCapability.AccessMode.Mode = csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY
-		}, mountMode: "rw"},
-		{name: "outer flag does not require ro", mutateOuter: func(in *csi.NodePublishVolumeRequest) {
-			in.VolumeCapability.GetMount().MountFlags = []string{"ro"}
-		}, mountMode: "rw"},
-		{name: "inner requirement survives an outer writable request", mutate: func(real *csi.NodePublishVolumeRequest) { real.Readonly = true }, mountMode: "ro", wantForwarded: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			real := writablePublishFixture()
-			if tc.mutate != nil {
-				tc.mutate(real)
-			}
-			node, downstream, in := readonlyNodeFixture(t, real)
-			node.opts.Mounter = mount.NewFakeMounter([]mount.MountPoint{{Path: testTarget, Type: "nfs", Opts: []string{tc.mountMode}}})
-			if tc.mutateOuter != nil {
-				tc.mutateOuter(in)
-			}
-			_, err := node.NodePublishVolume(t.Context(), in)
-			if tc.wantReject {
-				require.Equal(t, codes.AlreadyExists, status.Code(err))
-				require.Nil(t, downstream.published)
-			} else {
-				require.NoError(t, err)
-				require.Equal(t, tc.wantForwarded, downstream.published.Readonly)
-			}
-		})
 	}
 }
 

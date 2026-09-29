@@ -127,8 +127,9 @@ Substrate's request describes a virtual bridge volume. The entry in
 ```
 
 This is a structural example; a real request also needs filesystem capability,
-AgenticFS/AgentIdentity attributes and its credential provider. The encoded
-array is limited to 256 KiB. Never put credentials in annotations/VolumeContext.
+AgenticFS/AgentIdentity attributes and its credential provider. The bridge puts no
+size limit on the annotation of its own accord. Never put credentials in
+annotations/VolumeContext.
 
 The actual request remains authoritative for backend ID, server/path, fsType,
 mount options, provider and PublishContext. The bridge changes exactly three
@@ -162,12 +163,17 @@ annotation producer, and treat a bridge StorageClass `mountOptions: [ro]`, a
 `ReadOnlyMany` PVC or a caller-set `readonly` as unconfigured, not as
 enforcement. Golden placeholders are writable bind mounts.
 
-For an existing mount, only an explicit inner `Readonly=true`
-or READER_ONLY mode requires an already-mounted filesystem to report `ro`.
-This catches writable remounts without a configuration change. The check does
-not infer requirements from inner options or mount flags, and does not require
-RW when no explicit read-only requirement exists. Unsupported live filesystem
-types are rejected.
+For an existing mount at the target, the bridge asks one question: is the mount
+visible there one it may mount over? NFS, NFS4 and alinas are (an alinas AccessPoint
+mount is performed as fstype `alinas` but shows up as `nfs` in the kernel mount
+table, so both spellings belong to the answer), anything else is refused, because
+stacking a NAS mount over foreign storage would hide it and would break the
+unpublish rule "a mount the bridge owns is either a NAS mount or its own Golden
+placeholder". Whether a live NAS mount matches the new request is not compared:
+NAS itself answers an already-mounted target with success, so the mount keeps the
+read-only state it was created with until it is unpublished. That is the caller's
+obligation, not a check the bridge adds, and adding it would turn a retryable
+publish into one that only a manual unpublish can clear.
 
 ## Identity keys
 
@@ -240,7 +246,7 @@ required. NAS does not depend on StateDir or any old JSON files.
 The trusted controller/atelet must perform Unpublish before changing the
 configuration of an already-mounted target. Backend idempotence does not prove
 that an existing NAS mount matches a new annotation; the stateless bridge does
-not attempt that comparison. The explicit inner readonly live check remains. The
+not attempt that comparison. The
 caller must preserve the `substrate-mode` and Actor identity keys returned by
 CreateVolume; the Actor UID it injects as `csi.storage.k8s.io/pod.uid` must be the
 Actor that owns the target directory.
@@ -283,7 +289,8 @@ only by re-extraction, never by hand-editing.
 ## Validation and remaining system work
 
 Local tests cover inner read-only passthrough, outer read-only signals being
-ignored, actual mount-mode checks, the Actor identity of the target directory
+ignored, the live-mount filesystem check including a mount stacked over a NAS
+mount, the Actor identity of the target directory
 against the caller's and the Actor API's claims,
 current annotation forwarding, live-based cleanup, corrected requests after
 failed publish/restart, target serialization and Golden source reuse,

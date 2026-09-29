@@ -74,7 +74,7 @@ func fakeNASMount(m mount.Interface, req *csi.NodePublishVolumeRequest) error {
 		}
 	}
 	mode := "rw"
-	if explicitReadOnly(req) {
+	if req.GetReadonly() {
 		mode = "ro"
 	}
 	return m.Mount("server:/", req.TargetPath, "nfs", []string{mode})
@@ -196,7 +196,7 @@ func TestPublishRejectsInvalidBoundary(t *testing.T) {
 		}, codes.InvalidArgument, "target must be a clean absolute path"},
 		{"secrets", func(_, real *csi.NodePublishVolumeRequest) {
 			real.Secrets = map[string]string{"key": "must-not-persist"}
-		}, codes.FailedPrecondition, "a filesystem request without secrets is required"},
+		}, codes.FailedPrecondition, "publish request must not carry credentials"},
 		{"foreign identity", func(_, real *csi.NodePublishVolumeRequest) { real.VolumeContext["sandboxId"] = "another-actor" }, codes.PermissionDenied, "publish request carries a different actor identity"},
 		{"non agent identity", func(_, real *csi.NodePublishVolumeRequest) { real.VolumeContext["authType"] = "access-key" }, codes.FailedPrecondition, "only AgenticFS with Agent Identity is supported"},
 		{"non AgenticFS", func(_, real *csi.NodePublishVolumeRequest) { real.VolumeContext["mountProtocol"] = "nfs" }, codes.FailedPrecondition, "only AgenticFS with Agent Identity is supported"},
@@ -481,6 +481,19 @@ func TestIdentityReadsVolumeIdentityFromTheTarget(t *testing.T) {
 	require.Equal(t, codes.FailedPrecondition, status.Code(err))
 }
 
+func TestPublishForwardsFieldsTheBridgeNeverReads(t *testing.T) {
+	// The stored target is replaced by the host directory and NAS does not look at the staging
+	// path of a publish at all, so neither is a reason to refuse the mount.
+	real := writablePublishFixture()
+	real.TargetPath = "/guest/never/used"
+	real.StagingTargetPath = "/staging/customer-pv-a1b2c3"
+	node, downstream, in := readonlyNodeFixture(t, real)
+	_, err := node.NodePublishVolume(t.Context(), in)
+	require.NoError(t, err)
+	require.Equal(t, testTarget, downstream.published.TargetPath)
+	require.Equal(t, "/staging/customer-pv-a1b2c3", downstream.published.StagingTargetPath)
+}
+
 func TestCheckCallerMetadataMatchesTheTargetActor(t *testing.T) {
 	id := volumeIdentity{ActorUID: testUID, VolumeName: "data"}
 	for _, tc := range []struct {
@@ -552,22 +565,19 @@ func TestBackendRequestChangesOnlyTargetModeAndMissingIdentity(t *testing.T) {
 }
 
 func TestCheckBackendTargetRejectsWhatItCannotMountOver(t *testing.T) {
-	readonly := writablePublishFixture()
-	readonly.Readonly = true
 	for _, tc := range []struct {
-		name     string
-		node     *Node
-		resolved resolvedMount
-		wantErr  string
+		name    string
+		node    *Node
+		wantErr string
 	}{
-		{"clear", NewNode(NodeOptions{NAS: &recordingNAS{}, Mounter: mount.NewFakeMounter(nil)}), resolvedMount{Request: writablePublishFixture()}, ""},
-		{"no NAS server", NewNode(NodeOptions{Mounter: mount.NewFakeMounter(nil)}), resolvedMount{Request: writablePublishFixture()}, "NAS forwarding is not configured"},
-		{"foreign filesystem", NewNode(NodeOptions{NAS: &recordingNAS{}, Mounter: mount.NewFakeMounter([]mount.MountPoint{{Path: testTarget, Type: "ext4"}})}), resolvedMount{Request: writablePublishFixture()}, "unsupported filesystem"},
-		{"writable mount under a readonly request", NewNode(NodeOptions{NAS: &recordingNAS{}, Mounter: mount.NewFakeMounter([]mount.MountPoint{{Path: testTarget, Type: "nfs", Opts: []string{"rw"}}})}), resolvedMount{Request: readonly}, "target access mode differs"},
-		{"readonly mount under a readonly request", NewNode(NodeOptions{NAS: &recordingNAS{}, Mounter: mount.NewFakeMounter([]mount.MountPoint{{Path: testTarget, Type: "nfs", Opts: []string{"ro"}}})}), resolvedMount{Request: readonly}, ""},
+		{"clear", NewNode(NodeOptions{NAS: &recordingNAS{}, Mounter: mount.NewFakeMounter(nil)}), ""},
+		{"no NAS server", NewNode(NodeOptions{Mounter: mount.NewFakeMounter(nil)}), "NAS forwarding is not configured"},
+		{"foreign filesystem", NewNode(NodeOptions{NAS: &recordingNAS{}, Mounter: mount.NewFakeMounter([]mount.MountPoint{{Path: testTarget, Type: "ext4"}})}), "unsupported filesystem"},
+		{"NAS mount of any access mode", NewNode(NodeOptions{NAS: &recordingNAS{}, Mounter: mount.NewFakeMounter([]mount.MountPoint{{Path: testTarget, Type: "nfs", Opts: []string{"rw"}}})}), ""},
+		{"stacked mount hides the NAS mount below", NewNode(NodeOptions{NAS: &recordingNAS{}, Mounter: mount.NewFakeMounter([]mount.MountPoint{{Path: testTarget, Type: "nfs"}, {Path: testTarget, Type: "tmpfs"}})}), "unsupported filesystem"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := tc.node.checkBackendTarget(testTarget, tc.resolved)
+			err := tc.node.checkBackendTarget(testTarget)
 			if tc.wantErr == "" {
 				require.NoError(t, err)
 				return

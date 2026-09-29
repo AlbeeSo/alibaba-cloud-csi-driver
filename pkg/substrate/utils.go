@@ -24,7 +24,6 @@ import (
 	"strings"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	mounterutils "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils/agentidentity"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -92,9 +91,13 @@ func lookupActor(ctx context.Context, lookup ActorLookup, id volumeIdentity, att
 // selectPublishEntry decodes the Actor annotation and returns the entry of one template
 // volume. The annotation carries the request that the shared generator produced for the ACS
 // Sandbox form, so the bridge reads it instead of reconstructing it.
+//
+// By design the bridge sets no size limit of its own on that annotation: the object is already
+// bounded by the API that stores it, and a limit here would reject a configuration the Actor
+// directory itself accepted.
 func selectPublishEntry(annotation, volumeName string) (*csi.NodePublishVolumeRequest, error) {
-	if len(annotation) == 0 || len(annotation) > 256*1024 {
-		return nil, status.Error(codes.FailedPrecondition, "missing or oversized actor publish requests")
+	if annotation == "" {
+		return nil, status.Errorf(codes.FailedPrecondition, "actor has no %s annotation", PublishRequestsAnnotation)
 	}
 	var entries []publishEntry
 	if err := json.Unmarshal([]byte(annotation), &entries); err != nil {
@@ -106,12 +109,19 @@ func selectPublishEntry(annotation, volumeName string) (*csi.NodePublishVolumeRe
 			continue
 		}
 		if matched != nil {
-			return nil, status.Error(codes.FailedPrecondition, "duplicate actor volume publish request")
+			return nil, status.Errorf(codes.FailedPrecondition, "actor has more than one publish request for volume %q", volumeName)
 		}
 		matched = &entries[i]
 	}
-	if matched == nil || matched.Driver != NASDriverName {
-		return nil, status.Error(codes.FailedPrecondition, "a NAS publish request is required for the template volume")
+	if matched == nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "actor has no publish request for volume %q", volumeName)
+	}
+	// Whatever the entry says, this bridge has one place to forward it to: its own NAS node
+	// server. Handing NAS a request generated for another driver is not a natural failure, it
+	// is NAS mounting with parameters it was not given. Supporting another driver means
+	// routing on this value, not loosening the refusal.
+	if matched.Driver != NASDriverName {
+		return nil, status.Errorf(codes.FailedPrecondition, "publish request for driver %q has no backend in the Substrate bridge", matched.Driver)
 	}
 	request := new(csi.NodePublishVolumeRequest)
 	if err := protojson.Unmarshal(matched.Request, request); err != nil {
@@ -120,24 +130,44 @@ func selectPublishEntry(annotation, volumeName string) (*csi.NodePublishVolumeRe
 	return request, nil
 }
 
-// validateBackendRequest keeps the bridge on one storage path: an AgenticFS filesystem
-// mounted through Agent Identity, without secrets and without an identity other than the
-// Actor's own.
+// validateBackendRequest keeps the bridge on one storage path: an AgenticFS filesystem mounted
+// through Agent Identity, under the Actor's own identity, with no credentials in it. A field is
+// only refused here when forwarding it would either succeed as the wrong mount or make NAS key
+// its work on an empty identifier; anything NAS can answer itself is left to NAS. By design a
+// stored field the bridge replaces (the target) or NAS ignores (the staging path) is forwarded as
+// it is instead of being checked.
 func validateBackendRequest(request *csi.NodePublishVolumeRequest, actor ActorInfo) error {
-	if request.VolumeId == "" || request.GetVolumeCapability().GetMount() == nil ||
-		request.GetVolumeCapability().GetAccessMode().GetMode() == csi.VolumeCapability_AccessMode_UNKNOWN ||
-		len(request.Secrets) != 0 {
-		return status.Error(codes.FailedPrecondition, "a filesystem request without secrets is required")
+	// NAS locks and logs on the volume ID of the request it receives.
+	if request.VolumeId == "" {
+		return status.Error(codes.FailedPrecondition, "publish request requires a volume ID")
 	}
-	if !filepath.IsAbs(request.TargetPath) || filepath.Clean(request.TargetPath) != request.TargetPath || request.StagingTargetPath != "" {
-		return status.Error(codes.FailedPrecondition, "publish request requires a clean guest target and no staging path")
+	// NAS reads the mount flags and the access mode off these; a block capability or an
+	// unknown mode would be mounted as a writable filesystem rather than rejected.
+	if request.GetVolumeCapability().GetMount() == nil {
+		return status.Error(codes.FailedPrecondition, "publish request requires a filesystem capability")
 	}
+	if request.GetVolumeCapability().GetAccessMode().GetMode() == csi.VolumeCapability_AccessMode_UNKNOWN {
+		return status.Error(codes.FailedPrecondition, "publish request requires an access mode")
+	}
+	// NAS takes the access-key pair straight from the request (pkg/nas/nodeserver.go:305),
+	// whatever the authentication is set to, and the annotation is Actor metadata with a much
+	// wider readership than a Secret. This is the one place a credential can be stopped from
+	// being written into an Actor object.
+	if len(request.Secrets) != 0 {
+		return status.Error(codes.FailedPrecondition, "publish request must not carry credentials")
+	}
+	// Without Agent Identity the mount proxy is never told to use the Actor's own bearer token
+	// (pkg/nas/utils.go:379), so the target would be mounted under some other identity; without
+	// alinas it would not go through the AccessPoint the request names.
 	if !strings.EqualFold(request.VolumeContext["authType"], "agent-identity") || request.VolumeContext["mountProtocol"] != "alinas" {
 		return status.Error(codes.FailedPrecondition, "only AgenticFS with Agent Identity is supported")
 	}
 	for key, value := range request.VolumeContext {
 		switch strings.ToLower(key) {
 		case "useclient", "containernetworkfilesystem":
+			// Both rewrite what NAS mounts and where: the client type and filesystem from the
+			// volume context, the server endpoint from the CNFS object (pkg/nas/nodeserver.go:217,
+			// :251, :313-322). They do not fail, they mount a different volume.
 			if value != "" {
 				return status.Error(codes.FailedPrecondition, "NAS client selection and CNFS routing are not supported through the Substrate bridge")
 			}
@@ -165,39 +195,8 @@ func setActorMetadata(values map[string]string, actor ActorInfo) {
 	values[agentidentity.ActorNamespaceKey] = actor.Atespace
 }
 
-// explicitReadOnly reports the read-only requirement stated by the CSI flag or a
-// READER_ONLY access mode. Mount flags stay with the NAS driver.
-func explicitReadOnly(req *csi.NodePublishVolumeRequest) bool {
-	return mounterutils.ReadOnlyRequested(req.GetReadonly(), req.GetVolumeCapability().GetAccessMode().GetMode())
-}
-
-func flagsContain(flags []string, wanted string) bool {
-	for _, flag := range flags {
-		for _, option := range mounterutils.SplitMountOptions(flag) {
-			if strings.TrimSpace(option) == wanted {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func (n *Node) checkMountedReadOnly(target string, readOnly bool) error {
-	if !readOnly {
-		return nil
-	}
-	entries, err := n.opts.Mounter.List()
-	if err != nil {
-		return status.Errorf(codes.Internal, "read mount table: %v", err)
-	}
-	for _, entry := range entries {
-		if entry.Path == target && !flagsContain(entry.Opts, "ro") {
-			return status.Error(codes.AlreadyExists, "target access mode differs; unpublish before changing readonly")
-		}
-	}
-	return nil
-}
-
+// mountAt returns the mount currently visible at target. When several mounts share a path the
+// last one in the table is the topmost, and that is the one the Actor would see.
 func (n *Node) mountAt(target string) (*mount.MountPoint, error) {
 	if n.opts.Mounter == nil {
 		return nil, status.Error(codes.FailedPrecondition, "mount inspector is required")
@@ -206,12 +205,13 @@ func (n *Node) mountAt(target string) (*mount.MountPoint, error) {
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "read mount table: %v", err)
 	}
-	for _, entry := range entries {
-		if entry.Path == target {
-			return &entry, nil
+	var live *mount.MountPoint
+	for i := range entries {
+		if entries[i].Path == target {
+			live = &entries[i]
 		}
 	}
-	return nil, nil
+	return live, nil
 }
 
 func nasMount(entry *mount.MountPoint) bool {
