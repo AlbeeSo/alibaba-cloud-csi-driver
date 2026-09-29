@@ -124,7 +124,7 @@ var (
 	substrateToken           = flag.String("substrate-api-token-file", "/var/run/secrets/kubernetes.io/serviceaccount/token", "projected bearer token for the Substrate control API")
 	substrateServerName      = flag.String("substrate-api-server-name", "", "TLS server name override for the Substrate control API")
 	substrateActorRoot       = flag.String("substrate-actor-root", substrate.DefaultActorRoot, "host directory containing Substrate actor volumes")
-	substrateStateDir        = flag.String("substrate-state-dir", "/csi/substrate-state", "persistent node-local bridge binding and golden placeholder directory")
+	substrateStateDir        = flag.String("substrate-state-dir", "/csi/substrate-state", "persistent node-local golden placeholder source directory")
 )
 
 func setupFlags() {
