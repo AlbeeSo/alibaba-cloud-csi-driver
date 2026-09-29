@@ -89,7 +89,7 @@ spec:
         runAsNonRoot: true
         runAsUser: 65532  # TODO: remove this when we set the user in all the images
 {{- if .Values.enableSubstrate }}
-        fsGroup: 65532
+        fsGroup: 65532  # projected pod-certificate volumes require the nonroot group to be readable
 {{- end }}
       containers:
         - name: csi-provisioner
@@ -202,7 +202,7 @@ spec:
               memory: 128Mi
 {{- if .Values.enableSubstrate }}
         - name: substrate-controller-proxy
-          image: {{ .Values.substrate.envoyImage | quote }}
+          image: {{ include "imageSpec" (list .Values "envoy") }}
           args: [-c, /etc/envoy/envoy.yaml, --log-level, warning]
           ports:
             - {name: bridge-grpc, containerPort: 8444}

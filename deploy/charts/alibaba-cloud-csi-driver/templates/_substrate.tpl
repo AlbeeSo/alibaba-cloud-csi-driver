@@ -1,5 +1,5 @@
 {{- define "substrate.drivers" -}}
-{{- .base -}}{{- if .enabled -}}{{- if .base }},{{ end -}}substrate.csi.alibabacloud.com{{- end -}}
+{{- .base -}}{{- if .enabled -}}{{- if .base }},{{ end -}}substrate{{- end -}}
 {{- end -}}
 
 {{- define "substrate.commonVolumes" -}}

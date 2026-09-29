@@ -107,11 +107,11 @@ func TestSubstrateEnabledWiresControllerNodeAndTrust(t *testing.T) {
 		t.Fatal(err)
 	}
 	driver := container(t, deployment.Template.Spec, "csi-provisioner")
-	if !slices.Contains(driverNames(driver), "nas") || !slices.Contains(driverNames(driver), "substrate.csi.alibabacloud.com") {
+	if !slices.Contains(driverNames(driver), "nas") || !slices.Contains(driverNames(driver), "substrate") {
 		t.Fatal("controller must keep NAS and add bridge")
 	}
 	args := strings.Join(driver.Args, " ")
-	for _, flag := range []string{"substrate.csi.alibabacloud.com", "--run-controller-service=true", "--run-node-service=false"} {
+	for _, flag := range []string{"substrate", "--run-controller-service=true", "--run-node-service=false"} {
 		if !strings.Contains(args, flag) {
 			t.Errorf("missing controller flag %s", flag)
 		}
@@ -138,7 +138,7 @@ func TestSubstrateEnabledWiresControllerNodeAndTrust(t *testing.T) {
 			t.Errorf("missing node flag %s", flag)
 		}
 	}
-	if !slices.Contains(driverNames(node), "nas") || !slices.Contains(driverNames(node), "substrate.csi.alibabacloud.com") {
+	if !slices.Contains(driverNames(node), "nas") || !slices.Contains(driverNames(node), "substrate") {
 		t.Fatal("node must keep NAS and add bridge")
 	}
 	if strings.Contains(strings.Join(node.Args, " "), "--mount-proxy-sock=") {
@@ -266,7 +266,7 @@ func TestSubstrateWithoutNativeControllers(t *testing.T) {
 	if err := json.Unmarshal(findResource(t, resources, "Deployment", "csi-provisioner").Spec, &deployment); err != nil {
 		t.Fatal(err)
 	}
-	if names := driverNames(container(t, deployment.Template.Spec, "csi-provisioner")); !slices.Equal(names, []string{"substrate.csi.alibabacloud.com"}) {
+	if names := driverNames(container(t, deployment.Template.Spec, "csi-provisioner")); !slices.Equal(names, []string{"substrate"}) {
 		t.Fatalf("unexpected driver list %v", names)
 	}
 	var service corev1.ServiceSpec
