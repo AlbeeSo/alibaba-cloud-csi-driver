@@ -371,14 +371,7 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		}
 	}
 
-	readOnly := req.GetReadonly()
-	if !readOnly {
-		switch req.GetVolumeCapability().GetAccessMode().GetMode() {
-		case csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY,
-			csi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY:
-			readOnly = true
-		}
-	}
+	readOnly := mounterutils.ReadOnlyRequested(req.GetReadonly(), req.GetVolumeCapability().GetAccessMode().GetMode())
 
 	var runtimeVal string
 	if common.IsSubstrateVolumeContext(req.VolumeContext) {

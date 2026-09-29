@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	mounterutils "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -26,29 +27,12 @@ func requestReadOnly(req *csi.NodePublishVolumeRequest) bool {
 }
 
 func explicitReadOnly(req *csi.NodePublishVolumeRequest) bool {
-	if req.GetReadonly() {
-		return true
-	}
-	switch req.GetVolumeCapability().GetAccessMode().GetMode() {
-	case csi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY, csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY:
-		return true
-	}
-	return false
-}
-
-func splitMountFlags(value string) []string {
-	inQuotes := false
-	return strings.FieldsFunc(value, func(r rune) bool {
-		if r == '"' {
-			inQuotes = !inQuotes
-		}
-		return r == ',' && !inQuotes
-	})
+	return mounterutils.ReadOnlyRequested(req.GetReadonly(), req.GetVolumeCapability().GetAccessMode().GetMode())
 }
 
 func flagsContain(flags []string, wanted string) bool {
 	for _, flag := range flags {
-		for _, option := range splitMountFlags(flag) {
+		for _, option := range mounterutils.SplitMountOptions(flag) {
 			if strings.TrimSpace(option) == wanted {
 				return true
 			}
