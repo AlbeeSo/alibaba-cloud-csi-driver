@@ -55,7 +55,8 @@ Key values:
 | `substrate.createDriverConfig` | `true` | Create the native NAS and bridge configs for enabled Controllers |
 | `substrate.storageClass.create` | `true` | Create the bridge reference class |
 | `substrate.storageClass.name` | `ate-storage` | Must match the annotation producer's template slots |
-| `substrate.envoyImage` | `envoyproxy/envoy:v1.39.0` | TLS frontend image |
+| `images.envoy.repo` | `acs/envoy` | TLS frontend repository, resolved through the chart's standard registry selection |
+| `images.envoy.tag` | `v1.39-latest` | Published ACK mirror tag; override with your validated release tag if needed |
 
 `controller.enabled`, `controller.replicas`, `plugin.enabled`, `nodePools`,
 `deploy.kubeletRootDir`, and `imagePullSecrets` are also honored. Node pools must
@@ -213,8 +214,9 @@ the publish is retried. Old binding JSON is ignored by this version. Do not remo
 the containing StateDir wholesale: its Golden source data is still needed.
 
 The broker-owned lifecycle alternative is archived on
-`backup/substrate-lifecycle-v1`, with `LIFECYCLE-DESIGN.md` and implementation
-evidence under this documentation directory on that branch. It is not included
+`backup/substrate-lifecycle-v1`, with its design and implementation evidence at
+`examples/substrate/bridge/LIFECYCLE-DESIGN.md` and
+`examples/substrate/bridge/LIFECYCLE-IMPLEMENTATION.md` on that branch. It is not included
 in this PR. Reconsider it only with production evidence or a changed lifecycle
 contract, rather than adding permanent broker interfaces to a temporary bridge.
 
@@ -298,10 +300,11 @@ live in the existing `pkg/mounter/utils/agentidentity` package rather than a new
 | Helm `plugin.yaml` / `controller.yaml` | Shared processes, registrar, TLS sidecar and mounts |
 | Helm `_substrate.tpl` / `substrate-support.yaml` | One identity/flag definition, shared Service/TLS configuration and per-driver configs |
 
-`agentidentity.IsSubstrateVolumeContext` is the single parser for the Substrate
-mode key. The existing `common.IsSubstrateVolumeContext` delegates to it so
-existing callers keep their API. Only the exact string `true` enables the mode.
+`utils.SubstrateModeKey`, `utils.IsSubstrateVolumeContext` and
+`utils.MountOwnerUID` in `pkg/utils` are the single definition of the Substrate
+mode key and its parser; `jwtauth`, `pkg/common`, `pkg/nas` and the bridge all
+share them. Only the exact string `true` enables the mode.
 
 Stateless forwarding, live mount inspection, Actor lookup on publish, no-op
 logical Create/Attach/Stage and Actor-independent Unpublish are the selected
-design. See [STATELESS-REVIEW.md](STATELESS-REVIEW.md) for scope and validation.
+design.
