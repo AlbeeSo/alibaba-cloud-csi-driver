@@ -14,7 +14,7 @@ closure they need - `ResourceMetadata` (atespace, name, uid, annotations),
 field numbers are verbatim from the source revision; omitted fields are marked
 `reserved` at their original numbers so a refresh cannot silently reuse them.
 The `go_package` option points at this repository because the copy is generated
-here. `source.go` embeds the `.proto` text for tools that need to parse it.
+here.
 
 ## Why not depend on the public Substrate module
 
