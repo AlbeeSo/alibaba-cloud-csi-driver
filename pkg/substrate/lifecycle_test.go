@@ -170,3 +170,33 @@ func TestPublishUsesCurrentConfigurationWithoutBindingConflicts(t *testing.T) {
 		})
 	}
 }
+
+func TestPlaceholderPathIsStableAndTargetScoped(t *testing.T) {
+	options := NodeOptions{StateDir: t.TempDir()}
+	one, err := NewNode(options).placeholderSource(testID, testTarget)
+	require.NoError(t, err)
+	again, err := NewNode(options).placeholderSource(testID, testTarget)
+	require.NoError(t, err)
+	require.Equal(t, one, again)
+	two, err := NewNode(options).placeholderSource(testID, "/another/target")
+	require.NoError(t, err)
+	require.NotEqual(t, one, two)
+}
+
+func TestMountedPlaceholderDoesNotRecreateMissingSource(t *testing.T) {
+	node := NewNode(NodeOptions{StateDir: t.TempDir(), Mounter: mount.NewFakeMounter(nil)})
+	source, err := node.placeholderSource(testID, testTarget)
+	require.NoError(t, err)
+	node.opts.Mounter = mount.NewFakeMounter([]mount.MountPoint{{Device: source, Path: testTarget, Type: "none"}})
+	require.Error(t, node.publishPlaceholder(testID, testTarget))
+	require.NoDirExists(t, source)
+}
+
+func TestPlaceholderRejectsSymlinkSource(t *testing.T) {
+	node := NewNode(NodeOptions{StateDir: t.TempDir(), Mounter: mount.NewFakeMounter(nil)})
+	source, err := node.placeholderSource(testID, testTarget)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(source), 0700))
+	require.NoError(t, os.Symlink(t.TempDir(), source))
+	require.Error(t, node.publishPlaceholder(testID, testTarget))
+}

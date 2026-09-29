@@ -153,3 +153,27 @@ func TestActorClientRejectsMissingTrust(t *testing.T) {
 	_, err := NewActorClient(ActorClientOptions{Endpoint: "localhost:443"})
 	require.Error(t, err)
 }
+
+func TestActorLookupLive(t *testing.T) {
+	endpoint := os.Getenv("SUBSTRATE_LIVE_ENDPOINT")
+	if endpoint == "" {
+		t.Skip("set SUBSTRATE_LIVE_* to run the read-only cluster probe")
+	}
+	client, err := NewActorClient(ActorClientOptions{
+		Endpoint: endpoint, CAFile: os.Getenv("SUBSTRATE_LIVE_CA_FILE"),
+		TokenFile: os.Getenv("SUBSTRATE_LIVE_TOKEN_FILE"), ServerName: os.Getenv("SUBSTRATE_LIVE_SERVER_NAME"),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	ref := ActorReference{UID: os.Getenv("SUBSTRATE_LIVE_ACTOR_UID"), Name: os.Getenv("SUBSTRATE_LIVE_ACTOR_NAME"), Atespace: os.Getenv("SUBSTRATE_LIVE_ATESPACE")}
+	actor, err := client.Lookup(t.Context(), ref)
+	require.NoError(t, err)
+	require.Equal(t, ref.UID, actor.UID)
+	require.Equal(t, ref.Name, actor.Name)
+	require.Equal(t, ref.Atespace, actor.Atespace)
+	if ref.Atespace == "ate-golden" {
+		require.True(t, actor.Golden)
+	} else {
+		require.NotEmpty(t, actor.Annotation)
+	}
+}
