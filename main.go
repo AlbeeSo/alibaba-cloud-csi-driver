@@ -23,6 +23,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -244,11 +245,7 @@ func main() {
 		}
 	}
 
-	for i, driverName := range driverNames {
-		if !strings.Contains(driverName, TypePluginSuffix) && driverName != ExtenderAgent && driverName != substrate.DriverName {
-			driverNames[i] = joinCsiPluginSuffix(driverName)
-		}
-	}
+	expandDriverNames(driverNames)
 
 	csiCfg := getCSIPluginConfig()
 
@@ -281,6 +278,16 @@ func main() {
 	}
 
 	if serviceType != 0 {
+		// The NAS and Substrate node services share a single NAS server
+		// instance. Constructing it once keeps per-process side effects (dadi
+		// polling, event recorders, volume locks) from being duplicated.
+		var nasServers *common.Servers
+		if slices.Contains(driverNames, TypePluginNAS) {
+			nasServers = nas.NewServers(meta, *endpoint, serviceType, csiCfg, resolvedNasMountProxySock)
+		} else if slices.Contains(driverNames, substrate.DriverName) && serviceType&utils.Node != 0 {
+			nasServers = nas.NewServers(meta, *endpoint, utils.Node, csiCfg, resolvedNasMountProxySock)
+		}
+
 		for _, driverName := range driverNames {
 			endpoint := replaceCsiEndpoint(driverName, *endpoint)
 			klog.Infof("CSI endpoint for driver %s: %s", driverName, endpoint)
@@ -302,15 +309,14 @@ func main() {
 							klog.ErrorS(err, "Close Substrate actor lookup")
 						}
 					}()
-					nasNode := nas.NewServers(meta, endpoint, utils.Node, csiCfg, resolvedNasMountProxySock).NodeServer
 					bridgeNodeID := *nodeID
 					if bridgeNodeID == "" {
 						bridgeNodeID = os.Getenv("KUBE_NODE_NAME")
 					}
-					driver.NodeServer = substrate.NewNode(substrate.NodeOptions{NodeID: bridgeNodeID, ActorRoot: *substrateActorRoot, Lookup: actors.Lookup, NAS: nasNode, StateDir: *substrateStateDir, Mounter: mountutils.NewWithoutSystemd("")})
+					driver.NodeServer = substrate.NewNode(substrate.NodeOptions{NodeID: bridgeNodeID, ActorRoot: *substrateActorRoot, Lookup: actors.Lookup, NAS: nasServers.NodeServer, StateDir: *substrateStateDir, Mounter: mountutils.NewWithoutSystemd("")})
 				}
 			case TypePluginNAS:
-				driver = nas.NewServers(meta, endpoint, serviceType, csiCfg, resolvedNasMountProxySock)
+				driver = nasServers
 			case TypePluginOSS:
 				driver = oss.NewServers(endpoint, meta, serviceType, csiCfg, k8sVersion, *mountProxySock)
 			case TypePluginDISK:
@@ -345,7 +351,7 @@ func main() {
 			}
 
 			// The metric "type" label uses the short driver type (e.g. "disk", "bmcpfs").
-			driverType := strings.TrimSuffix(driverName, TypePluginSuffix)
+			driverType := driverMetricType(driverName)
 			server := common.NewCSIServer(driverType, driver)
 			wg.Go(func() {
 				common.Serve(server, endpoint)
@@ -402,6 +408,30 @@ func main() {
 
 func joinCsiPluginSuffix(storageType string) string {
 	return storageType + TypePluginSuffix
+}
+
+// driverMetricType returns the short driver type used as the metric "type"
+// label (e.g. "disk", "bmcpfs"). The bridge name carries no "plugin" infix, so
+// trimming the plugin suffix cannot derive its short name.
+func driverMetricType(driverName string) string {
+	if driverName == substrate.DriverName {
+		return substrate.DriverShortName
+	}
+	return strings.TrimSuffix(driverName, TypePluginSuffix)
+}
+
+// expandDriverNames maps each short --driver entry to its full CSI driver
+// name. The bridge name has no "plugin" infix, so its short form maps to the
+// name declared by the substrate package instead of joinCsiPluginSuffix.
+func expandDriverNames(driverNames []string) {
+	for i, driverName := range driverNames {
+		switch {
+		case driverName == substrate.DriverShortName:
+			driverNames[i] = substrate.DriverName
+		case !strings.Contains(driverName, TypePluginSuffix) && driverName != ExtenderAgent && driverName != substrate.DriverName:
+			driverNames[i] = joinCsiPluginSuffix(driverName)
+		}
+	}
 }
 
 func replaceCsiEndpoint(pluginType string, endPointName string) string {

@@ -34,6 +34,7 @@ import (
 
 const (
 	DriverName                = "substrate.csi.alibabacloud.com"
+	DriverShortName           = "substrate"
 	NASDriverName             = "nasplugin.csi.alibabacloud.com"
 	PublishRequestsAnnotation = "ate.dev/csi-volume-publish-requests"
 	PodUIDKey                 = agentidentity.PodUIDKey
