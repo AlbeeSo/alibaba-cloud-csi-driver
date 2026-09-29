@@ -16,11 +16,11 @@ package substrate
 import (
 	"context"
 	"encoding/json"
-	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils/agentidentity"
 	"path/filepath"
 	"strings"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils/agentidentity"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -96,6 +96,12 @@ func resolveMount(ctx context.Context, lookup ActorLookup, id string, attributes
 		return resolvedMount{}, status.Error(codes.FailedPrecondition, "only AgenticFS with Agent Identity is supported")
 	}
 	for key, value := range req.VolumeContext {
+		switch strings.ToLower(key) {
+		case "useclient", "containernetworkfilesystem":
+			if value != "" {
+				return resolvedMount{}, status.Error(codes.FailedPrecondition, "NAS client selection and CNFS routing are not supported through the Substrate bridge")
+			}
+		}
 		if (strings.EqualFold(key, "sandboxId") || key == PodUIDKey) && value != "" && value != actor.UID {
 			return resolvedMount{}, status.Error(codes.PermissionDenied, "publish request carries a different actor identity")
 		}

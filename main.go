@@ -302,7 +302,8 @@ func main() {
 				if serviceType&utils.Node != 0 {
 					actors, err := substrate.NewActorClient(substrate.ActorClientOptions{Endpoint: *substrateEndpoint, CAFile: *substrateCA, TokenFile: *substrateToken, ServerName: *substrateServerName})
 					if err != nil {
-						klog.Fatalf("Initialize Substrate actor lookup: %v", err)
+						klog.ErrorS(err, "Substrate actor lookup unavailable; substrate node service will not start")
+						continue
 					}
 					defer func() {
 						if err := actors.Close(); err != nil {
