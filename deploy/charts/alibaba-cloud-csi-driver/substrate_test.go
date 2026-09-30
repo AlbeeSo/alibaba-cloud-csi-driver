@@ -277,3 +277,57 @@ func TestSubstrateWithoutNativeControllers(t *testing.T) {
 		t.Fatal("bridge service port must remain stable without NAS")
 	}
 }
+
+func TestSubstrateControllerOnlyDoesNotRequireActorAPI(t *testing.T) {
+	resources := renderChart(t, "--set", "enableSubstrate=true", "--set", "plugin.enabled=false", "--set", "substrate.apiEndpoint=", "--set", "substrate.apiAudience=")
+	var deployment appsv1.DeploymentSpec
+	if err := json.Unmarshal(findResource(t, resources, "Deployment", "csi-provisioner").Spec, &deployment); err != nil {
+		t.Fatal(err)
+	}
+	container(t, deployment.Template.Spec, "substrate-controller-proxy")
+	certificate, clientTrust := false, false
+	for _, volume := range deployment.Template.Spec.Volumes {
+		if volume.Projected == nil {
+			continue
+		}
+		for _, source := range volume.Projected.Sources {
+			if source.ServiceAccountToken != nil {
+				t.Fatal("controller must not project an Actor API token")
+			}
+			if source.ClusterTrustBundle != nil {
+				if source.ClusterTrustBundle.Path == "trust-bundle.pem" {
+					t.Fatal("controller must not require the Actor API server trust bundle")
+				}
+				clientTrust = clientTrust || source.ClusterTrustBundle.Path == "client-trust-bundle.pem"
+			}
+			certificate = certificate || source.PodCertificate != nil
+		}
+	}
+	if !certificate || !clientTrust {
+		t.Fatal("controller must retain certificate and client trust for inbound mTLS")
+	}
+}
+
+func TestSubstrateEnvoyUsesStandardImageSelection(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"Beijing VPC", []string{"--set", "deploy.regionID=cn-beijing", "--set", "deploy.network=vpc"}, "registry-cn-beijing-vpc.ack.aliyuncs.com/acs/envoy:v1.39-latest"},
+		{"Beijing public", []string{"--set", "deploy.regionID=cn-beijing", "--set", "deploy.network=internet"}, "registry-cn-beijing.ack.aliyuncs.com/acs/envoy:v1.39-latest"},
+		{"custom image", []string{"--set", "deploy.network=vpc", "--set", "images.registryVPC=registry.example.com", "--set", "images.envoy.repo=team/envoy", "--set", "images.envoy.tag=reviewed"}, "registry.example.com/team/envoy:reviewed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{"--set", "enableSubstrate=true"}, tc.args...)
+			resources := renderChart(t, args...)
+			var deployment appsv1.DeploymentSpec
+			if err := json.Unmarshal(findResource(t, resources, "Deployment", "csi-provisioner").Spec, &deployment); err != nil {
+				t.Fatal(err)
+			}
+			if got := container(t, deployment.Template.Spec, "substrate-controller-proxy").Image; got != tc.want {
+				t.Fatalf("Envoy image %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
