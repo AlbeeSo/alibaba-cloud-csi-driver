@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -253,23 +254,47 @@ func TestNodeGetInfoRequiresNodeIdentity(t *testing.T) {
 	require.Equal(t, "worker-node", info.NodeId)
 }
 
-// Stored PodInfo is not the current placement. Missing caller labels must not retain
-// a previous worker's name or namespace, while Actor ownership stays unchanged.
+// Stored PodInfo is not the current placement: the worker changes on resume, and a caller that
+// names no Pod at all must not retain a previous worker's labels. Actor ownership is unaffected
+// either way, and the bridge caches nothing between the two publishes.
 func TestPublishDoesNotRetainStoredWorkerLabels(t *testing.T) {
 	real := writablePublishFixture()
+	real.VolumeContext[PodUIDKey] = "previous-worker"
 	real.VolumeContext["csi.storage.k8s.io/pod.name"] = "stored-pod-name"
 	real.VolumeContext["csi.storage.k8s.io/pod.namespace"] = "stored-pod-space"
 	node, downstream, request := readonlyNodeFixture(t, real)
-	_, err := node.NodePublishVolume(t.Context(), request)
-	require.NoError(t, err)
-	require.NotContains(t, downstream.published.VolumeContext, "csi.storage.k8s.io/pod.name")
-	require.NotContains(t, downstream.published.VolumeContext, "csi.storage.k8s.io/pod.namespace")
-	require.Equal(t, "worker-pod-uid", downstream.published.VolumeContext[PodUIDKey])
-	for key, value := range actorMetadataFixture() {
-		require.Equal(t, value, downstream.published.VolumeContext[key])
+	for _, tc := range []struct{ worker, podName, podNamespace string }{
+		{"worker-one", "worker-one-name", "worker-one-namespace"},
+		{"worker-two", "", ""},
+	} {
+		t.Run(tc.worker, func(t *testing.T) {
+			request.VolumeContext[PodUIDKey] = tc.worker
+			delete(request.VolumeContext, "csi.storage.k8s.io/pod.name")
+			delete(request.VolumeContext, "csi.storage.k8s.io/pod.namespace")
+			if tc.podName != "" {
+				request.VolumeContext["csi.storage.k8s.io/pod.name"] = tc.podName
+				request.VolumeContext["csi.storage.k8s.io/pod.namespace"] = tc.podNamespace
+			}
+			_, err := node.NodePublishVolume(t.Context(), request)
+			require.NoError(t, err)
+			for key, value := range map[string]string{
+				PodUIDKey:                          tc.worker,
+				"csi.storage.k8s.io/pod.name":      tc.podName,
+				"csi.storage.k8s.io/pod.namespace": tc.podNamespace,
+			} {
+				if value == "" {
+					require.NotContains(t, downstream.published.VolumeContext, key)
+				} else {
+					require.Equal(t, value, downstream.published.VolumeContext[key])
+				}
+			}
+			for key, value := range actorMetadataFixture() {
+				require.Equal(t, value, downstream.published.VolumeContext[key])
+			}
+			require.Equal(t, testTarget, downstream.published.TargetPath)
+		})
 	}
-	require.Equal(t, testTarget, downstream.published.TargetPath)
-	_, err = node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})
+	_, err := node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})
 	require.NoError(t, err)
 	require.Equal(t, testID, downstream.unpublished.VolumeId)
 }
@@ -478,17 +503,40 @@ func TestIdentityReadsVolumeIdentityFromTheTarget(t *testing.T) {
 	require.Equal(t, codes.FailedPrecondition, status.Code(err))
 }
 
+// The stored target is replaced by the host directory and NAS does not look at the staging path
+// of a publish at all, so neither is a reason to refuse the mount.
 func TestPublishForwardsFieldsTheBridgeNeverReads(t *testing.T) {
-	// The stored target is replaced by the host directory and NAS does not look at the staging
-	// path of a publish at all, so neither is a reason to refuse the mount.
+	for _, storedTarget := range []struct {
+		name, value string
+	}{
+		{"empty", ""},
+		{"relative", "relative"},
+		{"non-clean", "/guest/../unused"},
+		{"clean absolute", "/guest/never/used"},
+	} {
+		t.Run(storedTarget.name, func(t *testing.T) {
+			real := writablePublishFixture()
+			real.TargetPath = storedTarget.value
+			real.StagingTargetPath = "stored/staging/is/unused/by/nas"
+			node, downstream, in := readonlyNodeFixture(t, real)
+			in.StagingTargetPath = "/outer/staging/must-not-replace-inner"
+			_, err := node.NodePublishVolume(t.Context(), in)
+			require.NoError(t, err)
+			require.Equal(t, testTarget, downstream.published.TargetPath)
+			require.Equal(t, real.StagingTargetPath, downstream.published.StagingTargetPath)
+		})
+	}
+}
+
+// The bridge stores no annotation of its own, so the payload a caller chose to write is not
+// something the bridge puts a second, smaller ceiling on.
+func TestPublishImposesNoAnnotationSizeLimit(t *testing.T) {
 	real := writablePublishFixture()
-	real.TargetPath = "/guest/never/used"
-	real.StagingTargetPath = "/staging/customer-pv-a1b2c3"
+	real.VolumeContext["opaque-configuration"] = strings.Repeat("x", 300*1024)
 	node, downstream, in := readonlyNodeFixture(t, real)
 	_, err := node.NodePublishVolume(t.Context(), in)
 	require.NoError(t, err)
-	require.Equal(t, testTarget, downstream.published.TargetPath)
-	require.Equal(t, "/staging/customer-pv-a1b2c3", downstream.published.StagingTargetPath)
+	require.Equal(t, real.VolumeContext["opaque-configuration"], downstream.published.VolumeContext["opaque-configuration"])
 }
 
 func TestCheckCallerMetadataMatchesTheTargetActor(t *testing.T) {

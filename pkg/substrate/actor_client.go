@@ -29,6 +29,8 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+const actorLookupTimeout = 10 * time.Second
+
 type ActorClientOptions struct {
 	Endpoint   string
 	CAFile     string
@@ -60,6 +62,8 @@ func NewActorClient(opts ActorClientOptions) (*ActorClient, error) {
 	if opts.Endpoint == "" || opts.CAFile == "" || opts.TokenFile == "" {
 		return nil, fmt.Errorf("substrate endpoint, CA and projected token file are required")
 	}
+	// Trust is loaded once; projected CA bundle changes require a Node Pod rollout.
+	// Unlike this pool, the projected token is read on every RPC below.
 	ca, err := os.ReadFile(opts.CAFile)
 	if err != nil {
 		return nil, fmt.Errorf("read Substrate CA: %w", err)
@@ -82,7 +86,9 @@ func (c *ActorClient) Lookup(ctx context.Context, ref ActorReference) (ActorInfo
 	if ref.UID == "" || ref.Name == "" || ref.Atespace == "" {
 		return ActorInfo{}, status.Error(codes.InvalidArgument, "actor UID, name and namespace are required")
 	}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	// Actor and optional Golden template queries share this budget; a shorter
+	// caller deadline still takes precedence.
+	ctx, cancel := context.WithTimeout(ctx, actorLookupTimeout)
 	defer cancel()
 	response, err := c.control.GetActor(ctx, &ateapipb.GetActorRequest{Actor: &ateapipb.ObjectRef{Atespace: ref.Atespace, Name: ref.Name}})
 	if err != nil {
@@ -95,7 +101,7 @@ func (c *ActorClient) Lookup(ctx context.Context, ref ActorReference) (ActorInfo
 	if meta.GetAtespace() != ref.Atespace || meta.GetName() != ref.Name {
 		return ActorInfo{}, status.Error(codes.PermissionDenied, "actor lookup returned a different reference")
 	}
-	info := ActorInfo{UID: ref.UID, Atespace: meta.Atespace, Name: meta.Name, Annotation: meta.GetAnnotations()[PublishRequestsAnnotation]}
+	info := ActorInfo{UID: meta.GetUid(), Atespace: meta.Atespace, Name: meta.Name, Annotation: meta.GetAnnotations()[PublishRequestsAnnotation]}
 	if info.Atespace != "ate-golden" {
 		return info, nil
 	}

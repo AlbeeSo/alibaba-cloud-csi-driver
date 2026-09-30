@@ -71,18 +71,20 @@ func TestGoldenPlaceholderRealMountThroughGRPC(t *testing.T) {
 		_, cleanupErr := client.NodeUnpublishVolume(context.Background(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: target})
 		require.NoError(t, cleanupErr)
 	})
+	in.VolumeId = "publish-alias"
 	_, err = client.NodePublishVolume(t.Context(), in)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(target, "probe"), []byte("golden-placeholder"), 0600))
-	source, err := node.placeholderSource(testID, target)
+	source, err := node.placeholderSource(target)
 	require.NoError(t, err)
 	read, err := os.ReadFile(filepath.Join(source, "probe"))
 	require.NoError(t, err)
 	require.Equal(t, []byte("golden-placeholder"), read)
 	unavailable.Store(true)
-	_, err = client.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: target})
+	_, err = client.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: "cleanup-alias", TargetPath: target})
 	require.NoError(t, err)
 	require.NoDirExists(t, target)
+	require.NoDirExists(t, source)
 }
 
 func TestGoldenRealMountIgnoresOuterReadonlyAndStaysWritable(t *testing.T) {
@@ -118,7 +120,7 @@ func TestGoldenRealStackedMountOwnership(t *testing.T) {
 			target := filepath.Join(root, testUID, "volumes", "data")
 			mounter := mount.NewWithoutSystemd("")
 			node := NewNode(NodeOptions{ActorRoot: root, StateDir: state, Mounter: mounter})
-			source, err := node.placeholderSource(testID, target)
+			source, err := node.placeholderSource(target)
 			require.NoError(t, err)
 			require.NoError(t, os.MkdirAll(source, 0755))
 			require.NoError(t, os.MkdirAll(target, 0755))
@@ -144,11 +146,11 @@ func TestGoldenRealStackedMountOwnership(t *testing.T) {
 			}
 
 			if scenario == "covered publish" {
-				err = node.publishPlaceholder(testID, target)
+				err = node.publishPlaceholder(target)
 			} else {
 				_, err = node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: target})
 			}
-			require.Error(t, err)
+			require.Equal(t, codes.FailedPrecondition, status.Code(err))
 			live, err := node.mountAt(target)
 			require.NoError(t, err)
 			require.NotNil(t, live)

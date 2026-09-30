@@ -172,7 +172,9 @@ func validateBackendRequest(request *csi.NodePublishVolumeRequest, actor ActorIn
 				return status.Error(codes.FailedPrecondition, "NAS client selection and CNFS routing are not supported through the Substrate bridge")
 			}
 		}
-		// Stored PodInfo is replaced with current placement, not used as ownership.
+		// NAS compares a stored sandboxId against the Actor identity it is handed
+		// (pkg/nas/nodeserver.go:278). Stored PodInfo needs no such comparison, because
+		// backendRequest replaces it with the current placement.
 		if strings.EqualFold(key, "sandboxId") && value != "" && value != actor.UID {
 			return status.Error(codes.PermissionDenied, "publish request carries a different actor identity")
 		}
@@ -219,11 +221,11 @@ func nasMount(entry *mount.MountPoint) bool {
 	return entry.Type == "nfs" || entry.Type == "nfs4" || entry.Type == "alinas"
 }
 
-func (n *Node) placeholderSource(volumeID, target string) (string, error) {
+func (n *Node) placeholderSource(target string) (string, error) {
 	if !filepath.IsAbs(n.opts.StateDir) || filepath.Clean(n.opts.StateDir) == "/" {
 		return "", status.Error(codes.FailedPrecondition, "an absolute dedicated placeholder directory is required")
 	}
-	key := fmt.Sprintf("%x", sha256.Sum256([]byte(volumeID+"\x00"+target)))
+	key := fmt.Sprintf("%x", sha256.Sum256([]byte(target)))
 	return filepath.Join(n.opts.StateDir, "placeholders", key), nil
 }
 
@@ -233,7 +235,7 @@ func (n *Node) placeholderMounted(source, target string) (bool, error) {
 		return false, nil
 	}
 	if err != nil {
-		return false, err
+		return false, status.Errorf(codes.Internal, "inspect placeholder source: %v", err)
 	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return false, status.Error(codes.FailedPrecondition, "placeholder source is not an owned directory")
@@ -249,17 +251,17 @@ func (n *Node) placeholderMounted(source, target string) (bool, error) {
 	// visible target inode instead of any hidden lower mount or historical reference.
 	targetInfo, err := os.Stat(target)
 	if err != nil {
-		return false, err
+		return false, status.Errorf(codes.Internal, "inspect Golden target: %v", err)
 	}
 	return os.SameFile(info, targetInfo), nil
 }
 
-func (n *Node) publishPlaceholder(volumeID, target string) error {
+func (n *Node) publishPlaceholder(target string) error {
 	live, err := n.mountAt(target)
 	if err != nil {
 		return err
 	}
-	source, err := n.placeholderSource(volumeID, target)
+	source, err := n.placeholderSource(target)
 	if err != nil {
 		return err
 	}
@@ -276,44 +278,52 @@ func (n *Node) publishPlaceholder(volumeID, target string) error {
 	if info, err := os.Lstat(source); err == nil && (!info.IsDir() || info.Mode()&os.ModeSymlink != 0) {
 		return status.Error(codes.FailedPrecondition, "placeholder source is not an owned directory")
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+		return status.Errorf(codes.Internal, "inspect placeholder source: %v", err)
 	}
 	if err := os.MkdirAll(source, 0755); err != nil {
-		return err
+		return status.Errorf(codes.Internal, "create placeholder source: %v", err)
 	}
 	if err := os.MkdirAll(target, 0755); err != nil {
-		return err
+		return status.Errorf(codes.Internal, "create Golden target directory: %v", err)
 	}
-	return n.opts.Mounter.Mount(source, target, "", []string{"bind"})
+	if err := n.opts.Mounter.Mount(source, target, "", []string{"bind"}); err != nil {
+		return status.Errorf(codes.Internal, "bind mount Golden placeholder: %v", err)
+	}
+	return nil
 }
 
 func (n *Node) unpublishPlaceholder(source, target string) error {
 	if err := n.opts.Mounter.Unmount(target); err != nil {
-		return err
+		return status.Errorf(codes.Internal, "unmount Golden placeholder: %v", err)
 	}
+	// The mount removed here may have been covering a mount the bridge does not own. Only an
+	// empty target may be turned back into a plain directory.
 	if remaining, err := n.mountAt(target); err != nil {
 		return err
 	} else if remaining != nil {
-		return fmt.Errorf("target still has a mount after removing the Golden placeholder")
+		return status.Error(codes.FailedPrecondition, "target still has a mount after removing the Golden placeholder")
 	}
 	if err := os.Remove(target); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+		return status.Errorf(codes.Internal, "remove Golden target directory: %v", err)
 	}
 	entries, err := n.opts.Mounter.List()
 	if err != nil {
-		return err
+		return status.Errorf(codes.Internal, "read mount table: %v", err)
 	}
 	for _, entry := range entries {
 		if entry.Device == source || entry.Path == source || strings.HasPrefix(entry.Path, source+string(os.PathSeparator)) {
-			return fmt.Errorf("refusing to remove mounted placeholder storage")
+			return status.Error(codes.FailedPrecondition, "refusing to remove mounted placeholder storage")
 		}
 	}
 	refs, err := n.opts.Mounter.GetMountRefs(source)
 	if err != nil {
-		return err
+		return status.Errorf(codes.Internal, "list placeholder mount references: %v", err)
 	}
 	if len(refs) > 0 {
-		return fmt.Errorf("placeholder source still has mount references")
+		return status.Error(codes.FailedPrecondition, "placeholder source still has mount references")
 	}
-	return os.RemoveAll(source)
+	if err := os.RemoveAll(source); err != nil {
+		return status.Errorf(codes.Internal, "remove placeholder storage: %v", err)
+	}
+	return nil
 }

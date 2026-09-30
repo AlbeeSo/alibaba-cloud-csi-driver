@@ -22,6 +22,8 @@ import (
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	mount "k8s.io/mount-utils"
 )
@@ -191,66 +193,147 @@ func TestObsoleteMetadataCannotBlockStatelessPublish(t *testing.T) {
 }
 
 func TestGoldenPlaceholderLifecycleWithoutNAS(t *testing.T) {
-	root, err := filepath.EvalSymlinks(t.TempDir())
-	require.NoError(t, err)
-	state := t.TempDir()
-	target := filepath.Join(root, testUID, "volumes", "data")
-	mounter := mount.NewFakeMounter(nil)
-	nas := &recordingNAS{err: errors.New("golden must not call NAS")}
-	lookup := func(context.Context, ActorReference) (ActorInfo, error) {
-		return ActorInfo{UID: testUID, Atespace: "ate-golden", Name: "template-uid", TemplateUID: "template-uid", Golden: true}, nil
+	for _, tc := range []struct{ name, retryID, unpublishID string }{
+		{"stable ID", testID, testID},
+		{"changed publish ID", "publish-alias", "publish-alias"},
+		{"changed unpublish ID", testID, "cleanup-alias"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			require.NoError(t, err)
+			state := t.TempDir()
+			target := filepath.Join(root, testUID, "volumes", "data")
+			mounter := mount.NewFakeMounter(nil)
+			nas := &recordingNAS{err: errors.New("golden must not call NAS")}
+			lookup := func(context.Context, ActorReference) (ActorInfo, error) {
+				return ActorInfo{UID: testUID, Atespace: "ate-golden", Name: "template-uid", TemplateUID: "template-uid", Golden: true}, nil
+			}
+			attributes := goldenMetadataFixture()
+			node := NewNode(NodeOptions{ActorRoot: root, StateDir: state, Mounter: mounter, NAS: nas, Lookup: lookup})
+			attributes[PodUIDKey] = "worker-pod-uid"
+			in := &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: target, VolumeContext: attributes}
+			_, err = node.NodePublishVolume(t.Context(), in)
+			require.NoError(t, err)
+			require.Nil(t, nas.published)
+			require.DirExists(t, target)
+			require.Len(t, mounter.MountPoints, 1)
+			in.VolumeId = tc.retryID
+			_, err = node.NodePublishVolume(t.Context(), in)
+			require.NoError(t, err)
+			require.Len(t, mounter.MountPoints, 1)
+			placeholder, err := node.placeholderSource(target)
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(filepath.Join(placeholder, "build-output"), []byte("temporary"), 0600))
+			restarted := NewNode(NodeOptions{ActorRoot: root, StateDir: state, Mounter: mounter, NAS: nas})
+			_, err = restarted.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: tc.unpublishID, TargetPath: target})
+			require.NoError(t, err)
+			require.Nil(t, nas.unpublished)
+			require.Empty(t, mounter.MountPoints)
+			require.NoDirExists(t, placeholder)
+			_, err = restarted.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: tc.unpublishID, TargetPath: target})
+			require.NoError(t, err)
+		})
 	}
-	attributes := goldenMetadataFixture()
-	node := NewNode(NodeOptions{ActorRoot: root, StateDir: state, Mounter: mounter, NAS: nas, Lookup: lookup})
-	attributes[PodUIDKey] = testUID
-	in := &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: target, VolumeContext: attributes}
-	_, err = node.NodePublishVolume(t.Context(), in)
-	require.NoError(t, err)
-	require.Nil(t, nas.published)
-	require.DirExists(t, target)
-	require.Len(t, mounter.MountPoints, 1)
-	_, err = node.NodePublishVolume(t.Context(), in)
-	require.NoError(t, err)
-	require.Len(t, mounter.MountPoints, 1)
-	placeholder, err := node.placeholderSource(testID, target)
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(placeholder, "build-output"), []byte("temporary"), 0600))
-	restarted := NewNode(NodeOptions{ActorRoot: root, StateDir: state, Mounter: mounter, NAS: nas})
-	_, err = restarted.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: target})
-	require.NoError(t, err)
-	require.Nil(t, nas.unpublished)
-	require.Empty(t, mounter.MountPoints)
-	require.NoDirExists(t, placeholder)
-	_, err = restarted.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: target})
-	require.NoError(t, err)
+}
+
+func TestGoldenPlaceholderInspectionErrors(t *testing.T) {
+	for _, tc := range []struct{ name, action string }{
+		{"source", "inspect placeholder source"},
+		{"target", "inspect Golden target"},
+	} {
+		for _, operation := range []string{"publish", "unpublish"} {
+			t.Run(tc.name+"/"+operation, func(t *testing.T) {
+				root := t.TempDir()
+				target := filepath.Join(root, testUID, "volumes", "data")
+				mounter := mount.NewFakeMounter([]mount.MountPoint{{Device: "/dev/backing", Path: target, Type: "ext4"}})
+				node := NewNode(NodeOptions{ActorRoot: root, StateDir: t.TempDir(), Mounter: mounter, Lookup: func(context.Context, ActorReference) (ActorInfo, error) {
+					return ActorInfo{UID: testUID, Name: "template-uid", Atespace: "ate-golden", TemplateUID: "template-uid", Golden: true}, nil
+				}})
+				source, err := node.placeholderSource(target)
+				require.NoError(t, err)
+				if tc.name == "source" {
+					require.NoError(t, os.WriteFile(filepath.Dir(source), []byte("not a directory"), 0600))
+				} else {
+					require.NoError(t, os.MkdirAll(source, 0755))
+				}
+				if operation == "publish" {
+					attributes := goldenMetadataFixture()
+					attributes[PodUIDKey] = "worker-pod-uid"
+					_, err = node.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: target, VolumeContext: attributes})
+				} else {
+					_, err = node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: target})
+				}
+				require.Equal(t, codes.Internal, status.Code(err))
+				require.ErrorContains(t, err, tc.action)
+				require.Len(t, mounter.MountPoints, 1)
+			})
+		}
+	}
 }
 
 func TestPlaceholderPathIsStableAndTargetScoped(t *testing.T) {
 	options := NodeOptions{StateDir: t.TempDir()}
-	one, err := NewNode(options).placeholderSource(testID, testTarget)
+	one, err := NewNode(options).placeholderSource(testTarget)
 	require.NoError(t, err)
-	again, err := NewNode(options).placeholderSource(testID, testTarget)
+	again, err := NewNode(options).placeholderSource(testTarget)
 	require.NoError(t, err)
 	require.Equal(t, one, again)
-	two, err := NewNode(options).placeholderSource(testID, "/another/target")
+	two, err := NewNode(options).placeholderSource("/another/target")
 	require.NoError(t, err)
 	require.NotEqual(t, one, two)
 }
 
 func TestMountedPlaceholderDoesNotRecreateMissingSource(t *testing.T) {
 	node := NewNode(NodeOptions{StateDir: t.TempDir(), Mounter: mount.NewFakeMounter(nil)})
-	source, err := node.placeholderSource(testID, testTarget)
+	source, err := node.placeholderSource(testTarget)
 	require.NoError(t, err)
 	node.opts.Mounter = mount.NewFakeMounter([]mount.MountPoint{{Device: source, Path: testTarget, Type: "none"}})
-	require.Error(t, node.publishPlaceholder(testID, testTarget))
+	require.Equal(t, codes.FailedPrecondition, status.Code(node.publishPlaceholder(testTarget)))
 	require.NoDirExists(t, source)
 }
 
 func TestPlaceholderRejectsSymlinkSource(t *testing.T) {
 	node := NewNode(NodeOptions{StateDir: t.TempDir(), Mounter: mount.NewFakeMounter(nil)})
-	source, err := node.placeholderSource(testID, testTarget)
+	source, err := node.placeholderSource(testTarget)
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(filepath.Dir(source), 0700))
 	require.NoError(t, os.Symlink(t.TempDir(), source))
-	require.Error(t, node.publishPlaceholder(testID, testTarget))
+	require.Equal(t, codes.FailedPrecondition, status.Code(node.publishPlaceholder(testTarget)))
+}
+
+// Only the topmost mount at a target is visible to a later mount and unmount, so a placeholder
+// whose source is hidden underneath a foreign mount must neither claim it nor delete from it.
+func TestGoldenDoesNotClaimItsSourceHiddenByAnotherMount(t *testing.T) {
+	for _, operation := range []string{"publish", "unpublish"} {
+		t.Run(operation, func(t *testing.T) {
+			root := t.TempDir()
+			target := filepath.Join(root, testUID, "volumes", "data")
+			mounter := mount.NewFakeMounter(nil)
+			node := NewNode(NodeOptions{ActorRoot: root, StateDir: t.TempDir(), Mounter: mounter, Lookup: func(context.Context, ActorReference) (ActorInfo, error) {
+				return ActorInfo{UID: testUID, Name: "template-uid", Atespace: "ate-golden", TemplateUID: "template-uid", Golden: true}, nil
+			}})
+			source, err := node.placeholderSource(target)
+			require.NoError(t, err)
+			require.NoError(t, os.MkdirAll(source, 0755))
+			require.NoError(t, os.MkdirAll(target, 0755))
+			require.NoError(t, os.WriteFile(filepath.Join(source, "retain"), []byte("source data"), 0600))
+			mounter.MountPoints = []mount.MountPoint{
+				{Device: source, Path: target, Type: "none"},
+				{Device: "foreign", Path: target, Type: "tmpfs"},
+			}
+			before := append([]mount.MountPoint(nil), mounter.MountPoints...)
+			if operation == "publish" {
+				attributes := goldenMetadataFixture()
+				attributes[PodUIDKey] = "worker-pod-uid"
+				_, err = node.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: target, VolumeContext: attributes})
+			} else {
+				_, err = node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: target})
+			}
+			require.Equal(t, codes.FailedPrecondition, status.Code(err))
+			require.Equal(t, before, mounter.MountPoints)
+			data, err := os.ReadFile(filepath.Join(source, "retain"))
+			require.NoError(t, err)
+			require.Equal(t, "source data", string(data))
+		})
+	}
 }

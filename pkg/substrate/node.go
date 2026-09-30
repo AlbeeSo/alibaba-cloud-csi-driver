@@ -45,6 +45,9 @@ type publishEntry struct {
 	Request    json.RawMessage `json:"request"`
 }
 
+// ActorLookup returns the resolved Actor's metadata. Golden requires a verified
+// ate-golden Actor whose name equals TemplateUID. Node rechecks these invariants
+// at the boundary so alternative lookup implementations follow the same contract.
 type ActorLookup func(context.Context, ActorReference) (ActorInfo, error)
 
 type NodeOptions struct {
@@ -93,10 +96,10 @@ func (n *Node) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolume
 	}
 	// 6. A Golden Actor is building its image, so it gets a local placeholder rather than
 	// backend storage that would be shared with the running Actor. By design the placeholder is
-	// writable whatever the request asked for: it exists to receive the image being built.
+	// writable whatever the request asked for: it receives writes during template warmup.
 	if resolved.Actor.Golden {
-		if err := n.publishPlaceholder(req.VolumeId, req.TargetPath); err != nil {
-			return nil, status.Errorf(codes.Internal, "publish golden placeholder: %v", err)
+		if err := n.publishPlaceholder(req.TargetPath); err != nil {
+			return nil, err
 		}
 		return &csi.NodePublishVolumeResponse{}, nil
 	}
@@ -214,7 +217,7 @@ func (n *Node) unpublishBackendPlaceholder(req *csi.NodeUnpublishVolumeRequest) 
 	if !filepath.IsAbs(n.opts.StateDir) || filepath.Clean(n.opts.StateDir) == "/" {
 		return nil, status.Error(codes.FailedPrecondition, unsupported)
 	}
-	source, err := n.placeholderSource(req.VolumeId, req.TargetPath)
+	source, err := n.placeholderSource(req.TargetPath)
 	if err != nil {
 		return nil, err
 	}
@@ -226,7 +229,7 @@ func (n *Node) unpublishBackendPlaceholder(req *csi.NodeUnpublishVolumeRequest) 
 		return nil, status.Error(codes.FailedPrecondition, unsupported)
 	}
 	if err := n.unpublishPlaceholder(source, req.TargetPath); err != nil {
-		return nil, status.Errorf(codes.Internal, "unpublish golden placeholder: %v", err)
+		return nil, err
 	}
 	return &csi.NodeUnpublishVolumeResponse{}, nil
 }

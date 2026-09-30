@@ -90,6 +90,7 @@ func TestActorLookupTLSAndTokenRotation(t *testing.T) {
 		require.NoError(t, os.WriteFile(tokenPath, []byte(token+"\n"), 0600))
 		got, err := client.Lookup(t.Context(), ActorReference{UID: testUID, Name: "actor", Atespace: "storage-test"})
 		require.NoError(t, err)
+		require.Equal(t, testUID, got.UID)
 		require.Equal(t, "[]", got.Annotation)
 		require.False(t, got.Golden)
 		require.Equal(t, "Bearer "+token, <-tokens)
