@@ -5,6 +5,12 @@ logical Actor volumes into pre-generated NAS CSI publish requests. It does not
 create AgenticFS data on behalf of an E2B client. The annotation producer and
 the Substrate caller must implement the contracts below.
 
+The first release forwards only `nasplugin.csi.alibabacloud.com` requests using
+AgenticFS (`mountProtocol=alinas`) and Agent Identity. It does not implement OSS
+forwarding or worker-side OSS deployment. This restriction belongs to the bridge,
+not to the other drivers in the shared CSI process. The NAS AccessPoint
+status-casing fix in this branch is a separate NAS change, not bridge routing.
+
 ## Helm deployment
 
 The chart defaults to `enableSubstrate: false`, preserving the existing
@@ -111,6 +117,25 @@ The CNFS mount broker is a separate workload: these CSI Pod projections do not
 automatically configure its credentials. The broker must independently have the
 client identity and correct trust for its credential endpoint.
 
+### Actor API trust rotation
+
+The Node's Actor API client loads its CA bundle once at construction. Kubelet
+updates the projected file, but the client does not reload its in-memory roots.
+Roll the CSI Node Pods after adding or removing trusted CAs. For a planned root
+rotation, publish a bundle containing both roots, roll the Node Pods, then switch
+the API certificate; after removing the old root, roll the Node Pods again.
+Renewing a server leaf certificate under the same trusted CA does not by itself
+require this restart.
+
+Existing TLS connections may remain usable while new connections fail against
+an unrecognized CA. The existing liveness/readiness probes check the shared CSI
+process, not Actor API connectivity, and do not automatically recover stale
+trust. Do not turn an ateapi outage into shared CSI liveness failure: that would
+restart unrelated drivers too. Dynamic CA reload is not implemented here.
+
+The projected bearer token is read on each RPC. TLS retains a minimum of 1.2 and
+can negotiate 1.3; changing the protocol minimum is separate from trust rotation.
+
 ## Two requests, one authority
 
 Substrate's request describes a virtual bridge volume. The entry in
@@ -195,6 +220,27 @@ volume limits and EFC ownership all resolve to the Actor UID
 (`utils.MountOwnerUID`), which is what keeps the Substrate and the ACS Sandbox forms
 on the same data-access identity.
 
+Required caller integration:
+
+- ateapi supplies Actor UID/name/atespace to bridge CreateVolume and persists the
+  returned opaque handle and VolumeContext without reconstructing them.
+- Before Run/Restore, the current worker assignment supplies PodInfo. Atelet
+  requires `TargetAteomUid` and uses that worker UID, not the Actor UID.
+- Native NAS requests select Substrate mode only for
+  `nasplugin.csi.alibabacloud.com` with `volumeAs=Agentic`; bridge references
+  receive the mode marker from bridge CreateVolume.
+- The annotation producer writes the backend request without credentials. Actor
+  identity is validated and injected by the bridge at publish; a stored Actor
+  identity that disagrees with the lookup is rejected. No additional role key is
+  required. `GetActor` uses atespace/name, and Golden verification also uses
+  `GetActorTemplate`; no UID-only lookup extension is required.
+
+`attachRequired=false` controls Kubernetes attachment, not Substrate's direct
+calls. Its CSI adapter calls ControllerPublishVolume and skips only
+`Unimplemented` errors; the bridge declares PUBLISH_UNPUBLISH and returns a no-op
+success. NodeStage/NodeUnstage are also successful no-ops. The resulting outer
+staging path is not substituted into the stored inner request.
+
 The mount target, not the VolumeId, carries volume identity. Substrate has not
 stabilized its logical volume naming, so `substrate.actorRoot` is the only layout
 the bridge reads: a publish or unpublish target must be a clean absolute path
@@ -235,7 +281,9 @@ process.
 There is no configuration digest, write-ahead binding or persistent intent.
 Failed calls cannot leave such metadata behind to block a corrected request.
 The only retained SHA256 is a deterministic Golden directory name derived from
-logicalID and target; it is not a configuration fingerprint or conflict check.
+the validated target alone; it is not a configuration fingerprint or conflict
+check. A different caller VolumeId at the same target does not select another
+source directory. This does not require Substrate to change its stored handle.
 
 Unpublish needs no Actor lookup. It validates the target against the actor root
 and reads the live
@@ -243,6 +291,27 @@ mount table: an absent mount succeeds; NFS/NFS4/alinas is passed to NAS unpublis
 with logicalID as its lock/log key; a verified Golden source is unmounted and
 cleaned up; other mounts are rejected. No broker protocol or server change is
 required. NAS does not depend on StateDir or any old JSON files.
+
+Golden source directories hold temporary volume data written during template
+warmup, not the Golden snapshot itself. Normal unpublish removes that source
+after checking the visible mount and remaining references. Ownership refusals
+return FailedPrecondition; filesystem inspection and cleanup failures return
+Internal with the failed operation.
+
+There is no startup or periodic placeholder GC. A failed bind, interrupted
+cleanup, or missing unpublish can leave source data behind. If another mount is
+revealed after unmounting the Golden bind, cleanup is refused and the source is
+retained. A retry with no live target mount succeeds without sweeping old source
+directories. Operators must verify that the actor/runtime no longer uses the
+source and that no mount references remain before removing residual data; age or
+absence from one mount namespace alone is not proof. Never automatically unmount
+foreign storage or recursively delete an uncertain target. Monitor the node's
+disk and inode use when running repeated Golden builds.
+
+This unreleased source-key change does not read the old VolumeId-based layout.
+Before testing an upgrade with old Golden mounts, unpublish them with their
+owning version and safely clean any remaining test sources. Do not delete the
+whole StateDir or retain old mounts merely to make a restore pass.
 
 The trusted controller/atelet must perform Unpublish before changing the
 configuration of an already-mounted target. Backend idempotence does not prove
@@ -278,6 +347,13 @@ The driver uses generated `ControlClient.GetActor` and `GetActorTemplate`, check
 the returned UID, and verifies Golden Actor/template association. There are no
 handwritten RPC paths.
 
+`ActorLookup` returns the resolved Actor's metadata. A Golden result requires a
+verified `ate-golden` Actor whose name matches its template UID. Node repeats the
+invariant checks for alternative lookup implementations; these are not separate
+failure paths through a successful built-in client lookup. Actor and optional
+template queries share a ten-second lookup budget, bounded by an earlier caller
+deadline when present.
+
 `pkg/substrate/internal/ateapipb` is a minimal generated projection of the
 deployed Substrate API: only the two lookups above and the message closure they
 need, with verbatim message, field and RPC names and numbers and omitted field
@@ -289,6 +365,16 @@ module is published, replace the projection with that dependency; refresh it
 only by re-extraction, never by hand-editing.
 
 ## Validation and remaining system work
+
+The following earlier pre-release checks were deliberately removed. These are
+observable relaxations, not behavior-preserving refactors:
+
+| Removed bridge check | Current behavior |
+|---|---|
+| 256 KiB annotation ceiling | No additional bridge ceiling; producer/API limits remain independent |
+| Stored TargetPath must be a clean absolute path | Replaced with the validated outer host target |
+| Stored StagingTargetPath must be empty | Retained in the inner request; NAS does not consume it at publish |
+| Live mounted readonly check | No access-mode comparison against an existing mount; configuration changes require unpublish first |
 
 Local tests cover inner read-only passthrough, outer read-only signals being
 ignored, the live-mount filesystem check including a mount stacked over a NAS
@@ -309,9 +395,10 @@ bash hack/check-substrate-helm.sh
 It runs the render tests and Helm lint with Substrate disabled and enabled. It
 does not require a cluster or deploy resources, and has no dedicated workflow.
 
-On an isolated privileged Linux container, set `BRIDGE_REAL_MOUNT_TEST=1` to run
-the real Golden placeholder bind/unbind, writable access and ignored read-only
-request tests. The optional
+On an isolated privileged Linux container, set `BRIDGE_REAL_MOUNT_TEST=1` and
+select `-test.run 'Real'` to run the real Golden bind/unbind, changed-VolumeId,
+writable access and stacked-mount ownership tests. Confirm that they ran rather
+than being skipped; `RealMount` alone misses the stacked-mount test. The optional
 `TestActorLookupLive` performs only API reads when `SUBSTRATE_LIVE_*` is set.
 
 These do not prove the full system sequence:

@@ -81,9 +81,9 @@ func (*Controller) DeleteVolume(_ context.Context, req *csi.DeleteVolumeRequest)
 	return &csi.DeleteVolumeResponse{}, nil
 }
 
-// Attach is a no-op by design: the bridge holds no per-node state, and the
-// chart's CSIDriver object sets attachRequired=false, so nothing may depend on
-// this answer. NodePublishVolume is where the Actor API decides reachability.
+// Attach is a no-op by design: the bridge holds no per-node attachment state.
+// Kubernetes skips attachment through attachRequired=false, but Substrate calls
+// this RPC directly and needs success or Unimplemented to continue.
 func (*Controller) ControllerPublishVolume(context.Context, *csi.ControllerPublishVolumeRequest) (*csi.ControllerPublishVolumeResponse, error) {
 	return &csi.ControllerPublishVolumeResponse{}, nil
 }

@@ -91,7 +91,9 @@ const (
 	// TypePluginCustomFuse custom FUSE type plugin
 	TypePluginCustomFuse = "customfuseplugin.csi.alibabacloud.com"
 	// ExtenderAgent agent component
-	ExtenderAgent           = "agent"
+	ExtenderAgent = "agent"
+	// defaultMountProxySocket is the default socket path for mount-proxy-server (alinas-mounter).
+	// Used as fallback when AlinasMountProxy feature gate is enabled but --mount-proxy-sock is not set.
 	defaultMountProxySocket = "/run/cnfs/alinas-mounter.sock"
 )
 
