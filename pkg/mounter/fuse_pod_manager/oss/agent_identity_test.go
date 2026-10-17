@@ -3,6 +3,7 @@ package oss
 import (
 	"testing"
 
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils/agentidentity"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -131,4 +132,57 @@ func TestGetAgentIdentityOptions_DifferentSandboxId(t *testing.T) {
 	assert.Contains(t, mountOpts[0], "agent_identity_endpoint=https://custom-endpoint:8443")
 	assert.Contains(t, mountOpts[1], "agent_identity_token_file=/custom/token/dir/sandbox-abc-456.token")
 	assert.Contains(t, mountOpts[2], "agent_identity_cred_provider=oss-readonly")
+}
+
+// Substrate mode does not read the ACS token dir, so validation must not
+// require AGENT_IDENTITY_TOKEN_DIR; it still requires the endpoint and the
+// Actor-scoped sandbox identity.
+func TestValidateAgentIdentity_Substrate(t *testing.T) {
+	t.Run("token dir not required", func(t *testing.T) {
+		t.Setenv("AGENT_IDENTITY_ENDPOINT", "https://endpoint.example.com")
+		err := ValidateAgentIdentity(&Options{
+			SandboxId:               "actor-uid-123",
+			SandboxCredProviderName: "aliyun-one",
+			SubstrateMode:           true,
+		})
+		assert.NoError(t, err)
+	})
+	t.Run("endpoint still required", func(t *testing.T) {
+		err := ValidateAgentIdentity(&Options{
+			SandboxId:               "actor-uid-123",
+			SandboxCredProviderName: "aliyun-one",
+			SubstrateMode:           true,
+		})
+		assert.EqualError(t, err, "AGENT_IDENTITY_ENDPOINT is not set")
+	})
+	t.Run("sandbox identity still required", func(t *testing.T) {
+		t.Setenv("AGENT_IDENTITY_ENDPOINT", "https://endpoint.example.com")
+		err := ValidateAgentIdentity(&Options{SandboxCredProviderName: "aliyun-one", SubstrateMode: true})
+		assert.EqualError(t, err, "missing sandboxId in volume attributes")
+	})
+}
+
+// Substrate mode hands ossfs the substrate_* options: the Actor UID as the
+// resource, the projected ServiceAccount token as the bearer, and the combined
+// PodCertificate bundle for both the client cert and key. No ACS token file.
+func TestGetAgentIdentityOptions_Substrate(t *testing.T) {
+	t.Setenv("AGENT_IDENTITY_ENDPOINT", "https://endpoint.example.com")
+	t.Setenv("AGENT_IDENTITY_TOKEN_DIR", "/var/opt/sandbox/agent-token")
+
+	mountOpts := GetAgentIdentityOptions(&Options{
+		SandboxId:               "actor-uid-123",
+		SandboxCredProviderName: "aliyun-one",
+		SubstrateMode:           true,
+	})
+
+	expected := []string{
+		"agent_identity_endpoint=https://endpoint.example.com",
+		"agent_identity_cred_provider=aliyun-one",
+		"substrate_actor_uid=actor-uid-123",
+		"substrate_sa_token_file=" + agentidentity.SATokenFile,
+		"substrate_client_cert=" + agentidentity.PodCertBundleFile,
+		"substrate_client_key=" + agentidentity.PodCertBundleFile,
+	}
+	assert.Equal(t, expected, mountOpts)
+	assert.NotContains(t, mountOpts, "agent_identity_token_file=/var/opt/sandbox/agent-token/actor-uid-123.token")
 }

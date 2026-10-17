@@ -1,15 +1,21 @@
 # Substrate CSI bridge
 
 The bridge exposes `substrate.csi.alibabacloud.com` and translates Substrate's
-logical Actor volumes into pre-generated NAS CSI publish requests. It does not
-create AgenticFS data on behalf of an E2B client. The annotation producer and
+logical Actor volumes into pre-generated backend CSI publish requests. It does
+not create AgenticFS data on behalf of an E2B client. The annotation producer and
 the Substrate caller must implement the contracts below.
 
-The first release forwards only `nasplugin.csi.alibabacloud.com` requests using
-AgenticFS (`mountProtocol=alinas`) and Agent Identity. It does not implement OSS
-forwarding or worker-side OSS deployment. This restriction belongs to the bridge,
-not to the other drivers in the shared CSI process. The NAS AccessPoint
-status-casing fix in this branch is a separate NAS change, not bridge routing.
+The bridge is driver-agnostic: a stored publish request is routed to the backend
+its `driver` field names, and an unpublish is routed to the backend that owns the
+live mount. It forwards `nasplugin.csi.alibabacloud.com` requests using AgenticFS
+(`mountProtocol=alinas`) and Agent Identity, and `ossplugin.csi.alibabacloud.com`
+requests using Agent Identity; a request for a driver with no registered backend
+is refused at publish. OSS forwarding, its credential-exchange difference from
+NAS and its `substrate_*` option contract are documented in
+[substrate-oss.md](./substrate-oss.md). The bridge does not deploy OSS
+worker-side. Any such restriction belongs to the bridge, not to the other drivers
+in the shared CSI process. The NAS AccessPoint status-casing fix in this branch is
+a separate NAS change, not bridge routing.
 
 ## Helm deployment
 
@@ -76,7 +82,7 @@ Key values:
 | `substrate.actorRoot` | `/var/lib/ate/actors` | Must match atelet's host target layout; identity carrier, see Identity keys |
 | `substrate.createDriverConfig` | `true` | Create the native NAS and bridge configs for enabled Controllers |
 | `substrate.storageClass.create` | `true` | Create the bridge reference class |
-| `substrate.storageClass.name` | `ate-storage` | Must match the annotation producer's template slots |
+| `substrate.storageClass.name` | `ate-storage` | Must match the `storageClassName` ActorTemplates declare for bridge volumes, so Substrate provisions them through this class; the annotation producer selects by resolved publish request, not by class name |
 | `images.envoy.repo` | `acs/envoy` | TLS frontend repository, resolved through the chart's standard registry selection |
 | `images.envoy.tag` | `v1.39-latest` | Published ACK mirror tag; override with your validated release tag if needed |
 
@@ -114,10 +120,15 @@ These are not supplied by this CSI chart:
    Actors and templates. The bridge Controller needs no such permission.
    Kubernetes RBAC alone does not
    configure Substrate's application authorization policy.
-4. An operational NAS mount broker, AgentIdentity credential service, NAS/AP
-   connectivity and the required per-Actor permissions.
-5. A Substrate API with `ResourceMetadata.annotations`. Public upstream does
-   not currently expose that field; see the API client provenance below.
+4. An operational NAS mount broker, AgentIdentity credential service, NAS/AP or
+   OSS connectivity (per the backends served) and the required per-Actor
+   permissions. OSS additionally needs an ossfs image built with the substrate
+   support; see [substrate-oss.md](./substrate-oss.md).
+5. A Substrate API that serves the fields and RPCs this driver consumes:
+   `GetActor` and `GetActorTemplate`, and `ResourceMetadata.annotations` on the
+   returned Actor. Whether a given upstream build exposes that field is a
+   property of the deployment, not of a release date; check the deployed server
+   rather than assuming. See the API client provenance below.
 
 Do not turn off TLS verification to work around missing CA/signers. No CA
 private key, cloud key or business token is placed in this chart.
@@ -155,7 +166,7 @@ can negotiate 1.3; changing the protocol minimum is separate from trust rotation
 ## Two requests, one authority
 
 Substrate's request describes a virtual bridge volume. The entry in
-`ate.dev/csi-volume-publish-requests` describes the actual NAS volume:
+`ate.dev/csi-volume-publish-requests` describes the actual backend volume:
 
 ```json
 [
@@ -175,18 +186,18 @@ annotations/VolumeContext.
 The actual request remains authoritative for backend ID, server/path, fsType,
 mount options, provider and PublishContext. The bridge changes only routing and
 identity metadata: `targetPath` becomes the host directory the caller gave,
-`substrate-mode` is added so that NAS skips kubelet semantics, and the Actor
-identity keys are set from the verified Actor, while standard PodInfo comes from
-the current worker assignment. Storage ownership and credential ResourceID remain
-Actor-scoped; the worker UID/name/namespace describe placement and can change on
-resume. Stored PodInfo is not a source of current placement labels; missing
-outer Pod name/namespace labels remove their stored counterparts.
+`substrate-mode` is added so that the backend driver skips kubelet semantics, and
+the Actor identity keys are set from the verified Actor, while standard PodInfo
+comes from the current worker assignment. Storage ownership and credential
+ResourceID remain Actor-scoped; the worker UID/name/namespace describe placement
+and can change on resume. Stored PodInfo is not a source of current placement
+labels; missing outer Pod name/namespace labels remove their stored counterparts.
 Nothing else is merged from the outer request: no arbitrary VolumeContext entry,
 no fsType, no mount flag.
 
 Read-only configuration belongs to the annotation request. Its `Readonly`,
 access mode, mount flags and `VolumeContext.options` are forwarded unchanged.
-The NAS driver applies their semantics and option precedence; the bridge does
+The backend driver applies their semantics and option precedence; the bridge does
 not normalize conflicting `rw` options or reinterpret options overridden by
 mount flags.
 
@@ -195,7 +206,7 @@ read its `Readonly`, access mode, mount flags or `VolumeContext.options`, and it
 does not reject them either: whatever the Substrate StorageClass, PVC or caller
 asks for, the forwarded request keeps the read-only state of the Actor publish
 request. This is the passthrough rule of the design document, whose purpose is
-that the Substrate and ACS Sandbox forms reach the NAS driver with the same
+that the Substrate and ACS Sandbox forms reach the backend driver with the same
 read-only configuration; a bridge that "corrects" the request would make the two
 forms differ exactly where neither form can see the difference. The cost is a
 deviation from the CSI wording that the SP MUST honour `readonly` on publish: an
@@ -206,16 +217,18 @@ annotation producer, and treat a bridge StorageClass `mountOptions: [ro]`, a
 enforcement. Golden placeholders are writable bind mounts.
 
 For an existing mount at the target, the bridge asks one question: is the mount
-visible there one it may mount over? NFS, NFS4 and alinas are (an alinas AccessPoint
-mount is performed as fstype `alinas` but shows up as `nfs` in the kernel mount
-table, so both spellings belong to the answer), anything else is refused, because
-stacking a NAS mount over foreign storage would hide it and would break the
-unpublish rule "a mount the bridge owns is either a NAS mount or its own Golden
-placeholder". Whether a live NAS mount matches the new request is not compared:
-NAS itself answers an already-mounted target with success, so the mount keeps the
-read-only state it was created with until it is unpublished. That is the caller's
-obligation, not a check the bridge adds, and adding it would turn a retryable
-publish into one that only a manual unpublish can clear.
+visible there one it may mount over? Each backend answers it through its own
+`OwnsMount`: NAS owns NFS, NFS4 and alinas (an alinas AccessPoint mount is
+performed as fstype `alinas` but shows up as `nfs` in the kernel mount table, so
+both spellings belong to the answer), and OSS owns `fuse.ossfs`. Anything no
+backend owns is refused, because stacking a backend mount over foreign storage
+would hide it and would break the unpublish rule "a mount the bridge owns is
+either a backend mount or its own Golden placeholder". Whether a live mount
+matches the new request is not compared: the backend itself answers an
+already-mounted target with success, so the mount keeps the read-only state it
+was created with until it is unpublished. That is the caller's obligation, not a
+check the bridge adds, and adding it would turn a retryable publish into one that
+only a manual unpublish can clear.
 
 ## Identity keys
 
@@ -242,9 +255,14 @@ Required caller integration:
   returned opaque handle and VolumeContext without reconstructing them.
 - Before Run/Restore, the current worker assignment supplies PodInfo. Atelet
   requires `TargetAteomUid` and uses that worker UID, not the Actor UID.
-- Native NAS requests select Substrate mode only for
-  `nasplugin.csi.alibabacloud.com` with `volumeAs=Agentic`; bridge references
-  receive the mode marker from bridge CreateVolume.
+- Within Substrate, ateapi owns stamping the Actor triple and the origin/mode
+  metadata: it writes them before bridge `CreateVolume` and before the volume
+  context is persisted. Atelet and the CSI adapter preserve that marker rather
+  than re-deriving it. The bridge validates Actor identity before setting the
+  forwarding metadata. Do not infer Substrate origin from a driver
+  name, `volumeAs` or `authType`. Backend-specific volume and authentication
+  combinations remain subject to that backend's validation; they do not replace
+  the control plane's origin metadata.
 - The annotation producer writes the backend request without credentials. Actor
   identity is validated and injected by the bridge at publish; a stored Actor
   identity that disagrees with the lookup is rejected. No additional role key is
@@ -262,10 +280,17 @@ stabilized its logical volume naming, so `substrate.actorRoot` is the only layou
 the bridge reads: a publish or unpublish target must be a clean absolute path
 inside the actor root with at least two elements below it, whose first element is
 the Actor UID and whose last element selects the Actor publish-request entry.
+
+One logical volume may appear at several paths inside the Actor's guest, but the
+physical CSI target the bridge sees stays one per Actor and logical volume, and
+the last element still selects exactly one annotation entry. Where the content
+is additionally bind-mounted inside the guest is the runtime's business, not a
+second publish. This does not let a caller invent per-create topology: which
+volumes exist and where they are mounted is still the template's.
 The VolumeId is opaque to the bridge; it is echoed back from `CreateVolume` and
-forwarded to NAS as a lock and log key. This keeps unpublish workable without a
-VolumeContext or an Actor lookup, which `NodeUnpublishVolumeRequest` provides
-neither of.
+forwarded to the backend as a lock and log key. This keeps unpublish workable
+without a VolumeContext or an Actor lookup, which `NodeUnpublishVolumeRequest`
+provides neither of.
 
 CreateVolume validates only its request: capacity range,
 absence of content source/secrets, and non-empty Actor parameters. It does not
@@ -288,7 +313,8 @@ that template volume" as sufficient, and does not decide whether the requester
 may access the Actor.
 
 The bridge is stateless. NodePublish reads the current Actor annotation, validates
-it and forwards the inner request to the existing NAS Node service. Golden uses a
+it and forwards the inner request to the existing backend Node service (NAS or
+OSS). Golden uses a
 deterministically named source directory and a normal bind mount. The in-memory
 per-target lock (`utils.VolumeLocks`, the same helper the NAS, disk, OSS, BMCPFS
 and customfuse servers use) serializes operations on one target within the CSI
@@ -303,8 +329,9 @@ source directory. This does not require Substrate to change its stored handle.
 
 Unpublish needs no Actor lookup. It validates the target against the actor root
 and reads the live
-mount table: an absent mount succeeds; NFS/NFS4/alinas is passed to NAS unpublish
-with logicalID as its lock/log key; a verified Golden source is unmounted and
+mount table: an absent mount succeeds; a mount a backend owns is passed to that
+backend's unpublish (NFS/NFS4/alinas to NAS, `fuse.ossfs` to OSS) with logicalID
+as its lock/log key; a verified Golden source is unmounted and
 cleaned up; other mounts are rejected. No broker protocol or server change is
 required. NAS does not depend on StateDir or any old JSON files.
 
@@ -331,7 +358,7 @@ whole StateDir or retain old mounts merely to make a restore pass.
 
 The trusted controller/atelet must perform Unpublish before changing the
 configuration of an already-mounted target. Backend idempotence does not prove
-that an existing NAS mount matches a new annotation; the stateless bridge does
+that an existing backend mount matches a new annotation; the stateless bridge does
 not attempt that comparison. The
 caller must preserve the `substrate-mode` and Actor identity keys returned by
 CreateVolume and add the current worker PodInfo. The integrated atelet writes
@@ -374,11 +401,14 @@ deadline when present.
 deployed Substrate API: only the two lookups above and the message closure they
 need, with verbatim message, field and RPC names and numbers and omitted field
 numbers marked `reserved`. `SOURCE.md` records the source revision, the
-extraction rule and the refresh procedure. The projection exists because public
-upstream currently omits annotations; it is not advertised as compatibility
-with an unextended public server. Once an annotation-capable lightweight API
-module is published, replace the projection with that dependency; refresh it
-only by re-extraction, never by hand-editing.
+extraction rule and the refresh procedure. That recorded revision is
+**provenance**: a newer deployed base does not by itself make the projection
+incompatible, and it is not a reason to regenerate. What matters is that the
+consumed messages, field names and numbers, and RPC names still match the
+deployed server; they do. The projection exists because an annotation-capable
+lightweight API module is not published, not as a claim about any particular
+upstream build. Once such a module is published, replace the projection with
+that dependency; refresh it only by re-extraction, never by hand-editing.
 
 ## Validation and remaining system work
 
@@ -394,7 +424,8 @@ observable relaxations, not behavior-preserving refactors:
 
 Local tests cover inner read-only passthrough, outer read-only signals being
 ignored, the live-mount filesystem check including a mount stacked over a NAS
-mount, the Actor identity of the target directory
+mount, backend routing and mount ownership for both NAS and OSS, the Actor
+identity of the target directory
 against the caller's and the Actor API's claims,
 current annotation forwarding, live-based cleanup, corrected requests after
 failed publish/restart, target serialization and Golden source reuse,
@@ -446,6 +477,7 @@ live in the existing `pkg/mounter/utils/agentidentity` package rather than a new
 | `internal/ateapipb/*` | Minimal generated API projection and provenance |
 | `controller.go` | Logical CSI Controller lifecycle |
 | `node.go` | Node publish/unpublish and target validation |
+| `backend.go` | The driver-agnostic `Backend` registry: `NASBackend`, `OSSBackend`, and the per-driver and per-mount routing helpers |
 | `utils.go` | Publish-time Actor validation and annotation selection, live mount inspection and Golden source verification; no readonly union or live readonly comparison |
 | `*_test.go` | One test file per unit above, plus `integration_test.go` and `integration_linux_test.go` for cross-stage and real-mount coverage |
 | Helm `plugin.yaml` / `controller.yaml` | Shared processes, registrar, TLS sidecar and mounts |

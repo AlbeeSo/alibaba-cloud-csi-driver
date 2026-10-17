@@ -17,6 +17,7 @@ import (
 
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/server"
+	mounterutils "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
 	_ "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/server/alinas"
 	_ "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/server/customfuse"
 	_ "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/server/ossfs"
@@ -26,11 +27,12 @@ import (
 )
 
 var (
-	socketPath       string
-	drivers          []string
-	handleTimeout    time.Duration
-	enableNftables   bool
-	cleanupNASMounts bool
+	socketPath         string
+	drivers            []string
+	handleTimeout      time.Duration
+	enableNftables     bool
+	cleanupNASMounts   bool
+	fuseAttachBaseDir  string
 )
 
 func main() {
@@ -41,13 +43,19 @@ func main() {
 	flag.BoolVar(&enableNftables, "enable-nftables", false, "enable nftables rules to restrict mount proxy port access (default: false)")
 	flag.BoolVar(&cleanupNASMounts, "cleanup-nas-mounts-on-exit", false, "unmount all NAS mount points inside the pod on SIGTERM")
 	flag.BoolVar(&server.InitNASRSAPEM, "init-nas-rsa-pem", false, "generate the NAS RSA private key (/etc/aliyun/alinas/privateKey.pem) on startup")
+	flag.StringVar(&fuseAttachBaseDir, "fuse-attach-base-dir", "", "base directory for FUSE attach paths (default /run); use a path outside /run in sidecar containers where containerd mounts tmpfs over /run subdirectories")
 	utils.AddKlogFlags(flag.CommandLine)
 	utils.AddGoFlags(flag.CommandLine)
 	flag.Parse()
 
+	if fuseAttachBaseDir != "" {
+		mounterutils.SetFuseAttachBaseDir(fuseAttachBaseDir)
+	}
 	_ = os.Remove(socketPath)
 	server.SetCleanupNASMountsOnExit(cleanupNASMounts)
+	klog.InfoS("Initializing drivers", "drivers", drivers, "len", len(drivers))
 	server.Init(drivers)
+	klog.InfoS("Drivers initialized")
 
 	listener, err := listen(socketPath)
 	if err != nil {

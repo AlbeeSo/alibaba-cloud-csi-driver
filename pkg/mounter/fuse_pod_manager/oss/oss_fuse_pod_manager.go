@@ -100,6 +100,12 @@ type Options struct {
 	// agent identity
 	SandboxId               string `json:"sandboxId"`
 	SandboxCredProviderName string `json:"sandboxCredProviderName"`
+	// SubstrateMode marks a Substrate (restricted delegation) mount: the ossfs
+	// client exchanges credentials itself using the projected ServiceAccount
+	// token and PodCertificate bundle, rather than reading an ACS token file. It
+	// is derived from the volume context, not persisted, so it is consumed
+	// in-process by GetAgentIdentityOptions before any serialization.
+	SubstrateMode bool `json:"-"`
 
 	// ossfs options
 	OtherOpts  string     `json:"otherOpts"`

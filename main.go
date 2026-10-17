@@ -51,6 +51,7 @@ import (
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/oss"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/pov"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/substrate"
+	mounterutils "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/version"
 	"github.com/sirupsen/logrus"
@@ -127,6 +128,7 @@ var (
 	substrateServerName      = flag.String("substrate-api-server-name", "", "TLS server name override for the Substrate control API")
 	substrateActorRoot       = flag.String("substrate-actor-root", substrate.DefaultActorRoot, "host directory containing Substrate actor volumes")
 	substrateStateDir        = flag.String("substrate-state-dir", "/csi/substrate-state", "persistent node-local golden placeholder source directory")
+	substrateOSSMountProxy   = flag.String("substrate-oss-mount-proxy-sock", "", "mount-proxy socket for the FUSE sidecar; when set, OSS backend routes mounts through it")
 )
 
 func setupFlags() {
@@ -283,14 +285,35 @@ func main() {
 	}
 
 	if serviceType != 0 {
-		// The NAS and Substrate node services share a single NAS server
-		// instance. Constructing it once keeps per-process side effects (dadi
-		// polling, event recorders, volume locks) from being duplicated.
+		// The NAS/OSS and Substrate node services share single server instances.
+		// Constructing each once keeps per-process side effects (dadi polling,
+		// event recorders, volume locks, fuse pod managers) from being duplicated,
+		// and gives the Substrate bridge an in-process backend to forward to for
+		// each driver it serves.
 		var nasServers *common.Servers
 		if slices.Contains(driverNames, TypePluginNAS) {
 			nasServers = nas.NewServers(meta, *endpoint, serviceType, csiCfg, resolvedNasMountProxySock)
 		} else if slices.Contains(driverNames, substrate.DriverName) && serviceType&utils.Node != 0 {
 			nasServers = nas.NewServers(meta, *endpoint, utils.Node, csiCfg, resolvedNasMountProxySock)
+		}
+
+		var ossServers *common.Servers
+		if slices.Contains(driverNames, TypePluginOSS) {
+			ossServers = oss.NewServers(replaceCsiEndpoint(TypePluginOSS, *endpoint), meta, serviceType, csiCfg, k8sVersion, *mountProxySock)
+		} else if slices.Contains(driverNames, substrate.DriverName) && serviceType&utils.Node != 0 {
+			ossSock := *substrateOSSMountProxy
+			if ossSock == "" {
+				ossSock = *mountProxySock
+			}
+			// The sidecar's mount-proxy-server runs inside a container where
+			// containerd mounts tmpfs over /run subdirectories, so the default
+			// fuseAttachBaseDir (/run) is not writable. Point both the bridge
+			// (which builds the MountRequest) and the sidecar (which executes
+			// ossfs) at a path outside /run.
+			if *substrateOSSMountProxy != "" {
+				mounterutils.SetFuseAttachBaseDir("/opt/csi-fuse-attach")
+			}
+			ossServers = oss.NewServers(replaceCsiEndpoint(TypePluginOSS, *endpoint), meta, utils.Node, csiCfg, k8sVersion, ossSock)
 		}
 
 		for _, driverName := range driverNames {
@@ -319,12 +342,26 @@ func main() {
 					if bridgeNodeID == "" {
 						bridgeNodeID = os.Getenv("KUBE_NODE_NAME")
 					}
-					driver.NodeServer = substrate.NewNode(substrate.NodeOptions{NodeID: bridgeNodeID, ActorRoot: *substrateActorRoot, Lookup: actors.Lookup, Backends: map[string]substrate.Backend{substrate.NASDriverName: substrate.NASBackend(nasServers.NodeServer)}, StateDir: *substrateStateDir, Mounter: mountutils.NewWithoutSystemd("")})
+					// Register an in-process backend for every driver this build
+					// serves, so the bridge routes a stored publish request to the
+					// driver it names. A backend whose server was not constructed
+					// is simply not registered, and a request for it is refused at
+					// publish time.
+					backends := map[string]substrate.Backend{}
+					if nasServers != nil {
+						backends[substrate.NASDriverName] = substrate.NASBackend(nasServers.NodeServer)
+					}
+					if ossServers != nil {
+						b := substrate.OSSBackend(ossServers.NodeServer)
+						b.MountProxySocket = *substrateOSSMountProxy
+						backends[substrate.OSSDriverName] = b
+					}
+					driver.NodeServer = substrate.NewNode(substrate.NodeOptions{NodeID: bridgeNodeID, ActorRoot: *substrateActorRoot, Lookup: actors.Lookup, Backends: backends, StateDir: *substrateStateDir, Mounter: mountutils.NewWithoutSystemd("")})
 				}
 			case TypePluginNAS:
 				driver = nasServers
 			case TypePluginOSS:
-				driver = oss.NewServers(endpoint, meta, serviceType, csiCfg, k8sVersion, *mountProxySock)
+				driver = ossServers
 			case TypePluginDISK:
 				driver = disk.NewServers(meta, ecsClient, endpoint, serviceType, csiCfg, *useLabeler)
 			case TypePluginCPFS:

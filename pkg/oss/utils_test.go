@@ -34,9 +34,12 @@ import (
 	_ "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/fuse_pod_manager/oss/ossfs"
 	_ "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/fuse_pod_manager/oss/ossfs2"
 	mounterutils "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils/agentidentity"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
 )
@@ -2886,4 +2889,75 @@ func TestMountOptionsPipeline_Regression(t *testing.T) {
 			tt.check(t, options, flags)
 		})
 	}
+}
+
+// Substrate (restricted delegation) mounts carry the Actor identity in the
+// volume context instead of an explicit sandboxId. parseOptions must derive the
+// sandbox from the Actor UID and refuse a stored sandboxId that names a
+// different Actor, mirroring the NAS driver.
+func Test_parseOptions_substrateMode(t *testing.T) {
+	const actorUID = "1c3d0394-02df-4aa9-b9ec-27604d5b7601"
+	volCaps := []*csi.VolumeCapability{{
+		AccessType: &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{}},
+		AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER},
+	}}
+	base := map[string]string{
+		"bucket":   "test-bucket",
+		"url":      "oss-cn-beijing.aliyuncs.com",
+		"authType": "agent-identity",
+	}
+	withActor := func(extra map[string]string) map[string]string {
+		v := map[string]string{
+			utils.SubstrateModeKey:          "true",
+			agentidentity.ActorUIDKey:       actorUID,
+			agentidentity.ActorNameKey:      "actor",
+			agentidentity.ActorNamespaceKey: "storage-test",
+		}
+		for k, val := range base {
+			v[k] = val
+		}
+		for k, val := range extra {
+			v[k] = val
+		}
+		return v
+	}
+
+	t.Run("actor uid becomes sandboxId", func(t *testing.T) {
+		opts, err := parseOptions(context.Background(), nil, withActor(nil), nil, volCaps, false, "", false, true, m)
+		require.NoError(t, err)
+		require.True(t, opts.SubstrateMode)
+		require.Equal(t, actorUID, opts.SandboxId)
+	})
+
+	t.Run("matching sandboxId kept", func(t *testing.T) {
+		opts, err := parseOptions(context.Background(), nil, withActor(map[string]string{"sandboxId": actorUID}), nil, volCaps, false, "", false, true, m)
+		require.NoError(t, err)
+		require.Equal(t, actorUID, opts.SandboxId)
+	})
+
+	t.Run("conflicting sandboxId refused", func(t *testing.T) {
+		_, err := parseOptions(context.Background(), nil, withActor(map[string]string{"sandboxId": "another-actor"}), nil, volCaps, false, "", false, true, m)
+		require.Error(t, err)
+		require.Equal(t, codes.PermissionDenied, status.Code(err))
+	})
+
+	t.Run("incomplete actor identity refused", func(t *testing.T) {
+		volOptions := map[string]string{
+			"bucket": "test-bucket", "url": "oss-cn-beijing.aliyuncs.com", "authType": "agent-identity",
+			utils.SubstrateModeKey:    "true",
+			agentidentity.ActorUIDKey: actorUID, // name and namespace missing
+		}
+		_, err := parseOptions(context.Background(), nil, volOptions, nil, volCaps, false, "", false, true, m)
+		require.Error(t, err)
+		require.Equal(t, codes.InvalidArgument, status.Code(err))
+	})
+
+	t.Run("non-substrate volume untouched", func(t *testing.T) {
+		opts, err := parseOptions(context.Background(), nil, map[string]string{
+			"bucket": "test-bucket", "url": "oss-cn-beijing.aliyuncs.com", "authType": "agent-identity", "sandboxId": "explicit-sandbox",
+		}, nil, volCaps, false, "", false, true, m)
+		require.NoError(t, err)
+		require.False(t, opts.SubstrateMode)
+		require.Equal(t, "explicit-sandbox", opts.SandboxId)
+	})
 }

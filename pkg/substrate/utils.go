@@ -201,6 +201,22 @@ func validateNASRequest(request *csi.NodePublishVolumeRequest, _ ActorInfo) erro
 	return nil
 }
 
+// validateOSSRequest is the OSS backend's driver-specific gate: an object store mounted through
+// Agent Identity, so the ossfs client performs the Substrate credential exchange under the Actor's
+// own identity. CNFS routing is refused because it rewrites the bucket and endpoint the request
+// names, mounting a different volume rather than failing.
+func validateOSSRequest(request *csi.NodePublishVolumeRequest, _ ActorInfo) error {
+	if !strings.EqualFold(request.VolumeContext["authType"], "agent-identity") {
+		return status.Error(codes.FailedPrecondition, "only OSS with Agent Identity is supported")
+	}
+	for key, value := range request.VolumeContext {
+		if strings.EqualFold(key, "containernetworkfilesystem") && value != "" {
+			return status.Error(codes.FailedPrecondition, "CNFS routing is not supported through the Substrate bridge")
+		}
+	}
+	return nil
+}
+
 func validateActorMetadata(values map[string]string, actor ActorInfo) error {
 	if !agentidentity.HasActorIdentity(values) {
 		return nil
@@ -238,6 +254,14 @@ func (n *Node) mountAt(target string) (*mount.MountPoint, error) {
 
 func nasMount(entry *mount.MountPoint) bool {
 	return entry.Type == "nfs" || entry.Type == "nfs4" || entry.Type == "alinas"
+}
+
+// ossMount recognises an ossfs mount. Both ossfs1 and ossfs2 attach under the
+// "fuse.ossfs" filesystem type (pkg/mounter/utils.OssFuseAttachDir), and a
+// shared-path bind mount of the global mount keeps that type, so one check
+// covers every OSS runtime form.
+func ossMount(entry *mount.MountPoint) bool {
+	return entry.Type == "fuse.ossfs"
 }
 
 func (n *Node) placeholderSource(target string) (string, error) {
@@ -357,6 +381,9 @@ func (n *Node) unpublishPlaceholder(source, target string) error {
 
 func synthesizePublishEntry(id volumeIdentity, attributes map[string]string) (*csi.NodePublishVolumeRequest, string, error) {
 	driver := NASDriverName
+	if ft := attributes["fuseType"]; ft == "ossfs" || ft == "ossfs2" {
+		driver = OSSDriverName
+	}
 	req := &csi.NodePublishVolumeRequest{
 		VolumeId:      attributes["csi.alibabacloud.com/actor.uid"],
 		VolumeContext: attributes,
