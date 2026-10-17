@@ -640,3 +640,115 @@ func TestCheckBackendTargetRejectsWhatItCannotMountOver(t *testing.T) {
 		})
 	}
 }
+
+// ossAnnotationFixture encodes a publish entry addressed to the OSS driver, the
+// only difference from the NAS fixture being the driver the request names.
+func ossAnnotationFixture(t *testing.T, request *csi.NodePublishVolumeRequest) string {
+	t.Helper()
+	raw, err := protojson.Marshal(request)
+	require.NoError(t, err)
+	encoded, err := json.Marshal([]publishEntry{{VolumeName: "data", Driver: OSSDriverName, Request: raw}})
+	require.NoError(t, err)
+	return string(encoded)
+}
+
+func ossPublishFixture() *csi.NodePublishVolumeRequest {
+	return &csi.NodePublishVolumeRequest{
+		VolumeId: "customer-oss-pv-a1b2c3", TargetPath: "/data",
+		VolumeCapability: &csi.VolumeCapability{
+			AccessType: &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{FsType: "ossfs"}},
+			AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER},
+		},
+		VolumeContext: map[string]string{"authType": "agent-identity", "bucket": "test-bucket", "url": "oss-cn-beijing.aliyuncs.com"},
+	}
+}
+
+// The bridge is driver-agnostic: an entry that names the OSS driver is routed to
+// the registered OSS backend, carrying the same substrate-mode marker and Actor
+// identity a NAS mount gets. The recording node server stands in for the OSS
+// node server; the bridge only forwards to whatever the backend supplies.
+func TestPublishRoutesToOSSBackend(t *testing.T) {
+	request := ossPublishFixture()
+	annotation := ossAnnotationFixture(t, request)
+	downstream := &recordingNAS{}
+	node := NewNode(NodeOptions{ActorRoot: DefaultActorRoot, StateDir: t.TempDir(), Mounter: mount.NewFakeMounter(nil),
+		Backends: map[string]Backend{OSSDriverName: OSSBackend(downstream)},
+		Lookup: func(context.Context, ActorReference) (ActorInfo, error) {
+			return ActorInfo{UID: testUID, Name: "actor", Atespace: "storage-test", Annotation: annotation}, nil
+		}})
+	_, err := node.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: testTarget, VolumeContext: nodeContextFixture()})
+	require.NoError(t, err)
+	require.NotNil(t, downstream.published)
+	require.Equal(t, "customer-oss-pv-a1b2c3", downstream.published.VolumeId)
+	require.Equal(t, "true", downstream.published.VolumeContext["csi.alibabacloud.com/substrate-mode"])
+	require.Equal(t, testUID, downstream.published.VolumeContext["csi.alibabacloud.com/actor.uid"])
+}
+
+// A request the OSS backend must not be handed is refused by its own validator
+// before forwarding, and a request addressed to a driver with no registered
+// backend is refused at routing.
+func TestPublishRejectsWhatOSSBackendCannotServe(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		mutate   func(*csi.NodePublishVolumeRequest)
+		backends func(*recordingNAS) map[string]Backend
+		code     codes.Code
+		reason   string
+	}{
+		{
+			name:     "not agent identity",
+			mutate:   func(r *csi.NodePublishVolumeRequest) { r.VolumeContext["authType"] = "access-key" },
+			backends: func(n *recordingNAS) map[string]Backend { return map[string]Backend{OSSDriverName: OSSBackend(n)} },
+			code:     codes.FailedPrecondition,
+			reason:   "only OSS with Agent Identity is supported",
+		},
+		{
+			name:     "CNFS routing",
+			mutate:   func(r *csi.NodePublishVolumeRequest) { r.VolumeContext["containernetworkfilesystem"] = "cnfs-name" },
+			backends: func(n *recordingNAS) map[string]Backend { return map[string]Backend{OSSDriverName: OSSBackend(n)} },
+			code:     codes.FailedPrecondition,
+			reason:   "CNFS routing is not supported through the Substrate bridge",
+		},
+		{
+			name:     "no backend for driver",
+			mutate:   func(*csi.NodePublishVolumeRequest) {},
+			backends: func(n *recordingNAS) map[string]Backend { return map[string]Backend{NASDriverName: NASBackend(n)} },
+			code:     codes.FailedPrecondition,
+			reason:   "has no backend in the Substrate bridge",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			real := ossPublishFixture()
+			tc.mutate(real)
+			annotation := ossAnnotationFixture(t, real)
+			downstream := &recordingNAS{}
+			node := NewNode(NodeOptions{ActorRoot: DefaultActorRoot, StateDir: t.TempDir(), Mounter: mount.NewFakeMounter(nil), Backends: tc.backends(downstream), Lookup: func(context.Context, ActorReference) (ActorInfo, error) {
+				return ActorInfo{UID: testUID, Name: "actor", Atespace: "storage-test", Annotation: annotation}, nil
+			}})
+			_, err := node.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{VolumeId: testID, TargetPath: testTarget, VolumeContext: nodeContextFixture()})
+			require.Equal(t, tc.code, status.Code(err))
+			require.Contains(t, status.Convert(err).Message(), tc.reason)
+			require.Nil(t, downstream.published)
+		})
+	}
+}
+
+// Unpublish routes on which backend owns the live mount: a fuse.ossfs mount goes
+// to the OSS backend, decided from the mount table alone.
+func TestUnpublishRoutesOSSMountByOwnership(t *testing.T) {
+	downstream := &recordingNAS{}
+	node := NewNode(NodeOptions{ActorRoot: DefaultActorRoot, StateDir: t.TempDir(),
+		Mounter:  mount.NewFakeMounter([]mount.MountPoint{{Path: testTarget, Device: "ossfs", Type: "fuse.ossfs"}}),
+		Backends: map[string]Backend{OSSDriverName: OSSBackend(downstream)},
+	})
+	_, err := node.NodeUnpublishVolume(t.Context(), &csi.NodeUnpublishVolumeRequest{VolumeId: testID, TargetPath: testTarget})
+	require.NoError(t, err)
+	require.NotNil(t, downstream.unpublished)
+	require.Equal(t, testTarget, downstream.unpublished.TargetPath)
+}
+
+func TestOSSMountOwnership(t *testing.T) {
+	require.True(t, ossMount(&mount.MountPoint{Type: "fuse.ossfs"}))
+	require.False(t, ossMount(&mount.MountPoint{Type: "nfs"}))
+	require.False(t, ossMount(&mount.MountPoint{Type: "ext4"}))
+}

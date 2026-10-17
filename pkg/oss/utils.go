@@ -33,6 +33,7 @@ import (
 	fpm "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/fuse_pod_manager"
 	ossfpm "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/fuse_pod_manager/oss"
 	mounterutils "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils/agentidentity"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -175,6 +176,7 @@ func parseOptions(ctx context.Context, cnfsGetter cnfsv1beta1.CNFSGetter, volOpt
 		Path:          parsedPath,
 		AccessKey:     accessKey,
 		TokenSecret:   tokenSecret,
+		SubstrateMode: utils.IsSubstrateVolumeContext(volOptions),
 	}
 
 	var runtimeClassValue, directAssignedValue string
@@ -282,6 +284,26 @@ func parseOptions(ctx context.Context, cnfsGetter cnfsv1beta1.CNFSGetter, volOpt
 	}
 
 	opts.DirectAssigned = parseDirectAssigned(runtimeClassValue, directAssignedValue)
+
+	// Substrate (restricted delegation) mounts identify the sandbox by the Actor
+	// UID carried in the volume context, exactly as the NAS driver reconciles it
+	// (pkg/nas/nodeserver.go). The ossfs client exchanges credentials under that
+	// identity, so a stored sandboxId that names a different Actor is refused
+	// rather than silently mounted under the wrong one.
+	if opts.SubstrateMode {
+		if err := agentidentity.ValidateActorIdentity(volOptions); err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+		actorUID := agentidentity.ActorUID(volOptions)
+		if agentidentity.HasActorIdentity(volOptions) {
+			if opts.SandboxId != "" && opts.SandboxId != actorUID {
+				return nil, status.Error(codes.PermissionDenied, "sandboxId differs from the actor UID")
+			}
+		}
+		if opts.SandboxId == "" {
+			opts.SandboxId = actorUID
+		}
+	}
 
 	for _, c := range volCaps {
 		opts.ReadOnly = mounterutils.ReadOnlyRequested(opts.ReadOnly, c.AccessMode.GetMode())

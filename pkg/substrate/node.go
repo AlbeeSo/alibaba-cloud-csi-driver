@@ -34,6 +34,7 @@ const (
 	DriverName                = "substrate.csi.alibabacloud.com"
 	DriverShortName           = "substrate"
 	NASDriverName             = "nasplugin.csi.alibabacloud.com"
+	OSSDriverName             = "ossplugin.csi.alibabacloud.com"
 	PublishRequestsAnnotation = "ate.dev/csi-volume-publish-requests"
 	PodUIDKey                 = agentidentity.PodUIDKey
 	DefaultActorRoot          = "/var/lib/ate/actors"
@@ -124,7 +125,9 @@ func (n *Node) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolume
 		return nil, err
 	}
 	// 9. The backend does the mount, with the Actor's own request.
-	return backend.Node.NodePublishVolume(ctx, backendRequest(req, resolved))
+	fwd := backendRequest(req, resolved)
+	backend.applyMountProxySocket(fwd)
+	return backend.Node.NodePublishVolume(ctx, fwd)
 }
 
 // checkCallerMetadata keeps storage ownership separate from placement: Actor metadata

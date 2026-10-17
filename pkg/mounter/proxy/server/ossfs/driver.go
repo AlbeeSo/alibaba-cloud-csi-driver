@@ -72,6 +72,9 @@ func (h *Driver) Mount(ctx context.Context, req *proxy.MountRequest, fuseFd int)
 		_ = unix.Close(fuseFd)
 		klog.FromContext(ctx).V(0).Info("ossfs (libfuse2) does not support fd-passing, falling back to normal mount", "target", req.Target)
 	}
+	if err := os.MkdirAll(req.Target, 0755); err != nil {
+		return fmt.Errorf("mkdir target %q: %w", req.Target, err)
+	}
 	return h.ExtendedMount(ctx, &mounter.MountOperation{
 		Source:      req.Source,
 		Target:      req.Target,
