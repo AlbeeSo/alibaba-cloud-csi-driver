@@ -2,7 +2,6 @@ package mounter
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -56,10 +55,10 @@ func (m *ProxyMounter) ExtendedMount(ctx context.Context, op *MountOperation) er
 	}
 	notMnt, err := m.IsLikelyNotMountPoint(op.Target)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to verify mount at %s: %w", op.Target, err)
 	}
 	if notMnt {
-		return errors.New("failed to mount")
+		return fmt.Errorf("mount-proxy reported success but %s is not a mount point", op.Target)
 	}
 	return nil
 }
