@@ -297,22 +297,27 @@ func main() {
 			nasServers = nas.NewServers(meta, *endpoint, utils.Node, csiCfg, resolvedNasMountProxySock)
 		}
 
+		// When Substrate is enabled, the OSS sidecar's mount-proxy-server runs
+		// inside a container where containerd mounts tmpfs over /run, so the
+		// default fuseAttachBaseDir (/run) is invisible from the host. Both the
+		// bridge (which builds the MountRequest target) and the sidecar (which
+		// executes ossfs) must agree on a path outside /run. This must run
+		// unconditionally — not inside the else-if below — because the integrated
+		// deployment carries both TypePluginOSS and substrate.DriverName at once.
+		if slices.Contains(driverNames, substrate.DriverName) && *substrateOSSMountProxy != "" {
+			mounterutils.SetFuseAttachBaseDir("/opt/csi-fuse-attach")
+		}
+
 		var ossServers *common.Servers
+		ossSock := *mountProxySock
+		if slices.Contains(driverNames, substrate.DriverName) {
+			if s := *substrateOSSMountProxy; s != "" {
+				ossSock = s
+			}
+		}
 		if slices.Contains(driverNames, TypePluginOSS) {
-			ossServers = oss.NewServers(replaceCsiEndpoint(TypePluginOSS, *endpoint), meta, serviceType, csiCfg, k8sVersion, *mountProxySock)
+			ossServers = oss.NewServers(replaceCsiEndpoint(TypePluginOSS, *endpoint), meta, serviceType, csiCfg, k8sVersion, ossSock)
 		} else if slices.Contains(driverNames, substrate.DriverName) && serviceType&utils.Node != 0 {
-			ossSock := *substrateOSSMountProxy
-			if ossSock == "" {
-				ossSock = *mountProxySock
-			}
-			// The sidecar's mount-proxy-server runs inside a container where
-			// containerd mounts tmpfs over /run subdirectories, so the default
-			// fuseAttachBaseDir (/run) is not writable. Point both the bridge
-			// (which builds the MountRequest) and the sidecar (which executes
-			// ossfs) at a path outside /run.
-			if *substrateOSSMountProxy != "" {
-				mounterutils.SetFuseAttachBaseDir("/opt/csi-fuse-attach")
-			}
 			ossServers = oss.NewServers(replaceCsiEndpoint(TypePluginOSS, *endpoint), meta, utils.Node, csiCfg, k8sVersion, ossSock)
 		}
 
