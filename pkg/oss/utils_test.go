@@ -2311,7 +2311,7 @@ func TestDetermineRuntimeType(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotRuntimeType, err := DetermineRuntimeType(tt.directAssigned, tt.socketPath, tt.skipGlobalMount)
+			gotRuntimeType, err := DetermineRuntimeType(tt.directAssigned, tt.socketPath, tt.skipGlobalMount, false)
 			if tt.wantError {
 				assert.Error(t, err)
 				if tt.errorContains != "" {
@@ -2324,6 +2324,54 @@ func TestDetermineRuntimeType(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDetermineRuntimeType_SubstrateMode(t *testing.T) {
+	// substrateMode=false must produce identical results to the base tests above.
+	for _, tt := range []struct {
+		name            string
+		directAssigned  bool
+		socketPath      string
+		skipGlobalMount bool
+		wantRuntimeType RuntimeType
+		wantError       bool
+	}{
+		{"RunC without substrate", false, "/sock", false, RuntimeTypeRunC, false},
+		{"RunD without substrate", false, "/sock", true, RuntimeTypeRunD, false},
+		{"COCO without substrate", true, "", false, RuntimeTypeCOCO, false},
+		{"MicroVM without substrate", false, "", true, RuntimeTypeMicroVM, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := DetermineRuntimeType(tt.directAssigned, tt.socketPath, tt.skipGlobalMount, false)
+			if tt.wantError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.wantRuntimeType, got)
+			}
+		})
+	}
+
+	// substrateMode=true with socketPath promotes RunC to RunD (no globalmount).
+	t.Run("Substrate promotes RunC to RunD", func(t *testing.T) {
+		got, err := DetermineRuntimeType(false, "/sock", false, true)
+		assert.NoError(t, err)
+		assert.Equal(t, RuntimeTypeRunD, got)
+	})
+
+	// substrateMode=true without socketPath is MicroVM (same as skipGlobalMount alone).
+	t.Run("Substrate without socket is MicroVM", func(t *testing.T) {
+		got, err := DetermineRuntimeType(false, "", false, true)
+		assert.NoError(t, err)
+		assert.Equal(t, RuntimeTypeMicroVM, got)
+	})
+
+	// substrateMode does not affect already-RunD results.
+	t.Run("Substrate with skipGlobalMount still RunD", func(t *testing.T) {
+		got, err := DetermineRuntimeType(false, "/sock", true, true)
+		assert.NoError(t, err)
+		assert.Equal(t, RuntimeTypeRunD, got)
+	})
 }
 
 func TestNeedRotateToken(t *testing.T) {

@@ -238,7 +238,7 @@ func TestNodePublishVolume_RuntimeTypes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// determine the atucal runtime type
-			runtimeType, err := DetermineRuntimeType(tt.directAssigned, tt.socketPath, tt.skipGlobalMount)
+			runtimeType, err := DetermineRuntimeType(tt.directAssigned, tt.socketPath, tt.skipGlobalMount, false)
 			require.NoError(t, err)
 			require.Equal(t, tt.runtimeType, runtimeType)
 

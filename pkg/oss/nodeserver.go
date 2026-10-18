@@ -178,11 +178,11 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	// Determine runtime type based on directAssigned, socketPath, and skipGlobalMount
 	// See DetermineRuntimeType for the support matrix.
 	// Note: In ACK and ACS GPU scenarios, the socket path is provided by publishContext.
-	runtimeType, err := DetermineRuntimeType(opts.DirectAssigned, socketPath, ns.skipGlobalMount)
+	runtimeType, err := DetermineRuntimeType(opts.DirectAssigned, socketPath, ns.skipGlobalMount, opts.SubstrateMode)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "failed to determine runtime type: %v", err)
 	}
-	klog.V(4).InfoS("Determined runtime type", "runtimeType", runtimeType, "directAssigned", opts.DirectAssigned, "hasSocketPath", socketPath != "", "skipGlobalMount", ns.skipGlobalMount)
+	klog.V(4).InfoS("Determined runtime type", "runtimeType", runtimeType, "directAssigned", opts.DirectAssigned, "hasSocketPath", socketPath != "", "skipGlobalMount", ns.skipGlobalMount, "substrateMode", opts.SubstrateMode)
 
 	fusePodManager := ns.fusePodManagers[opts.FuseType]
 	if fusePodManager == nil {

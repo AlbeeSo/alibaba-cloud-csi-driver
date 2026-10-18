@@ -179,6 +179,7 @@ func (n *Node) checkBackendTarget(backend Backend, target string) error {
 // request would make the Substrate and ACS Sandbox forms differ where neither can see it.
 func backendRequest(req *csi.NodePublishVolumeRequest, resolved resolvedMount) *csi.NodePublishVolumeRequest {
 	real := resolved.Request
+	real.VolumeId = req.VolumeId
 	real.TargetPath = req.TargetPath
 	real.VolumeContext[utils.SubstrateModeKey] = "true"
 	setActorMetadata(real.VolumeContext, resolved.Actor)
@@ -217,9 +218,7 @@ func (n *Node) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublishVo
 	if !ok {
 		return n.unpublishBackendPlaceholder(req)
 	}
-	// 5. The backend owns its mounts. The volume ID here is the caller's, not the one publish
-	// forwarded: the backend uses it as a lock and log key only and the bridge keeps no per-ID
-	// state, which is by design so unpublish still works once the Actor and its annotation are gone.
+	// 5. The backend owns its mounts.
 	if _, err := backend.Node.NodeUnpublishVolume(ctx, &csi.NodeUnpublishVolumeRequest{VolumeId: req.VolumeId, TargetPath: req.TargetPath}); err != nil {
 		return nil, err
 	}

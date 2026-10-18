@@ -851,18 +851,29 @@ var runtimeTypeLookupTable = [8]runtimeTypeResult{
 	},
 }
 
-// DetermineRuntimeType determines the container runtime type based on directAssigned, socketPath, and skipGlobalMount.
+// DetermineRuntimeType determines the container runtime type based on directAssigned, socketPath,
+// skipGlobalMount, and substrateMode.
 //
-// This function uses a table-driven approach with a 3-bit index calculated from the three boolean parameters.
+// This function uses a table-driven approach with a 3-bit index calculated from the boolean parameters.
 // The lookup table contains all 8 possible combinations, providing O(1) lookup performance.
+//
+// substrateMode implies skipGlobalMount: Substrate volumes are per-actor mounts through a
+// worker-pod sidecar (same mount topology as ACS sandbox csi-agent where skipGlobalMount=true).
+// The csi-plugin process serves both Substrate and non-Substrate requests, so skipGlobalMount
+// cannot be set process-wide; substrateMode makes the decision per-request instead.
 //
 // Returns:
 //   - RuntimeType: the determined runtime type
 //   - error: if the combination is invalid (should not occur scenarios)
-func DetermineRuntimeType(directAssigned bool, socketPath string, skipGlobalMount bool) (RuntimeType, error) {
+func DetermineRuntimeType(directAssigned bool, socketPath string, skipGlobalMount bool, substrateMode bool) (RuntimeType, error) {
 	hasSocketPath := socketPath != ""
 
-	// Calculate index: (directAssigned ? 4 : 0) + (hasSocketPath ? 2 : 0) + (skipGlobalMount ? 1 : 0)
+	// Substrate volumes are per-actor mounts that go through a worker-pod
+	// sidecar, same as skipGlobalMount deployments (ACS sandbox csi-agent).
+	if substrateMode {
+		skipGlobalMount = true
+	}
+
 	index := 0
 	if directAssigned {
 		index += 4
@@ -874,7 +885,6 @@ func DetermineRuntimeType(directAssigned bool, socketPath string, skipGlobalMoun
 		index += 1
 	}
 
-	// Lookup result from table
 	result := runtimeTypeLookupTable[index]
 	return result.runtimeType, result.err
 }
