@@ -23,6 +23,9 @@ volumeBindingMode: Immediate
 {{- $endpoints = append $endpoints (dict "name" "nas" "driver" "nasplugin.csi.alibabacloud.com" "config" "substrate-nas" "port" 443 "target" 8443) }}
 {{- end }}
 {{- $endpoints = append $endpoints (dict "name" "bridge" "driver" "substrate.csi.alibabacloud.com" "config" "substrate-csi-bridge" "port" 444 "target" 8444) }}
+{{- if and .Values.csi.oss.enabled }}
+{{- $endpoints = append $endpoints (dict "name" "oss" "driver" "ossplugin.csi.alibabacloud.com" "config" "substrate-oss" "port" 445 "target" 8445) }}
+{{- end }}
 ---
 apiVersion: v1
 kind: Service

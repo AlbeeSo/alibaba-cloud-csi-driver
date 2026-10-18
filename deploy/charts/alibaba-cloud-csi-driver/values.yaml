@@ -9,6 +9,10 @@ substrate:
   storageClass:
     create: true
     name: ate-storage
+  oss:
+    enabled: false
+    mountProxySocket: /opt/csi-mount-proxy/mounter.sock
+    fuseAttachDir: /opt/csi-fuse-attach
 
 controller:
   enabled: true

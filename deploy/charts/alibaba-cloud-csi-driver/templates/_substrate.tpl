@@ -56,6 +56,42 @@
 - --substrate-api-token-file=/run/ateapi/token
 {{- end -}}
 
+{{- define "substrate.ossArgs" -}}
+{{- if .Values.substrate.oss.enabled }}
+- --substrate-oss-mount-proxy-sock={{ .Values.substrate.oss.mountProxySocket }}
+{{- end }}
+{{- end -}}
+
+{{- define "substrate.ossVolumes" -}}
+{{- if .Values.substrate.oss.enabled }}
+- name: substrate-fuse-socket
+  hostPath:
+    path: {{ dir .Values.substrate.oss.mountProxySocket }}
+    type: DirectoryOrCreate
+- name: substrate-fuse-attach
+  hostPath:
+    path: {{ .Values.substrate.oss.fuseAttachDir }}
+    type: DirectoryOrCreate
+{{- end }}
+{{- end -}}
+
+{{- define "substrate.ossMounts" -}}
+{{- if .Values.substrate.oss.enabled }}
+- name: substrate-fuse-socket
+  mountPath: {{ dir .Values.substrate.oss.mountProxySocket }}
+- name: substrate-fuse-attach
+  mountPath: {{ .Values.substrate.oss.fuseAttachDir }}
+  mountPropagation: HostToContainer
+{{- end }}
+{{- end -}}
+
+{{- define "substrate.ossEnv" -}}
+{{- if .Values.substrate.oss.enabled }}
+- name: AGENT_IDENTITY_ENDPOINT
+  value: "https://credential-provider.ack-agent-identity.svc:8443"
+{{- end }}
+{{- end -}}
+
 {{- define "substrate.validate" -}}
 {{- if or (not (hasPrefix "/" .Values.substrate.actorRoot)) (eq (clean .Values.substrate.actorRoot) "/") -}}
 {{- fail "substrate.actorRoot must be an absolute dedicated directory, not /" -}}

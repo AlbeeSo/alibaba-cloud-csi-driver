@@ -105,6 +105,7 @@ spec:
             {{- include "substrate.apiArgs" $ | nindent 12 }}
             - --substrate-actor-root={{ clean $.Values.substrate.actorRoot }}
             - --substrate-state-dir=/csi/substrate.csi.alibabacloud.com/substrate-state
+            {{- include "substrate.ossArgs" $ | nindent 12 }}
 {{- end }}
 {{- if $nodePool.deploy.labeler.enabled }}
             - --use-labeler=true
@@ -158,6 +159,9 @@ spec:
 {{- include "akEnv" $nodePool.deploy.accessKey | nindent 12 }}
 {{- end }}
 {{- include "kubeletDirEnv" $nodePool.deploy.kubeletRootDir | nindent 12 }}
+{{- if $nodePool.enableSubstrate }}
+            {{- include "substrate.ossEnv" $ | nindent 12 }}
+{{- end }}
           resources:
             requests:
               cpu: 100m
@@ -185,6 +189,7 @@ spec:
           volumeMounts:
 {{- if $nodePool.enableSubstrate }}
             {{- include "substrate.commonMounts" (dict "Values" $.Values "node" true) | nindent 12 }}
+            {{- include "substrate.ossMounts" $ | nindent 12 }}
             - name: substrate-plugin-dir
               mountPath: /csi/substrate.csi.alibabacloud.com
             - name: substrate-actors
@@ -386,6 +391,7 @@ spec:
           hostPath:
             path: {{ clean $.Values.substrate.actorRoot }}
             type: DirectoryOrCreate
+        {{- include "substrate.ossVolumes" $ | nindent 8 }}
 {{- end }}
 {{- if $nodePool.csi.oss.enabled }}
         - name: ossfs-metrics-dir
