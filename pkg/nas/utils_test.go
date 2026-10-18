@@ -462,3 +462,49 @@ func TestSubstrateAuthUsesEffectiveMountAuthType(t *testing.T) {
 		})
 	}
 }
+
+func TestGetNASIDFromMapOrServer(t *testing.T) {
+	tests := []struct {
+		name   string
+		params map[string]string
+		server string
+		want   string
+	}{
+		{
+			name:   "explicit filesystemId in params",
+			params: map[string]string{filesystemIDKey: "011wozfr3hjd4jxhdbz"},
+			server: "anything",
+			want:   "011wozfr3hjd4jxhdbz",
+		},
+		{
+			name:   "plain NAS domain",
+			params: map[string]string{},
+			server: "156464a7be-ike41.cn-beijing.nas.aliyuncs.com",
+			want:   "156464a7be",
+		},
+		{
+			name:   "AgenticFS AccessPoint domain",
+			params: map[string]string{},
+			server: "ap-1w82e3xhqcwq9uflq.011wozfr3hjd4jxhdbz-ftu15.cn-beijing.nas.aliyuncs.com",
+			want:   "011wozfr3hjd4jxhdbz",
+		},
+		{
+			name:   "ap- prefix without dot falls through",
+			params: map[string]string{},
+			server: "ap-nodotsuffix",
+			want:   "ap",
+		},
+		{
+			name:   "empty server returns empty",
+			params: map[string]string{},
+			server: "",
+			want:   "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := getNASIDFromMapOrServer(tt.params, tt.server)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}

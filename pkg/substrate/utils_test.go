@@ -234,9 +234,7 @@ func TestGoldenPlaceholderLifecycleWithoutNAS(t *testing.T) {
 	}
 }
 
-// A placeholder source that holds nothing is reclaimed; one the Golden warmup wrote
-// into is left alone, because deleting that recursively would discard the written
-// data without any ownership check.
+
 func TestUnpublishPlaceholderRemovesSource(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

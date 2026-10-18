@@ -47,11 +47,7 @@
 {{- end }}
 {{- end -}}
 
-{{- define "substrate.identityMounts" -}}
-- name: substrate-identity
-  mountPath: /run/podidentity.podcert.ate.dev/identity
-  readOnly: true
-{{- end -}}
+
 
 {{- define "substrate.apiArgs" -}}
 - --substrate-api-endpoint={{ required "substrate.apiEndpoint is required" .Values.substrate.apiEndpoint }}

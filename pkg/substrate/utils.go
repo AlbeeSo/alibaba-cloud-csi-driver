@@ -340,8 +340,17 @@ func (n *Node) unpublishPlaceholder(source, target string) error {
 	if len(refs) > 0 {
 		return status.Error(codes.FailedPrecondition, "placeholder source still has mount references")
 	}
-	if err := os.RemoveAll(source); err != nil {
-		return status.Errorf(codes.Internal, "remove placeholder storage: %v", err)
+	dirEntries, readErr := os.ReadDir(source)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		return status.Errorf(codes.Internal, "read placeholder source: %v", readErr)
+	}
+	for _, e := range dirEntries {
+		if rmErr := os.Remove(filepath.Join(source, e.Name())); rmErr != nil {
+			return status.Errorf(codes.Internal, "remove placeholder content %s: %v", e.Name(), rmErr)
+		}
+	}
+	if rmErr := os.Remove(source); rmErr != nil && !os.IsNotExist(rmErr) {
+		return status.Errorf(codes.Internal, "remove placeholder source dir: %v", rmErr)
 	}
 	return nil
 }
