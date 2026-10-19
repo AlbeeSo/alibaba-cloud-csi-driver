@@ -221,6 +221,9 @@ spec:
             {{- if and .Values.csi.nas.enabled .Values.csi.nas.controller.enabled }}
             - {name: nas-provisioner-dir, mountPath: /csi/nasplugin.csi.alibabacloud.com}
             {{- end }}
+            {{- if and .Values.csi.oss.enabled .Values.csi.oss.controller.enabled }}
+            - {name: oss-provisioner-dir, mountPath: /csi/ossplugin.csi.alibabacloud.com}
+            {{- end }}
             - {name: substrate-envoy-config, mountPath: /etc/envoy, readOnly: true}
             - {name: substrate-serving, mountPath: /run/servicedns.podcert.ate.dev, readOnly: true}
             - {name: substrate-trust-bundle, mountPath: /run/podidentity.podcert.ate.dev, readOnly: true}
