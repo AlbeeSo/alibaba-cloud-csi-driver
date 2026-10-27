@@ -3,6 +3,7 @@ package mounter
 import (
 	"context"
 	"errors"
+	"io"
 
 	mountutils "k8s.io/mount-utils"
 )
@@ -25,11 +26,11 @@ type Mounter interface {
 // allowed to reach the mount broker port (tcp 12049) under the csi_mount_proxy
 // nftables rule. A local umount from a container cgroup would be dropped.
 //
-// ExtendedUnmount returns ErrTargetNotManagedByBroker when the broker has no
-// record of target (it was not mounted through the broker), so the caller can
-// fall back to a local unmount.
+// fstype, when supplied, is the type used for Mount, not the kernel fstype.
+// It selects the driver even after the broker loses its target map on restart.
+// Without it, ownership is decided by the broker's target map.
 type ProxyUnmounter interface {
-	ExtendedUnmount(ctx context.Context, target string) error
+	ExtendedUnmount(ctx context.Context, target, fstype string) error
 }
 
 // RefreshOperation identifies a mount whose cloud credential is being replaced.
@@ -77,10 +78,11 @@ type MountOperation struct {
 	// credentials). They are passed to the mount via MountSensitive so they
 	// are masked in logs and error messages, and must never be logged.
 	SensitiveOptions []string
-	FuseFd           int  // FUSE file descriptor from client; 0 means not available; valid fd > 0
-	FdPassing        bool // whether to use fd-passing mode (client does kernel mount, passes fd to server)
-	Recovery         bool // whether to enable recovery loop on process exit
-	HasActiveDaemon  bool // server-side: true when a FUSE daemon is already running for this target (token rotation)
+	Stdin            io.Reader // data piped to the entrypoint's stdin (e.g. credential for agent-identity)
+	FuseFd           int       // FUSE file descriptor from client; 0 means not available; valid fd > 0
+	FdPassing        bool      // whether to use fd-passing mode (client does kernel mount, passes fd to server)
+	Recovery         bool      // whether to enable recovery loop on process exit
+	HasActiveDaemon  bool      // server-side: true when a FUSE daemon is already running for this target (token rotation)
 
 	MountResult any
 
