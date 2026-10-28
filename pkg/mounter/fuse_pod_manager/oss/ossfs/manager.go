@@ -272,7 +272,12 @@ func (f *fuseOssfs) MakeMountOptions(o *ossfpm.Options, m metadata.MetadataProvi
 	region := ossfpm.ResolveRegion(o, m)
 
 	mountOptions = append(mountOptions, fmt.Sprintf("url=%s", o.URL))
-	if o.ReadOnly {
+	// ro is appended when the volume is read-only (access mode) OR the pod
+	// requested read-only (volumeMounts.readOnly). The RunC shared-attachPath
+	// caller clears PodReadOnly before this call so that a per-pod ro request
+	// never poisons the shared ossfs daemon; RunD/MicroVM keep PodReadOnly
+	// since each pod owns its own ossfs process. See ossfpm.Options.PodReadOnly.
+	if o.ReadOnly || o.PodReadOnly {
 		mountOptions = append(mountOptions, "ro")
 	}
 

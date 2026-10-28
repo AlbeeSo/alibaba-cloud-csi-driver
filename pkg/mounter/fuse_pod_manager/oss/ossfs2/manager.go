@@ -151,7 +151,10 @@ func (f *fuseOssfs) MakeMountOptions(o *ossfpm.Options, m metadata.MetadataProvi
 		"oss_bucket_prefix="+o.Path,
 	)
 
-	if o.ReadOnly {
+	// ro is appended when the volume is read-only (access mode) OR the pod
+	// requested read-only (volumeMounts.readOnly). See ossfs/manager.go for
+	// the full rationale on why RunC clears PodReadOnly before this call.
+	if o.ReadOnly || o.PodReadOnly {
 		mountOptions = append(mountOptions, "ro=true")
 	}
 

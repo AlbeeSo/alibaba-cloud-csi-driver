@@ -113,7 +113,31 @@ type Options struct {
 	UseSharedPath bool   `json:"useSharedPath"`
 	AuthType      string `json:"authType"`
 	FuseType      string `json:"fuseType"`
-	ReadOnly      bool   `json:"readOnly"`
+
+	// ReadOnly indicates the volume is read-only at the *volume* level, driven
+	// solely by the CSI access mode (SINGLE_NODE_READER_ONLY /
+	// MULTI_NODE_READER_ONLY). It MUST be honored by the shared attachPath in
+	// RunC because every pod on the node binds the same ossfs mount — an
+	// access-mode-ro volume cannot be made writable by any pod.
+	ReadOnly bool `json:"readOnly"`
+
+	// PodReadOnly indicates the *current pod* requested read-only access via
+	// volumeMounts.readOnly (NodePublishVolumeRequest.Readonly). This is a
+	// per-pod, per-mount semantic that MUST NOT leak into the shared RunC
+	// attachPath: doing so would poison the ossfs daemon options for all
+	// subsequent pods on the node (a ro pod followed by an rw pod would leave
+	// the rw pod silently read-only).
+	//
+	// kubelet/CRI already enforces per-pod ro at the *container* bind mount
+	// (CRI Mount.Readonly, set from csiMountMgr.GetAttributes().ReadOnly), so
+	// the driver does not need to remount the targetPath ro itself. The driver
+	// only consumes PodReadOnly where the ossfs daemon itself must be ro:
+	//   - RunD/MicroVM per-pod ossfs (isolated, no sharing, safe to honor)
+	//   - overlay lower-dir requires a ro ossfs (ValidateOverlayRequirements)
+	//
+	// In the RunC shared-attachPath path, NodePublishVolume clears this field
+	// before building attachPath mount options (see nodeserver.go).
+	PodReadOnly bool `json:"podReadOnly"`
 
 	// overlay options
 	Overlay bool `json:"overlay"`

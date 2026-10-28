@@ -437,7 +437,8 @@ func Test_parseOptions(t *testing.T) {
 		AuthType:      "rrsa",
 		FuseType:      "ossfs2",
 		Path:          "/",
-		ReadOnly:      true,
+		ReadOnly:      false,
+		PodReadOnly:   true,
 		UseSharedPath: false,
 	}
 	gotOptions = mustParseOptions(t, testNPReq.GetVolumeContext(),
@@ -460,7 +461,8 @@ func Test_parseOptions(t *testing.T) {
 		FuseType:      "ossfs",
 		Path:          "/",
 		UseSharedPath: true,
-		ReadOnly:      true,
+		ReadOnly:      false,
+		PodReadOnly:   true,
 		URL:           "http://oss-cn-beijing-internal.aliyuncs.com",
 	}
 	assert.Equal(t, expectedOptions, gotOptions)
@@ -476,7 +478,8 @@ func Test_parseOptions(t *testing.T) {
 		FuseType:      "ossfs",
 		Path:          "/",
 		UseSharedPath: true,
-		ReadOnly:      true,
+		ReadOnly:      false,
+		PodReadOnly:   true,
 		RoleName:      "test-rolename",
 		URL:           "http://oss-cn-beijing-internal.aliyuncs.com",
 	}
@@ -493,7 +496,8 @@ func Test_parseOptions(t *testing.T) {
 		FuseType:      "ossfs",
 		Path:          "/",
 		UseSharedPath: true,
-		ReadOnly:      true,
+		ReadOnly:      false,
+		PodReadOnly:   true,
 		RoleName:      "worker-role",
 		URL:           "http://oss-cn-beijing-internal.aliyuncs.com",
 	}

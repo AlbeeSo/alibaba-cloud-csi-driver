@@ -283,6 +283,13 @@ func parseOptions(ctx context.Context, cnfsGetter cnfsv1beta1.CNFSGetter, volOpt
 
 	opts.DirectAssigned = parseDirectAssigned(runtimeClassValue, directAssignedValue)
 
+	// opts.ReadOnly is driven ONLY by the volume access mode (reader-only
+	// modes). It reflects a volume-level invariant and is safe to honor on
+	// the shared RunC attachPath. Do NOT fold the per-pod `readOnly` flag
+	// (from NodePublishVolumeRequest.Readonly / volumeMounts.readOnly) into
+	// opts.ReadOnly here — that would leak a single pod's read-only request
+	// into the shared ossfs daemon and poison every subsequent pod on the
+	// node. See ossfpm.Options.PodReadOnly for the full rationale.
 	for _, c := range volCaps {
 		opts.ReadOnly = mounterutils.ReadOnlyRequested(opts.ReadOnly, c.AccessMode.GetMode())
 		// set fuseType by fsType
@@ -290,9 +297,11 @@ func parseOptions(ctx context.Context, cnfsGetter cnfsv1beta1.CNFSGetter, volOpt
 			opts.FuseType = c.GetMount().FsType
 		}
 	}
-	if readOnly {
-		opts.ReadOnly = true
-	}
+	// PodReadOnly captures the per-pod volumeMounts.readOnly semantic. It is
+	// honored only where the ossfs daemon itself must be ro (RunD/MicroVM
+	// per-pod ossfs, overlay lower-dir) and is explicitly cleared before
+	// building shared attachPath options in the RunC path (see nodeserver.go).
+	opts.PodReadOnly = readOnly
 
 	// Normalize fuseType to a canonical registered name.
 	//   ""/"ossfs"/"ossfs1" → ossfs   (ossfs1 is an alias for ossfs)

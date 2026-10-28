@@ -235,7 +235,11 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	// currently only the Sandbox deployment configures this. RunD without the hostPath
 	// will fail at mount time with "filesystem not supported as upperdir".
 	if opts.Overlay {
-		if err = utils.ValidateOverlayRequirements(opts.ReadOnly, ns.skipGlobalMount); err != nil {
+		// Overlay requires a ro lower (ossfs) dir. Both volume-level ro
+		// (access mode) and per-pod ro (volumeMounts) qualify, since in the
+		// only runtimes that support overlay (RunD/MicroVM) the ossfs is
+		// per-pod and honoring PodReadOnly is safe.
+		if err = utils.ValidateOverlayRequirements(opts.ReadOnly || opts.PodReadOnly, ns.skipGlobalMount); err != nil {
 			return nil, status.Error(codes.InvalidArgument, err.Error())
 		}
 	}
@@ -303,6 +307,19 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		if notMntTarget || opts.Overlay {
 			// case 2-1: new mount, or an overlay republish that may re-mount the lower
 			// dir and therefore needs the full option set
+
+			// RunC uses a single shared ossfs at attachPath for ALL pods on this
+			// node. A per-pod read-only request (volumeMounts.readOnly) MUST NOT
+			// enter the shared daemon options here: if it did, the first ro pod
+			// would poison attachPath and every later rw pod would be silently
+			// read-only. Per-pod ro is instead enforced by kubelet/CRI at the
+			// container bind mount (CRI Mount.Readonly), so the driver does not
+			// need to remount the targetPath ro itself. RunD/MicroVM keep
+			// PodReadOnly because each pod owns its own ossfs process.
+			if runtimeType == RuntimeTypeRunC {
+				opts.PodReadOnly = false
+			}
+
 			if err = checkOssOptions(opts, fusePodManager); err != nil {
 				return nil, status.Error(codes.InvalidArgument, err.Error())
 			}
