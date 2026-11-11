@@ -96,7 +96,7 @@ func TestSubstrateDisabledDoesNotAddResources(t *testing.T) {
 }
 
 func TestSubstrateEnabledWiresControllerNodeAndTrust(t *testing.T) {
-	resources := renderChart(t, "--set", "enableSubstrate=true", "--set", "deploy.featureGates=AlinasMountProxy=true")
+	resources := renderChart(t, "--set", "enableSubstrate=true", "--kube-version", "1.37.0", "--set", "deploy.featureGates=AlinasMountProxy=true")
 	for _, resource := range resources {
 		if (resource.Kind == "Deployment" && resource.Metadata.Name == "csi-substrate-controller") || (resource.Kind == "DaemonSet" && resource.Metadata.Name == "csi-plugin-substrate") || (resource.Kind == "ServiceAccount" && resource.Metadata.Name == "alicloud-csi-substrate") {
 			t.Fatalf("unexpected standalone bridge resource %s/%s", resource.Kind, resource.Metadata.Name)
@@ -304,7 +304,7 @@ func TestSubstrateEnabledWiresControllerNodeAndTrust(t *testing.T) {
 }
 
 func TestSubstrateCustomPaths(t *testing.T) {
-	resources := renderChart(t, "--set", "enableSubstrate=true", "--set", "deploy.kubeletRootDir=/custom/kubelet", "--set", "substrate.root=/custom/substrate")
+	resources := renderChart(t, "--set", "enableSubstrate=true", "--kube-version", "1.37.0", "--set", "deploy.kubeletRootDir=/custom/kubelet", "--set", "substrate.root=/custom/substrate")
 	var daemon appsv1.DaemonSetSpec
 	if err := json.Unmarshal(findResource(t, resources, "DaemonSet", "csi-plugin").Spec, &daemon); err != nil {
 		t.Fatal(err)
@@ -323,7 +323,7 @@ func TestSubstrateRejectsUnsafeActorRoot(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm is required")
 	}
-	cmd := exec.CommandContext(t.Context(), "helm", "template", "test", ".", "--set", "enableSubstrate=true", "--set", "substrate.root=/")
+	cmd := exec.CommandContext(t.Context(), "helm", "template", "test", ".", "--set", "enableSubstrate=true", "--kube-version", "1.37.0", "--set", "substrate.root=/")
 	cmd.Env = append(os.Environ(), "KUBECONFIG=/dev/null")
 	if err := cmd.Run(); err == nil {
 		t.Fatal("root filesystem must not be an actor root")
@@ -338,7 +338,7 @@ func TestSubstrateComponentSwitches(t *testing.T) {
 		{"substrate.createDriverConfig=false", "CSIDriverConfig", "substrate.csi.alibabacloud.com"},
 	} {
 		t.Run(tc.option, func(t *testing.T) {
-			for _, resource := range renderChart(t, "--set", "enableSubstrate=true", "--set", tc.option) {
+			for _, resource := range renderChart(t, "--set", "enableSubstrate=true", "--kube-version", "1.37.0", "--set", tc.option) {
 				if resource.Kind == tc.forbiddenKind && resource.Metadata.Name == tc.forbiddenName {
 					t.Fatalf("unexpected %s/%s", resource.Kind, resource.Metadata.Name)
 				}
@@ -348,7 +348,7 @@ func TestSubstrateComponentSwitches(t *testing.T) {
 }
 
 func TestSubstrateWithoutNativeControllers(t *testing.T) {
-	resources := renderChart(t, "--set", "enableSubstrate=true", "--set", "csi.nas.enabled=false,csi.disk.enabled=false,csi.oss.enabled=false,csi.bmcpfs.enabled=false,csi.ens.enabled=false")
+	resources := renderChart(t, "--set", "enableSubstrate=true", "--kube-version", "1.37.0", "--set", "csi.nas.enabled=false,csi.disk.enabled=false,csi.oss.enabled=false,csi.bmcpfs.enabled=false,csi.ens.enabled=false")
 	for _, resource := range resources {
 		if resource.Kind == "CSIDriverConfig" && resource.Metadata.Name == "nasplugin.csi.alibabacloud.com" {
 			t.Fatal("disabled NAS must not have a controller config")
@@ -371,7 +371,7 @@ func TestSubstrateWithoutNativeControllers(t *testing.T) {
 }
 
 func TestSubstrateControllerOnlyDoesNotRequireActorAPI(t *testing.T) {
-	resources := renderChart(t, "--set", "enableSubstrate=true", "--set", "plugin.enabled=false", "--set", "substrate.apiEndpoint=", "--set", "substrate.apiAudience=")
+	resources := renderChart(t, "--set", "enableSubstrate=true", "--kube-version", "1.37.0", "--set", "plugin.enabled=false", "--set", "substrate.apiEndpoint=", "--set", "substrate.apiAudience=")
 	var deployment appsv1.DeploymentSpec
 	if err := json.Unmarshal(findResource(t, resources, "Deployment", "csi-provisioner").Spec, &deployment); err != nil {
 		t.Fatal(err)
@@ -411,7 +411,7 @@ func TestSubstrateEnvoyUsesStandardImageSelection(t *testing.T) {
 		{"custom image", []string{"--set", "deploy.network=vpc", "--set", "images.registryVPC=registry.example.com", "--set", "images.envoy.repo=team/envoy", "--set", "images.envoy.tag=reviewed"}, "registry.example.com/team/envoy:reviewed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			args := append([]string{"--set", "enableSubstrate=true"}, tc.args...)
+			args := append([]string{"--set", "enableSubstrate=true", "--kube-version", "1.37.0"}, tc.args...)
 			resources := renderChart(t, args...)
 			var deployment appsv1.DeploymentSpec
 			if err := json.Unmarshal(findResource(t, resources, "Deployment", "csi-provisioner").Spec, &deployment); err != nil {
@@ -422,4 +422,20 @@ func TestSubstrateEnvoyUsesStandardImageSelection(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSubstrateRejectsOldKubernetesVersion(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm is required")
+	}
+	cmd := exec.CommandContext(t.Context(), "helm", "template", "test", ".", "--set", "enableSubstrate=true", "--kube-version", "1.36.0")
+	cmd.Env = append(os.Environ(), "KUBECONFIG=/dev/null")
+	if err := cmd.Run(); err == nil {
+		t.Fatal("enableSubstrate must fail on Kubernetes < 1.37")
+	}
+}
+
+func TestSubstrateAcceptsKubernetes137(t *testing.T) {
+	resources := renderChart(t, "--set", "enableSubstrate=true", "--set", "deploy.featureGates=AlinasMountProxy=true", "--kube-version", "1.37.0")
+	findResource(t, resources, "DaemonSet", "csi-plugin")
 }

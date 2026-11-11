@@ -1,3 +1,7 @@
+# enableSubstrate requires Kubernetes >= 1.37 for ClusterTrustBundle and
+# PodCertificate projection (both stable and default-enabled since 1.37).
+# On clusters < 1.37 with feature gates manually enabled on kube-apiserver,
+# set $skipVersionCheck in templates/_substrate.tpl to "true".
 enableSubstrate: false
 
 substrate:

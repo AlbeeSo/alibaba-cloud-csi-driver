@@ -55,6 +55,10 @@
 {{- end -}}
 
 {{- define "substrate.validate" -}}
+{{- $skipVersionCheck := "false" -}}
+{{- if and .Values.enableSubstrate (eq $skipVersionCheck "false") (semverCompare "<1.37.0" .Capabilities.KubeVersion.Version) -}}
+{{- fail (printf "enableSubstrate requires Kubernetes >= 1.37: the substrate node and controller pods project ClusterTrustBundle and PodCertificate volumes, which are not default-enabled before 1.37. Current cluster version: %s. If PodCertificateRequest and ClusterTrustBundleProjection feature gates are manually enabled on kube-apiserver, set $skipVersionCheck in templates/_substrate.tpl to true" .Capabilities.KubeVersion.Version) -}}
+{{- end -}}
 {{- if or (not (hasPrefix "/" .Values.substrate.root)) (eq (clean .Values.substrate.root) "/") -}}
 {{- fail "substrate.root must be an absolute dedicated directory, not /" -}}
 {{- end -}}
