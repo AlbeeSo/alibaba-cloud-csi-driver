@@ -63,7 +63,7 @@ func ResolvePublish(ctx context.Context, client kubernetes.Interface, req *csi.N
 		return false, fmt.Errorf("verify Pod identity: %w", err)
 	}
 	if uid != "" && string(pod.UID) != uid {
-		return false, fmt.Errorf("Pod UID does not match publish request")
+		return false, fmt.Errorf("pod UID does not match publish request")
 	}
 	supported, err := SupportsSidecar(ctx, client, pod)
 	if err != nil {
@@ -79,7 +79,7 @@ func ResolvePublish(ctx context.Context, client kubernetes.Interface, req *csi.N
 		return false, fmt.Errorf("RunD file transport requires Pod UID")
 	}
 	if pod.Spec.NodeName == "" || (nodeID != "" && pod.Spec.NodeName != nodeID) {
-		return false, fmt.Errorf("Pod is not scheduled on this CSI node")
+		return false, fmt.Errorf("pod is not scheduled on this CSI node")
 	}
 	ack, err := SidecarNode(ctx, client, pod.Spec.NodeName)
 	if err != nil {
@@ -97,7 +97,7 @@ func ValidateRundPod(ctx context.Context, client kubernetes.Interface, req *csi.
 		return err
 	}
 	if !sidecar {
-		return fmt.Errorf("Pod uses delegated RunD execution, not file transport")
+		return fmt.Errorf("pod uses delegated RunD execution, not file transport")
 	}
 	return nil
 }
