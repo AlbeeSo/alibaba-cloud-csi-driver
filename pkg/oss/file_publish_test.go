@@ -13,6 +13,7 @@ import (
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/filevolume"
 	"github.com/stretchr/testify/require"
 	core "k8s.io/api/core/v1"
+	node "k8s.io/api/node/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 	gatetesting "k8s.io/component-base/featuregate/testing"
@@ -27,7 +28,7 @@ func TestOSSFilePublishWithoutSocket(t *testing.T) {
 			t.Setenv("CSI_FUSE_FILE_ROOT", root)
 			gatetesting.SetFeatureGateDuringTest(t, features.FunctionalMutableFeatureGate, features.RundCSIProtocol3, true)
 			ns := setupTestNodeServer(t, mount.NewFakeMounter(nil), false)
-			ns.clientset = fake.NewSimpleClientset(&core.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-a", Namespace: "test", UID: "pod-a"}, Spec: core.PodSpec{RuntimeClassName: ptr.To("rund")}})
+			ns.clientset = ossFileTestClient()
 			req := &csi.NodePublishVolumeRequest{VolumeId: "oss-file", TargetPath: filepath.Join(t.TempDir(), "pods", "pod-a", "volumes", "kubernetes.io~csi", "pv", "mount"), Readonly: true,
 				VolumeContext:    map[string]string{"csi.storage.k8s.io/pod.name": "pod-a", "csi.storage.k8s.io/pod.namespace": "test", "csi.storage.k8s.io/pod.uid": "pod-a", "fuseType": fuseType, "bucket": "test-bucket", "url": "oss-cn-beijing.aliyuncs.com", "path": "/first"},
 				Secrets:          map[string]string{"AccessKeyId": "temporary-ak", "AccessKeySecret": "temporary-sk", "SecurityToken": "temporary-token", "Expiration": "2099-01-01T00:00:00Z"},
@@ -58,11 +59,19 @@ func TestOSSFileControllerSkipsFusePod(t *testing.T) {
 		t.Run(fuseType, func(t *testing.T) {
 			gatetesting.SetFeatureGateDuringTest(t, features.FunctionalMutableFeatureGate, features.RundCSIProtocol3, true)
 			ns := setupTestNodeServer(t, mount.NewFakeMounter(nil), false)
-			cs := &controllerServer{metadata: ns.metadata}
+			cs := &controllerServer{metadata: ns.metadata, client: ossFileTestClient()}
 			_, err := cs.ControllerPublishVolume(context.Background(), &csi.ControllerPublishVolumeRequest{VolumeId: "oss-file", NodeId: "node",
 				VolumeCapability: &csi.VolumeCapability{AccessType: &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{}}, AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER}},
 				VolumeContext:    map[string]string{"fuseType": fuseType, "bucket": "test-bucket", "url": "oss-cn-beijing.aliyuncs.com"}})
 			require.NoError(t, err)
 		})
 	}
+}
+
+func ossFileTestClient() *fake.Clientset {
+	return fake.NewSimpleClientset(
+		&core.Node{ObjectMeta: metav1.ObjectMeta{Name: "node", Labels: map[string]string{filevolume.RuntimeLabel: filevolume.ACKSandboxRuntime}}},
+		&node.RuntimeClass{ObjectMeta: metav1.ObjectMeta{Name: "business-guest"}, Handler: "runv", Scheduling: &node.Scheduling{NodeSelector: map[string]string{filevolume.RuntimeLabel: filevolume.ACKSandboxRuntime}}},
+		&core.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-a", Namespace: "test", UID: "pod-a"}, Spec: core.PodSpec{NodeName: "node", RuntimeClassName: ptr.To("business-guest")}},
+	)
 }

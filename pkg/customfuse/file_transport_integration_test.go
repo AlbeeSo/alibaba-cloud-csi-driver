@@ -38,7 +38,7 @@ func (*integrationFileDriver) ApplyOptionDefaults(o []string) []string { return 
 func (*integrationFileDriver) Mount(context.Context, *proxy.MountRequest, int) error {
 	return fmt.Errorf("socket transport must not be called")
 }
-func (d *integrationFileDriver) MountFile(ctx context.Context, r *proxy.MountRequest) (<-chan error, error) {
+func (d *integrationFileDriver) MountFile(ctx context.Context, r *proxy.MountRequest, _ func(string) (bool, error)) (<-chan error, error) {
 	if r.Source == "blocked" {
 		<-ctx.Done()
 		return nil, ctx.Err()

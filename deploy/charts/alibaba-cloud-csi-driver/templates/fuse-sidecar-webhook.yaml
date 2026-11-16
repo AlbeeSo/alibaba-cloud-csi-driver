@@ -25,6 +25,9 @@ rules:
   - apiGroups: [storage.k8s.io]
     resources: [storageclasses]
     verbs: [get]
+  - apiGroups: [node.k8s.io]
+    resources: [runtimeclasses]
+    verbs: [get]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -45,7 +48,7 @@ metadata:
   name: {{ $name }}
   namespace: {{ .Release.Namespace }}
 data:
-  config.json: {{ dict "kubeletRoot" .Values.deploy.kubeletRootDir "ossStateRoot" $w.ossStateRoot "customStateRoot" $w.customStateRoot "profiles" $w.profiles "imagePullSecrets" $pullSecrets | toJson | quote }}
+  config.json: {{ dict "ossStateRoot" $w.ossStateRoot "customStateRoot" $w.customStateRoot "profiles" $w.profiles "imagePullSecrets" $pullSecrets | toJson | quote }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -60,7 +63,7 @@ spec:
     metadata:
       labels: {app: {{ $name }}}
       annotations:
-        checksum/config: {{ dict "profiles" $w.profiles "gates" .Values.deploy.featureGates "kubeletRoot" .Values.deploy.kubeletRootDir "ossRoot" $w.ossStateRoot "customRoot" $w.customStateRoot "pullSecrets" .Values.imagePullSecrets | toJson | sha256sum }}
+        checksum/config: {{ dict "profiles" $w.profiles "gates" .Values.deploy.featureGates "ossRoot" $w.ossStateRoot "customRoot" $w.customStateRoot "pullSecrets" .Values.imagePullSecrets | toJson | sha256sum }}
     spec:
       serviceAccountName: {{ $name }}
       {{- with $pullSecrets }}
@@ -117,7 +120,9 @@ webhooks:
     timeoutSeconds: 10
     matchConditions:
       - name: rund-runtime
-        expression: 'has(object.spec.runtimeClassName) && object.spec.runtimeClassName == "rund"'
+        expression: 'has(object.spec.runtimeClassName) && object.spec.runtimeClassName != "runc"'
+      - name: pvc-consumer
+        expression: 'has(object.spec.volumes) && object.spec.volumes.exists(v, has(v.persistentVolumeClaim))'
       - name: automatic-sidecar
         expression: '!has(object.metadata.annotations) || !("fuse.csi.alibabacloud.com/inject" in object.metadata.annotations) || object.metadata.annotations["fuse.csi.alibabacloud.com/inject"] != "false"'
     namespaceSelector: {{ toYaml $w.namespaceSelector | nindent 6 }}

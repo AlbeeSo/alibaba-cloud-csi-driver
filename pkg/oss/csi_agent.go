@@ -21,6 +21,7 @@ type CSIAgent struct {
 
 func NewCSIAgent(m metadata.MetadataProvider, socketPath string) *CSIAgent {
 	ns := &nodeServer{
+		isCSIAgent:             true,
 		metadata:               m,
 		locks:                  utils.NewVolumeLocks(),
 		rawMounter:             mountutils.NewWithoutSystemd(""),

@@ -14,6 +14,7 @@ import (
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils"
 	"github.com/stretchr/testify/require"
 	core "k8s.io/api/core/v1"
+	node "k8s.io/api/node/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 	gatetesting "k8s.io/component-base/featuregate/testing"
@@ -62,7 +63,7 @@ func TestFilePublishNoSocketAndPodIsolation(t *testing.T) {
 func TestControllerFilePublishDoesNotCreateFusePod(t *testing.T) {
 	gatetesting.SetFeatureGateDuringTest(t, features.FunctionalMutableFeatureGate, features.RundCSIProtocol3, true)
 	// A nil manager would panic if file mode accidentally attempted Pod creation.
-	_, err := (&controllerServer{}).ControllerPublishVolume(context.Background(), &csi.ControllerPublishVolumeRequest{
+	_, err := (&controllerServer{clientset: fileTestClient()}).ControllerPublishVolume(context.Background(), &csi.ControllerPublishVolumeRequest{
 		VolumeId: "one", NodeId: "node", VolumeContext: map[string]string{},
 	})
 	require.NoError(t, err)
@@ -70,7 +71,9 @@ func TestControllerFilePublishDoesNotCreateFusePod(t *testing.T) {
 
 func fileTestClient() *fake.Clientset {
 	return fake.NewSimpleClientset(
-		&core.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-a", Namespace: "test", UID: "pod-a"}, Spec: core.PodSpec{RuntimeClassName: ptr.To("rund")}},
-		&core.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-b", Namespace: "test", UID: "pod-b"}, Spec: core.PodSpec{RuntimeClassName: ptr.To("rund")}},
+		&core.Node{ObjectMeta: metav1.ObjectMeta{Name: "node", Labels: map[string]string{filevolume.RuntimeLabel: filevolume.ACKSandboxRuntime}}},
+		&node.RuntimeClass{ObjectMeta: metav1.ObjectMeta{Name: "business-guest"}, Handler: "runv", Scheduling: &node.Scheduling{NodeSelector: map[string]string{filevolume.RuntimeLabel: filevolume.ACKSandboxRuntime}}},
+		&core.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-a", Namespace: "test", UID: "pod-a"}, Spec: core.PodSpec{NodeName: "node", RuntimeClassName: ptr.To("business-guest")}},
+		&core.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-b", Namespace: "test", UID: "pod-b"}, Spec: core.PodSpec{NodeName: "node", RuntimeClassName: ptr.To("business-guest")}},
 	)
 }

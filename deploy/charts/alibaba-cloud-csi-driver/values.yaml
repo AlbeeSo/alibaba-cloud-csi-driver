@@ -1,6 +1,6 @@
 enableSubstrate: false
 
-# Optional admission service for RundCSIProtocol3. RuntimeClass rund and the
+# Optional admission service for RundCSIProtocol3. The ACK runv runtime contract and
 # installation feature gate select the protocol; this only automates sidecars.
 fuseSidecarWebhook:
   enabled: false

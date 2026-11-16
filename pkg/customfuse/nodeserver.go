@@ -23,6 +23,7 @@ import (
 const metricsPathPrefix = "/host/var/run/customfuse/"
 
 type nodeServer struct {
+	isCSIAgent bool
 	clientset  kubernetes.Interface
 	locks      *utils.VolumeLocks
 	rawMounter mountutils.Interface
@@ -72,9 +73,13 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		return nil, status.Errorf(codes.InvalidArgument, "auth config error: %v", err)
 	}
 	authCfg := makeAuthConfig(opts)
-	if filevolume.Enabled() {
-		if err := filevolume.ValidateRundPod(ctx, ns.clientset, req); err != nil {
+	if filevolume.Enabled() && !ns.isCSIAgent && req.VolumeContext["csi.alibabacloud.com/publish-method"] != "mount" {
+		sidecar, err := filevolume.ResolvePublish(ctx, ns.clientset, req, ns.NodeID)
+		if err != nil {
 			return nil, status.Error(codes.FailedPrecondition, err.Error())
+		}
+		if !sidecar {
+			return &csi.NodePublishVolumeResponse{}, nil
 		}
 		if err := publishFile(req, opts); err != nil {
 			code := codes.InvalidArgument

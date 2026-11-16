@@ -176,10 +176,16 @@ func (cs *controllerServer) ControllerPublishVolume(ctx context.Context, req *cs
 	}
 
 	if filevolume.Enabled() {
-		if err := validateFileOptions(opts); err != nil {
-			return nil, status.Error(codes.InvalidArgument, err.Error())
+		sidecar, err := filevolume.SidecarNode(ctx, cs.client, req.NodeId)
+		if err != nil {
+			return nil, status.Error(codes.FailedPrecondition, err.Error())
 		}
-		return &csi.ControllerPublishVolumeResponse{}, nil
+		if sidecar {
+			if err := validateFileOptions(opts); err != nil {
+				return nil, status.Error(codes.InvalidArgument, err.Error())
+			}
+			return &csi.ControllerPublishVolumeResponse{}, nil
+		}
 	}
 	// Note: Skip controller publish for direct=true.
 	//   The actual mounting of these volumes will be handled by rund/coco.

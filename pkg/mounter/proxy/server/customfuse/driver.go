@@ -160,8 +160,8 @@ func (h *Driver) Mount(ctx context.Context, req *proxy.MountRequest, _ int) erro
 	})
 }
 
-func (h *Driver) MountFile(ctx context.Context, req *proxy.MountRequest) (<-chan error, error) {
-	return server.MountFile(ctx, h.Mounter, req)
+func (h *Driver) MountFile(ctx context.Context, req *proxy.MountRequest, ready func(string) (bool, error)) (<-chan error, error) {
+	return server.MountFile(ctx, h.Mounter, req, ready)
 }
 
 type extendedMounter struct {
@@ -249,6 +249,11 @@ func (m *extendedMounter) ExtendedMount(ctx context.Context, op *mounter.MountOp
 			return false, fmt.Errorf("entrypoint exited unexpectedly")
 		default:
 			notMnt, err := m.IsLikelyNotMountPoint(target)
+			if op.MountReady != nil {
+				var ready bool
+				ready, err = op.MountReady(target)
+				notMnt = !ready
+			}
 			if err != nil {
 				logger.Error(err, "check mountpoint", "mountpoint", target)
 				return false, nil

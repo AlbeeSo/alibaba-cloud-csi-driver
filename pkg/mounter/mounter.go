@@ -86,6 +86,10 @@ type MountOperation struct {
 
 	MountResult any
 
+	// MountReady distinguishes a new FUSE mount from an existing shared PVC
+	// projection. Nil keeps the socket transport's mountpoint check.
+	MountReady func(string) (bool, error)
+
 	// Callbacks for lifecycle events (registered by interceptors, invoked by driver)
 	OnProcessExit     func(exitErr error)                                  // Called when process exits unexpectedly
 	OnRecoverySuccess func(pid int, exitErr error, attempts int)           // Called after recovery restart succeeds

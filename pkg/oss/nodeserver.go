@@ -42,6 +42,7 @@ import (
 )
 
 type nodeServer struct {
+	isCSIAgent      bool
 	metadata        metadata.MetadataProvider
 	locks           *utils.VolumeLocks
 	nodeName        string
@@ -152,9 +153,13 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		return nil, err
 	}
 
-	if filevolume.Enabled() {
-		if err := filevolume.ValidateRundPod(ctx, ns.clientset, req); err != nil {
+	if filevolume.Enabled() && !ns.isCSIAgent && req.VolumeContext["csi.alibabacloud.com/publish-method"] != "mount" {
+		sidecar, err := filevolume.ResolvePublish(ctx, ns.clientset, req, ns.NodeID)
+		if err != nil {
 			return nil, status.Error(codes.FailedPrecondition, err.Error())
+		}
+		if !sidecar {
+			return &csi.NodePublishVolumeResponse{}, nil
 		}
 		return ns.publishFileVolume(ctx, req)
 	}

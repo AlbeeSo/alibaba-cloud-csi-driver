@@ -108,6 +108,9 @@ func main() {
 }
 
 func runFileMode() error {
+	if err := server.EnsureFuseDevice("/dev/fuse"); err != nil {
+		return err
+	}
 	server.Init(drivers)
 	defer server.Terminate(drivers)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)

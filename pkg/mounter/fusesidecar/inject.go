@@ -30,7 +30,6 @@ type Profile struct {
 	Resources core.ResourceRequirements `json:"resources,omitempty"`
 }
 type Config struct {
-	KubeletRoot      string                      `json:"kubeletRoot"`
 	OSSStateRoot     string                      `json:"ossStateRoot"`
 	CustomStateRoot  string                      `json:"customStateRoot"`
 	Profiles         map[string]Profile          `json:"profiles"`
@@ -38,9 +37,6 @@ type Config struct {
 }
 
 func (c *Config) Defaults() {
-	if c.KubeletRoot == "" {
-		c.KubeletRoot = "/var/lib/kubelet"
-	}
 	if c.OSSStateRoot == "" {
 		c.OSSStateRoot = "/var/run/ossfs/file-volumes"
 	}
@@ -49,7 +45,7 @@ func (c *Config) Defaults() {
 	}
 }
 func (c Config) Validate() error {
-	for _, p := range []string{c.KubeletRoot, c.OSSStateRoot, c.CustomStateRoot} {
+	for _, p := range []string{c.OSSStateRoot, c.CustomStateRoot} {
 		if !filepath.IsAbs(p) || filepath.Clean(p) == "/" {
 			return fmt.Errorf("sidecar roots must be absolute non-root paths")
 		}
@@ -69,18 +65,26 @@ type group struct {
 	profile string
 	handles map[string]bool
 	names   map[string]bool
+	targets map[string]string // PV directory -> existing Pod PVC volume name
 }
 
 // Mutate does not need the admission-time Pod UID. subPathExpr is expanded by
 // kubelet from the Downward API only after the real UID has been assigned.
 func Mutate(ctx context.Context, client kubernetes.Interface, cfg Config, pod *core.Pod) (*core.Pod, error) {
-	if !filevolume.Enabled() || pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != "rund" {
+	if !filevolume.Enabled() {
 		return pod.DeepCopy(), nil
 	}
 	if v := pod.Annotations[InjectAnnotation]; v == "false" {
 		return pod.DeepCopy(), nil
 	} else if v != "" && v != "true" {
 		return nil, fmt.Errorf("%s must be true or false", InjectAnnotation)
+	}
+	supported, err := filevolume.SupportsSidecar(ctx, client, pod)
+	if err != nil {
+		return nil, err
+	}
+	if !supported {
+		return pod.DeepCopy(), nil
 	}
 	cfg.Defaults()
 	if err := cfg.Validate(); err != nil {
@@ -138,7 +142,7 @@ func Mutate(ctx context.Context, client kubernetes.Interface, cfg Config, pod *c
 		}
 		g := groups[driver]
 		if g == nil {
-			g = &group{profile: profile, handles: map[string]bool{}, names: map[string]bool{}}
+			g = &group{profile: profile, handles: map[string]bool{}, names: map[string]bool{}, targets: map[string]string{}}
 			groups[driver] = g
 		}
 		if g.profile != profile {
@@ -150,6 +154,9 @@ func Mutate(ctx context.Context, client kubernetes.Interface, cfg Config, pod *c
 		}
 		g.handles[id] = true
 		g.names[v.Name] = true
+		if _, exists := g.targets[pv.Name]; !exists {
+			g.targets[pv.Name] = v.Name
+		}
 	}
 	out := pod.DeepCopy()
 	var injected []core.Container
@@ -168,10 +175,8 @@ func Mutate(ctx context.Context, client kubernetes.Interface, cfg Config, pod *c
 		}
 		sort.Strings(ids)
 		stateName := "fuse-" + name + "-state"
-		targetName := "fuse-" + name + "-targets"
 		state := core.Volume{Name: stateName, VolumeSource: core.VolumeSource{HostPath: &core.HostPathVolumeSource{Path: root, Type: ptr.To(core.HostPathDirectoryOrCreate)}}}
-		targets := core.Volume{Name: targetName, VolumeSource: core.VolumeSource{HostPath: &core.HostPathVolumeSource{Path: filepath.Join(cfg.KubeletRoot, "pods"), Type: ptr.To(core.HostPathDirectory)}}}
-		for _, v := range []core.Volume{state, targets} {
+		for _, v := range []core.Volume{state} {
 			found := false
 			for _, existing := range out.Spec.Volumes {
 				if existing.Name == v.Name {
@@ -192,7 +197,18 @@ func Mutate(ctx context.Context, client kubernetes.Interface, cfg Config, pod *c
 			Env:             []core.EnvVar{{Name: "POD_UID", ValueFrom: &core.EnvVarSource{FieldRef: &core.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.uid"}}}},
 			StartupProbe:    &core.Probe{ProbeHandler: core.ProbeHandler{Exec: &core.ExecAction{Command: probe}}, PeriodSeconds: 2, TimeoutSeconds: 2, FailureThreshold: 60},
 			ReadinessProbe:  &core.Probe{ProbeHandler: core.ProbeHandler{Exec: &core.ExecAction{Command: probe}}, PeriodSeconds: 2, TimeoutSeconds: 2, FailureThreshold: 3},
-			VolumeMounts:    []core.VolumeMount{{Name: stateName, MountPath: "/volume-state", SubPathExpr: "$(POD_UID)"}, {Name: targetName, MountPath: "/pod-volumes", SubPathExpr: "$(POD_UID)/volumes/kubernetes.io~csi", MountPropagation: ptr.To(core.MountPropagationBidirectional)}},
+			VolumeMounts:    []core.VolumeMount{{Name: stateName, MountPath: "/volume-state", SubPathExpr: "$(POD_UID)"}},
+		}
+		// Share the exact PVC source used by the application. A hostPath of its
+		// kubelet parent is exported as a different virtio-fs path by RunD, and
+		// guest mounts on that alias are invisible to the application's PVC.
+		var pvs []string
+		for pv := range g.targets {
+			pvs = append(pvs, pv)
+		}
+		sort.Strings(pvs)
+		for _, pv := range pvs {
+			side.VolumeMounts = append(side.VolumeMounts, core.VolumeMount{Name: g.targets[pv], MountPath: filepath.Join("/pod-volumes", pv, "mount"), MountPropagation: ptr.To(core.MountPropagationBidirectional)})
 		}
 		found := false
 		for _, c := range out.Spec.Containers {
@@ -213,6 +229,9 @@ func Mutate(ctx context.Context, client kubernetes.Interface, cfg Config, pod *c
 		}
 		for _, containers := range [][]core.Container{out.Spec.Containers, out.Spec.InitContainers} {
 			for i := range containers {
+				if containers[i].Name == side.Name {
+					continue
+				}
 				for j := range containers[i].VolumeMounts {
 					m := &containers[i].VolumeMounts[j]
 					if g.names[m.Name] {

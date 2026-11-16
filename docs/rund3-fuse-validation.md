@@ -1,7 +1,8 @@
 # RunD 3 FUSE file protocol validation
 
-Validated on 2026-11-16 with Kubernetes 1.33.3, containerd and runc. A RuntimeClass
-named `rund` selects the runc handler so the actual gate/runtimeClass checks run.
+Validated on 2026-11-16 with Kubernetes 1.33.3-aliyun.1 and ACK security sandbox
+2.2.4, containerd 1.6.28. RuntimeClass `runv` uses handler `runv`; the node's
+handler resolves to `io.containerd.rund.v2`, running `containerd-shim-rund-v2`.
 The only protocol feature gate is `RundCSIProtocol3=true`. CSI controller/node
 components and the optional webhook were installed through the repository Helm
 chart without the managed CSI addon.
@@ -9,14 +10,16 @@ chart without the managed CSI addon.
 The CSI and mountproxy executables were built from this branch. Test images used
 the official ossfs v1.91.12.ack.2 and ossfs2 v2.0.9.ack.3 runtimes, combined for
 the OSS sidecar, and the example's read-only Python FUSE client for customfuse.
-This validates the clients and binaries; it does not certify every production
-image build target or a real RunD runtime.
+This validates those clients and binaries inside the real RunD guest; it does
+not certify every production image build target or every RunD distribution.
 
 | Case | Result |
 | --- | --- |
 | Automatic admission with no hand-written sidecars | Passed: one OSS and one customfuse native sidecar injected per Pod |
 | Two Pods, each using five volumes | Passed: one ossfs, two ossfs2 and two customfuse volumes per Pod |
 | Pod UID configuration isolation | Passed: each sidecar saw only its Pod's expected desired requests |
+| RuntimeClass alias | Passed: a second class with the same handler and scheduling contract ran the five-volume Job |
+| Actual guest execution | Passed: guest kernel 4.19 differed from host 5.10, boot IDs differed, business-container mountinfo contained all five FUSE mounts |
 | OSS reads and writes | Passed for ossfs and ossfs2; separate OSS API reads verified both clients' written objects |
 | Read-only OSS volume | Passed: write rejected |
 | Automatically injected Job | Passed: application completed, both sidecars exited successfully, all five volumes became Unmounted |
@@ -26,7 +29,7 @@ image build target or a real RunD runtime.
 | Webhook unavailable | Passed: automatic admission failed closed |
 | Manual sidecars with injection disabled and webhook unavailable | Passed: Pod started and read all five volumes |
 | FUSE process exit after successful mount | Passed: readiness failed, lifecycle error was recorded, original successful mount response remained intact |
-| Graceful Deployment shutdown | Passed: ten volumes became Unmounted and no FUSE mounts remained in the node-plugin mount table |
+| Graceful Deployment shutdown | Passed: ten volumes became Unmounted through explicit sidecar cleanup; no host FUSE mounts remained |
 | Separate controller-managed FUSE Pods | None were created |
 
 No permanent OSS access keys were placed in the cluster. Tests used temporary
@@ -48,14 +51,29 @@ process exit, and cleanup. Admission tests use HTTPS and fake Kubernetes API
 storage. Cluster tests focus on real admission, propagation, client I/O and
 native-sidecar lifecycle.
 
-## Remaining environment-specific validation
+## Runtime findings and remaining scope
 
-Real RunD must still validate host/guest directory sharing, mount propagation,
-and the ownership of publishing versus executing requests. The existing
-Serverless arrangement has a host csi-plugin that skips and a guest csi-agent
-that mounts; its compatibility with this file-publishing path has not been
-resolved. No extra feature gate, deployment-role inference or delivery-mode
-parameter is prescribed by these runc results.
+Sharing a HostPath of the kubelet CSI subtree did not propagate guest mounts to
+the application's separately exported PVC. The implementation now mounts each
+existing PVC into the sidecar, sharing its exact volume source. Business reads
+and independent OSS API write-back checks passed after this change. Readiness
+and credential interceptors distinguish a new FUSE mount from the existing
+virtiofs projection, and cleanup preserves the projection underneath it.
+
+This RunD configuration does not forward host devices to privileged containers.
+Mountproxy creates and opens the guest's FUSE character device when absent.
+No pre-created device or runtime configuration workaround was needed for E2E.
+
+The host mount table cannot enumerate guest-only FUSE mounts. Cleanup evidence
+therefore combines guest-written Unmounted responses, successful Job sidecar
+exits, graceful Pod deletion and the host mount check; the host check alone is
+not proof of guest cleanup.
+
+The existing Serverless arrangement has a host csi-plugin that skips and a guest
+csi-agent that mounts. Explicit agent-role tests verify that both agent
+constructors retain their socket execution path with the gate enabled, and
+classic `rund` selection retains delegation. That environment has not been
+tested end to end. No extra feature gate or delivery-mode parameter was added.
 
 Bound FUSE claims and Secret credential passthrough are the supported scope.
 WaitForFirstConsumer FUSE admission, application subPath mounts, credential

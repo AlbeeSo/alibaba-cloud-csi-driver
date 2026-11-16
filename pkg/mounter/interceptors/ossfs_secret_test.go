@@ -874,7 +874,18 @@ func TestOssfsSecretInterceptor_TokenRotation(t *testing.T) {
 		hasActiveDaemon bool   // true when daemon is already running (server-side)
 		expectSkip      bool
 		expectTokenDir  bool
+		mountReady      func(string) (bool, error)
 	}{
+		{
+			name:     "ossfs shared PVC projection must not skip FUSE",
+			fuseType: "ossfs", mountPoint: "target", expectTokenDir: true,
+			mountReady: func(string) (bool, error) { return false, nil },
+		},
+		{
+			name:     "ossfs2 shared PVC projection must not skip FUSE",
+			fuseType: "ossfs2", mountPoint: "target", expectTokenDir: true,
+			mountReady: func(string) (bool, error) { return false, nil },
+		},
 		{
 			name:           "ossfs first time mount - mount point doesn't exist",
 			fuseType:       "ossfs",
@@ -988,6 +999,7 @@ func TestOssfsSecretInterceptor_TokenRotation(t *testing.T) {
 					mounterutils.KeyExpiration:      "2024-12-31T23:59:59Z",
 				},
 				HasActiveDaemon: tt.hasActiveDaemon,
+				MountReady:      tt.mountReady,
 			}
 
 			handlerCalled := false

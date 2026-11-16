@@ -14,8 +14,13 @@ import (
 func TestMountFileReturnsSupervisedProcessExit(t *testing.T) {
 	m := newTestMounter(t, false, func(...string) *exec.Cmd { return exec.Command("sleep", "30") })
 	m.driver.Mounter = mounter.NewForMounter(m)
-	exit, err := m.driver.MountFile(context.Background(), &proxy.MountRequest{Target: t.TempDir(), Fstype: "ossfs2"})
+	checks := 0
+	exit, err := m.driver.MountFile(context.Background(), &proxy.MountRequest{Target: t.TempDir(), Fstype: "ossfs2"}, func(string) (bool, error) {
+		checks++
+		return checks >= 3, nil
+	})
 	require.NoError(t, err)
+	require.GreaterOrEqual(t, checks, 3, "must wait for FUSE above an existing PVC projection")
 	require.NotNil(t, exit)
 	m.driver.pids.Range(func(_, value any) bool { require.NoError(t, value.(*exec.Cmd).Process.Kill()); return true })
 	select {

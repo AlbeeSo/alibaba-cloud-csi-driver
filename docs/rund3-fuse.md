@@ -1,36 +1,46 @@
 # RunD 3 FUSE volumes and optional native sidecars
 
 This implementation supports ossfs, ossfs2 and customfuse through the same
-Pod-scoped file protocol. Current validation uses a RuntimeClass named `rund`
-with a runc handler, to exercise Kubernetes wiring before a real RunD environment
-is available. Compatibility with the existing Serverless host-plugin skip and
-guest csi-agent execution model remains an open design/validation item. This PR
-does not introduce an additional feature gate or delivery-mode parameter.
+Pod-scoped file protocol. ACK security sandbox exposes RunD as RuntimeClass
+handler `runv` (`io.containerd.rund.v2` on the node). Selection uses that runtime
+contract, rather than assuming that a class named `rund` identifies a deployment
+role. No additional feature gate or delivery-mode parameter is introduced.
 
 ## Selecting the protocol
 
 Set `deploy.featureGates: RundCSIProtocol3=true` in the CSI chart and
-`spec.runtimeClassName: rund` in workload Pods. No PV transport attribute is
-needed. With the gate disabled, the existing paths remain in use. With the gate
-enabled, ControllerPublish skips separate FUSE Pods, and NodePublish verifies
-the live Pod UID and runtimeClass before writing requests. Missing PodInfo, API
-errors or a different runtimeClass fail closed. Configure the same gate for all
+`spec.runtimeClassName: runv` in workload Pods. An alias is also supported if its
+RuntimeClass has handler `runv` and scheduling node selector
+`alibabacloud.com/container-runtime: Sandboxed-Container.runv`. NodePublish also
+verifies that the live Pod UID matches and that the Pod is scheduled on this CSI
+node, which must have the same runtime label. No PV transport attribute is needed.
+With the gate disabled, existing paths remain in use. With the gate enabled,
+ControllerPublish skips separate FUSE Pods only on these sandbox nodes, and
+NodePublish durably publishes requests. Missing identity or API failures fail
+closed. Configure the same gate for all
 CSI controllers, node plugins and the webhook; changing it requires rolling
 those components and recreating consuming Pods. It is not a live migration.
 
 Kubernetes 1.33+ native sidecars, `/dev/fuse`, privileged sidecars, hostPath and
-bidirectional mount propagation are required. The RunD environment must expose
-the Pod's configuration directory and CSI volume subtree to the sidecar and
-support the propagation required to reach application mounts. Actual RunD
-host/guest behavior needs validation with that runtime. A RuntimeClass named
-`rund` backed by a runc handler can exercise Kubernetes wiring in a test cluster;
-it does not validate RunD host/guest behavior.
+bidirectional mount propagation are required. The sidecar creates `/dev/fuse`
+when the guest does not inherit host devices, validates its device identity, and
+opens it before accepting requests. Each target uses the same PVC volume as the
+application. A second HostPath alias of the kubelet volume tree is insufficient:
+RunD can export it through a different virtiofs share with independent propagation.
+
+The original class `rund` retains host delegation unless it explicitly declares
+the above ACK sandbox contract. `NewCSIAgent` instances always retain their
+existing execution path, even with the gate enabled. This preserves the role
+boundary in code; the old Serverless environment still needs separate validation.
+Because ControllerPublish has no PodInfo, this gate-enabled installation serves
+sandbox FUSE consumers on sandbox nodes; ordinary runc FUSE consumers on those
+nodes are rejected. It is not a mixed-mode installation for those consumers.
 
 ## Optional webhook
 
 The webhook automates sidecar construction; it does not select the protocol.
 Leave `fuseSidecarWebhook.enabled: false` to manage sidecars yourself. With it
-enabled, the admission service handles CREATE for runtimeClass `rund`, resolves
+enabled, the admission service handles CREATE for supported sandbox classes, resolves
 bound PVCs/PVs, and injects one OSS sidecar (both ossfs and ossfs2 drivers) and/or
 one customfuse sidecar. It prepends them before application init containers and
 sets participating application mounts to HostToContainer propagation, retaining
@@ -109,10 +119,12 @@ CSI writes the descriptor beside the kubelet `mount` directory as
 ```
 
 Each driver uses its own root; sidecars see only their Pod UID directory through
-Downward API + subPathExpr. A second UID-scoped mount exposes the Pod's
-`volumes/kubernetes.io~csi` subtree. CREATE admission does not need a Pod UID.
-The chart's `deploy.kubeletRootDir` is used for the kubelet hostPath. Custom
-state roots must also match the corresponding CSI node component's
+Downward API + subPathExpr. CREATE admission does not need a Pod UID. Each
+existing PVC volume is also mounted at `/pod-volumes/<PV name>/mount` in its
+sidecar with Bidirectional propagation. Application mounts use HostToContainer.
+Readiness requires the new FUSE mount, not its underlying virtiofs projection;
+unmount removes only that FUSE layer and preserves the shared volume directory.
+Custom state roots must also match the corresponding CSI node component's
 `CSI_FUSE_FILE_ROOT`; the default chart roots already match.
 
 Mountproxy currently uses JSON over Unix sockets, while CSI uses gRPC. File
@@ -160,10 +172,11 @@ teardown, the common RunD envelope and unknown-field preservation. Kernel mount
 operations and Kubernetes API storage are simulated in those integration tests.
 
 The current webhook/gating/schema revision has passed cluster E2E on Kubernetes
-1.33.3 with a runc handler: two Pods each using five volumes across all three
+1.33.3 with ACK security sandbox (RunD): two Pods each using five volumes across all three
 clients, independent OSS API write-back checks, read-only enforcement, failures
 for each client, automatically injected Job completion, webhook-outage/manual
 bypass, process-exit readiness and explicit unmount/no-leak checks. See the
 [validation record](rund3-fuse-validation.md) for scope and remaining work.
-These results do not certify real RunD host/guest sharing or Serverless
-compatibility. The static manifests remain useful for manual-sidecar tests.
+Guest mount tables and a distinct guest kernel verified execution inside RunD.
+The old Serverless deployment still needs its own validation. The static
+manifests remain useful for manual-sidecar tests.

@@ -77,7 +77,7 @@ spec:
       labels:
         app: fuse-file-reader
     spec:
-      runtimeClassName: rund
+      runtimeClassName: runv
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 45
       initContainers:
@@ -114,9 +114,11 @@ spec:
             - name: state
               mountPath: /volume-state
               subPathExpr: $(POD_UID)
-            - name: pod-csi-volumes
-              mountPath: /pod-volumes
-              subPathExpr: $(POD_UID)/volumes/kubernetes.io~csi
+            - name: first
+              mountPath: /pod-volumes/fuse-file-demo-a/mount
+              mountPropagation: Bidirectional
+            - name: second
+              mountPath: /pod-volumes/fuse-file-demo-b/mount
               mountPropagation: Bidirectional
       containers:
         - name: reader
@@ -142,11 +144,6 @@ spec:
           hostPath:
             path: /var/run/customfuse/file-volumes
             type: DirectoryOrCreate
-        - name: pod-csi-volumes
-          hostPath:
-            # Adjust when the cluster uses a non-default kubelet root.
-            path: /var/lib/kubelet/pods
-            type: Directory
         - name: first
           persistentVolumeClaim:
             claimName: first

@@ -72,7 +72,7 @@ spec:
       labels: {app: ossfs2-file-reader}
       annotations: {fuse.csi.alibabacloud.com/inject: "false"}
     spec:
-      runtimeClassName: rund
+      runtimeClassName: runv
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 45
       initContainers:
@@ -102,9 +102,11 @@ spec:
             timeoutSeconds: 2
           volumeMounts:
             - {name: state, mountPath: /volume-state, subPathExpr: "$(POD_UID)"}
-            - name: pod-csi-volumes
-              mountPath: /pod-volumes
-              subPathExpr: $(POD_UID)/volumes/kubernetes.io~csi
+            - name: first
+              mountPath: /pod-volumes/ossfs2-file-a/mount
+              mountPropagation: Bidirectional
+            - name: second
+              mountPath: /pod-volumes/ossfs2-file-b/mount
               mountPropagation: Bidirectional
       containers:
         - name: reader
@@ -128,8 +130,6 @@ spec:
       volumes:
         - name: state
           hostPath: {path: /var/run/ossfs/file-volumes, type: DirectoryOrCreate}
-        - name: pod-csi-volumes
-          hostPath: {path: /var/lib/kubelet/pods, type: Directory}
         - name: first
           persistentVolumeClaim: {claimName: oss-first}
         - name: second

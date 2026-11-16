@@ -2,13 +2,13 @@
 
 Use the [shared RunD 3 FUSE protocol](../../../docs/rund3-fuse.md) with
 `RundCSIProtocol3=true` on the self-managed CSI installation and
-`runtimeClassName: rund` on the Pod. This manifest opts out of webhook injection
+`runtimeClassName: runv` on the ACK sandbox Pod. This manifest opts out of webhook injection
 and supplies a native sidecar explicitly. Kubernetes 1.33+ is required.
 
 Build a mount-proxy image from `build/mount-proxy/Dockerfile` with target
 `ossfs2`. It must include this branch's mountproxy executable. For automatic
 injection use an operator OSS profile with an `aio` image containing both ossfs
-and ossfs2. Remove the manual initContainer, its state/target hostPaths, and the
+and ossfs2. Remove the manual initContainer, its state hostPath, and the
 injection opt-out annotation; the webhook constructs them.
 
 Create a private test bucket in Beijing with `first/hello.txt` containing
@@ -17,7 +17,9 @@ Create Secret `ossfs2-file-credentials` in `fuse-file-demo`, preferably using
 bucket-scoped temporary STS credentials. Keys are `AccessKeyId`,
 `AccessKeySecret`, `SecurityToken`, `Expiration`. Configure imagePullSecrets for
 private images. Replace `OSS_BUCKET` and `OSSFS2_FILE_IMAGE` before applying.
-Change endpoint/region and kubelet hostPath for the target environment.
+Change endpoint/region for the target environment. Share the existing PVCs with
+the sidecar at `/pod-volumes/<PV name>/mount`; do not substitute a HostPath alias
+of the kubelet volume tree.
 
 ```sh
 kubectl apply -f rendered-example.yaml
@@ -36,8 +38,7 @@ Secret passthrough, including supplied STS credentials, is supported. Recreate
 Pods to change credentials/configuration. See the shared documentation for other
 capability restrictions, lifecycle semantics and validation boundaries.
 
-The current gate/schema/webhook revision passed mixed-client cluster E2E using
-a runc handler, including real OSS writes, manual bypass and mount cleanup.
-See the [validation record](../../../docs/rund3-fuse-validation.md). Real RunD
-and Serverless compatibility still require separate validation. Integration and
-process tests cover both OSS clients without a cluster.
+See the [validation record](../../../docs/rund3-fuse-validation.md) for tested
+runtime versions and lifecycle cases. The original Serverless deployment needs
+separate validation. Integration and process tests cover both clients without
+a cluster.

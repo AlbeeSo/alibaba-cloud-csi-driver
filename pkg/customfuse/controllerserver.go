@@ -15,6 +15,7 @@ import (
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 )
 
@@ -23,6 +24,7 @@ const (
 )
 
 type controllerServer struct {
+	clientset      kubernetes.Interface
 	fusePodManager *fpm.FusePodManager
 	common.GenericControllerServer
 }
@@ -50,10 +52,16 @@ func (cs *controllerServer) ControllerPublishVolume(ctx context.Context, req *cs
 		return nil, status.Errorf(codes.InvalidArgument, "auth config error: %v", err)
 	}
 	if filevolume.Enabled() {
-		if opts.AuthType != "" {
-			return nil, status.Error(codes.InvalidArgument, "file transport currently requires Secret credential passthrough")
+		sidecar, err := filevolume.SidecarNode(ctx, cs.clientset, req.NodeId)
+		if err != nil {
+			return nil, status.Error(codes.FailedPrecondition, err.Error())
 		}
-		return &csi.ControllerPublishVolumeResponse{}, nil
+		if sidecar {
+			if opts.AuthType != "" {
+				return nil, status.Error(codes.InvalidArgument, "file transport currently requires Secret credential passthrough")
+			}
+			return &csi.ControllerPublishVolumeResponse{}, nil
+		}
 	}
 	authCfg := makeAuthConfig(opts)
 	ptCfg := &fpm.PodTemplateConfig{

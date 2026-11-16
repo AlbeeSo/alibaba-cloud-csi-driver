@@ -2,7 +2,7 @@
 
 This example uses the shared [RunD 3 FUSE protocol](../../../docs/rund3-fuse.md).
 Enable `RundCSIProtocol3=true` on the CSI installation. The Pod uses
-`runtimeClassName: rund` and opts out of automatic injection so it can supply its
+`runtimeClassName: runv` on ACK sandbox and opts out of automatic injection so it can supply its
 own native sidecar. Kubernetes 1.33+ and the mount/privilege prerequisites in the
 protocol documentation are required.
 
@@ -19,12 +19,13 @@ kubectl -n fuse-file-demo logs deployment/reader -c reader
 
 If the base-image mirror is unreachable, pass
 `--build-arg DEMO_BASE_IMAGE=docker.io/library/debian:bookworm-slim`.
-Set imagePullSecrets for a private registry. Match kubelet and state hostPaths to
-the CSI installation. The two replicas each mount two volumes and must read
+Set imagePullSecrets for a private registry. Match the state hostPath to the CSI
+installation. Share the existing PVCs at `/pod-volumes/<PV name>/mount` instead
+of mounting a second HostPath alias of the kubelet tree. The two replicas each mount two volumes and must read
 their distinct contents.
 
 For automatic injection, configure a customfuse operator image profile, remove
-the manual initContainer and its state/target hostPath volumes, and remove the
+the manual initContainer and its state hostPath volume, and remove the
 injection opt-out annotation. The webhook adds the sidecar and propagation.
 For native OSS clients see the [OSSFS2 example](../../oss/file-sidecar/README.md).
 

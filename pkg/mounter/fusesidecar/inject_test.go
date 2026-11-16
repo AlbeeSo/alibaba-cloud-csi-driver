@@ -9,9 +9,11 @@ import (
 	"testing"
 
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/features"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/filevolume"
 	"github.com/stretchr/testify/require"
 	admission "k8s.io/api/admission/v1"
 	core "k8s.io/api/core/v1"
+	node "k8s.io/api/node/v1"
 	storage "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -24,10 +26,10 @@ import (
 func fixture(t *testing.T) (*fake.Clientset, Config, *core.Pod) {
 	t.Helper()
 	gatetesting.SetFeatureGateDuringTest(t, features.FunctionalMutableFeatureGate, features.RundCSIProtocol3, true)
-	client := fake.NewSimpleClientset()
+	client := fake.NewSimpleClientset(&node.RuntimeClass{ObjectMeta: metav1.ObjectMeta{Name: "business-guest"}, Handler: "runv", Scheduling: &node.Scheduling{NodeSelector: map[string]string{filevolume.RuntimeLabel: filevolume.ACKSandboxRuntime}}})
 	cfg := Config{Profiles: map[string]Profile{"oss": {Driver: OSSDriver, Image: "example.invalid/oss-aio:test"}, "customfuse": {Driver: CustomDriver, Image: "example.invalid/custom:test"}}}
 	cfg.Defaults()
-	pod := &core.Pod{ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: "test"}, Spec: core.PodSpec{RuntimeClassName: ptr.To("rund"), Containers: []core.Container{{Name: "app", Image: "example.invalid/app:test"}}, InitContainers: []core.Container{{Name: "init", Image: "example.invalid/init:test"}}}}
+	pod := &core.Pod{ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: "test"}, Spec: core.PodSpec{RuntimeClassName: ptr.To("business-guest"), Containers: []core.Container{{Name: "app", Image: "example.invalid/app:test"}}, InitContainers: []core.Container{{Name: "init", Image: "example.invalid/init:test"}}}}
 	for _, name := range []string{"oss-a", "oss-b", "custom"} {
 		driver := OSSDriver
 		if name == "custom" {
@@ -58,6 +60,13 @@ func TestMixedDriversAndAdmissionRoundTrip(t *testing.T) {
 	require.Contains(t, out.Spec.InitContainers[0].Args, "--file-expected-volumes=oss-a,oss-b")
 	require.Equal(t, "$(POD_UID)", out.Spec.InitContainers[0].VolumeMounts[0].SubPathExpr)
 	require.Equal(t, core.MountPropagationBidirectional, *out.Spec.InitContainers[0].VolumeMounts[1].MountPropagation)
+	require.Equal(t, "oss-a", out.Spec.InitContainers[0].VolumeMounts[1].Name)
+	require.Equal(t, "/pod-volumes/oss-a/mount", out.Spec.InitContainers[0].VolumeMounts[1].MountPath)
+	for _, v := range out.Spec.Volumes {
+		if v.HostPath != nil {
+			require.NotContains(t, v.HostPath.Path, "kubelet")
+		}
+	}
 	require.Equal(t, core.MountPropagationHostToContainer, *out.Spec.Containers[0].VolumeMounts[0].MountPropagation)
 	require.True(t, out.Spec.Containers[0].VolumeMounts[1].ReadOnly)
 	again, err := Mutate(context.Background(), client, cfg, out)

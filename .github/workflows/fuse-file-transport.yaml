@@ -31,6 +31,9 @@ jobs:
             ./pkg/mounter/proxy/filevolume \
             ./pkg/mounter/proxy \
             ./pkg/mounter/fusesidecar \
+            ./pkg/mounter/interceptors \
+            ./pkg/utils/rund/directvolume \
+            ./pkg/mounter/proxy/server \
             ./pkg/mounter/proxy/server/customfuse \
             ./pkg/mounter/proxy/server/ossfs \
             ./pkg/mounter/proxy/server/ossfs2

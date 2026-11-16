@@ -254,6 +254,9 @@ apiVersion: rbac.authorization.k8s.io/v1
 metadata:
   name: alicloud-csi-node
 rules:
+  - apiGroups: ["node.k8s.io"]
+    resources: ["runtimeclasses"]
+    verbs: ["get"]
   - apiGroups: [""]
     resources: ["persistentvolumes"]
     verbs: ["get", "list", "watch", "update", "create", "delete", "patch"]
