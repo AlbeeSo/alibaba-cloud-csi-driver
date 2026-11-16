@@ -11,11 +11,13 @@ import (
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/features"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/filevolume"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/server"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils"
 	"github.com/stretchr/testify/require"
+	gatetesting "k8s.io/component-base/featuregate/testing"
 	"k8s.io/mount-utils"
 )
 
@@ -74,11 +76,12 @@ type fileFixture struct {
 
 func newFileFixture(t *testing.T) *fileFixture {
 	t.Helper()
+	gatetesting.SetFeatureGateDuringTest(t, features.FunctionalMutableFeatureGate, features.RundCSIProtocol3, true)
 	raw := mount.NewFakeMounter(nil)
 	d := &integrationFileDriver{raw: raw, exits: map[string]chan error{}}
 	server.RegisterDriver(d)
 	server.Init([]string{d.Name()})
-	f := &fileFixture{t: t, state: t.TempDir(), kubelet: t.TempDir(), driver: d, node: &nodeServer{locks: utils.NewVolumeLocks(), rawMounter: raw}, backend: integrationFileBackend{FileBackend: server.FileBackend{Mounter: raw}, raw: raw}}
+	f := &fileFixture{t: t, state: t.TempDir(), kubelet: t.TempDir(), driver: d, node: &nodeServer{locks: utils.NewVolumeLocks(), rawMounter: raw, clientset: fileTestClient()}, backend: integrationFileBackend{FileBackend: server.FileBackend{Mounter: raw}, raw: raw}}
 	t.Setenv("CSI_FUSE_FILE_ROOT", f.state)
 	return f
 }
@@ -86,7 +89,7 @@ func newFileFixture(t *testing.T) *fileFixture {
 func (f *fileFixture) publish(uid, id, source string) *csi.NodePublishVolumeRequest {
 	f.t.Helper()
 	req := &csi.NodePublishVolumeRequest{VolumeId: id, TargetPath: filepath.Join(f.kubelet, "pods", uid, "volumes", "kubernetes.io~csi", id, "mount"),
-		VolumeContext: map[string]string{fileTransportKey: "file", "csi.storage.k8s.io/pod.uid": uid, "source": source}, Readonly: true, Secrets: map[string]string{"password": "secret-value"},
+		VolumeContext: map[string]string{"csi.storage.k8s.io/pod.name": uid, "csi.storage.k8s.io/pod.namespace": "test", "csi.storage.k8s.io/pod.uid": uid, "source": source}, Readonly: true, Secrets: map[string]string{"password": "secret-value"},
 		VolumeCapability: &csi.VolumeCapability{AccessType: &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{}}, AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY}}}
 	_, err := f.node.NodePublishVolume(context.Background(), req)
 	require.NoError(f.t, err)
@@ -172,6 +175,8 @@ func TestFileTransportIntegrationFailuresAndRestart(t *testing.T) {
 	var bad, slow filevolume.Status
 	require.NoError(t, filevolume.ReadJSON(filevolume.StatusPath(filepath.Join(f.state, "pod-a"), "bad"), &bad))
 	require.Contains(t, bad.Error, "client rejected")
+	require.NotNil(t, bad.Result)
+	require.Equal(t, bad.Error, bad.Result.Error)
 	require.NotContains(t, bad.Error, "secret-value")
 	require.NoError(t, filevolume.ReadJSON(filevolume.StatusPath(filepath.Join(f.state, "pod-a"), "slow"), &slow))
 	require.Contains(t, slow.Error, "deadline exceeded")
@@ -208,4 +213,8 @@ func TestFileTransportIntegrationProcessExit(t *testing.T) {
 	require.NoError(t, filevolume.ReadJSON(filevolume.StatusPath(filepath.Join(f.state, "pod-a"), "one"), &s))
 	require.Contains(t, s.Error, "daemon exited")
 	require.NotContains(t, s.Error, "secret-value")
+	require.NotNil(t, s.Result)
+	require.NoError(t, s.Result.ToError(), "process exit must not rewrite the original successful mount response")
+	require.NotNil(t, s.UnmountResult)
+	require.NoError(t, s.UnmountResult.ToError())
 }

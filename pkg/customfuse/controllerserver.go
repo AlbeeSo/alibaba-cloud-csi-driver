@@ -9,6 +9,7 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/common"
 	fpm "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/fuse_pod_manager"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/filevolume"
 	mounterutils "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -48,9 +49,9 @@ func (cs *controllerServer) ControllerPublishVolume(ctx context.Context, req *cs
 	if err := precheckAuthConfig(opts); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "auth config error: %v", err)
 	}
-	if fileTransport(req.VolumeContext) {
+	if filevolume.Enabled() {
 		if opts.AuthType != "" {
-			return nil, status.Error(codes.InvalidArgument, "file demo currently supports Secret passthrough authentication only")
+			return nil, status.Error(codes.InvalidArgument, "file transport currently requires Secret credential passthrough")
 		}
 		return &csi.ControllerPublishVolumeResponse{}, nil
 	}

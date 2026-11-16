@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
-
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/interceptors"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy"
@@ -85,6 +84,10 @@ func (h *Driver) Mount(ctx context.Context, req *proxy.MountRequest, fuseFd int)
 }
 
 func (h *Driver) Init() {}
+
+func (h *Driver) MountFile(ctx context.Context, req *proxy.MountRequest) (<-chan error, error) {
+	return server.MountFile(ctx, h.Mounter, req)
+}
 
 // ApplyOptionDefaults applies driver-specific option defaults to mount options.
 // Rules are divided into:

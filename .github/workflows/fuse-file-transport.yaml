@@ -24,5 +24,8 @@ jobs:
             ./pkg/customfuse \
             ./pkg/oss \
             ./pkg/mounter/proxy/filevolume \
+            ./pkg/mounter/proxy \
+            ./pkg/mounter/fusesidecar \
             ./pkg/mounter/proxy/server/customfuse \
+            ./pkg/mounter/proxy/server/ossfs \
             ./pkg/mounter/proxy/server/ossfs2

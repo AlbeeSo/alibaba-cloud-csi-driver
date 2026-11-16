@@ -17,7 +17,6 @@ spec:
     volumeHandle: ossfs2-file-a
     nodePublishSecretRef: {name: ossfs2-file-credentials, namespace: fuse-file-demo}
     volumeAttributes:
-      mountTransport: file
       fuseType: ossfs2
       bucket: OSS_BUCKET
       url: oss-cn-beijing-internal.aliyuncs.com
@@ -38,7 +37,6 @@ spec:
     volumeHandle: ossfs2-file-b
     nodePublishSecretRef: {name: ossfs2-file-credentials, namespace: fuse-file-demo}
     volumeAttributes:
-      mountTransport: file
       fuseType: ossfs2
       bucket: OSS_BUCKET
       url: oss-cn-beijing-internal.aliyuncs.com
@@ -70,8 +68,11 @@ spec:
   replicas: 2
   selector: {matchLabels: {app: ossfs2-file-reader}}
   template:
-    metadata: {labels: {app: ossfs2-file-reader}}
+    metadata:
+      labels: {app: ossfs2-file-reader}
+      annotations: {fuse.csi.alibabacloud.com/inject: "false"}
     spec:
+      runtimeClassName: rund
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 45
       initContainers:

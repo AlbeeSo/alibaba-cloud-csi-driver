@@ -9,6 +9,7 @@ import (
 	"os"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	ossfpm "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/fuse_pod_manager/oss"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/filevolume"
 	"google.golang.org/grpc/codes"
@@ -17,17 +18,27 @@ import (
 
 const ossFileRoot = "/host/var/run/ossfs/file-volumes"
 
+func validateFileOptions(opts *ossfpm.Options) error {
+	if opts.AuthType != "" {
+		return fmt.Errorf("file transport currently requires Secret credential passthrough")
+	}
+	return filevolume.ValidateMount(proxy.MountRequest{VolumeID: "validation", Fstype: opts.FuseType, Overlay: opts.Overlay, FdPassing: opts.FdPassing, Recovery: opts.Recovery})
+}
+
 func (ns *nodeServer) publishFileVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
 	opts, err := parseOptions(ctx, ns.cnfsGetter, req.VolumeContext, req.Secrets, []*csi.VolumeCapability{req.VolumeCapability}, "", true, false, ns.metadata)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	if opts.FuseType != "ossfs2" || opts.AuthType != "" || opts.Overlay || opts.FdPassing || opts.Recovery {
-		return nil, status.Error(codes.InvalidArgument, "file mode requires ossfs2 with Secret credentials, without overlay, fd-passing or recovery")
+	if err := resolveAgenticBucketOptions(opts, ns.metadata); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if err := validateFileOptions(opts); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	manager := ns.fusePodManagers[opts.FuseType]
 	if manager == nil {
-		return nil, status.Error(codes.Internal, "missing ossfs2 manager")
+		return nil, status.Errorf(codes.Internal, "missing %s manager", opts.FuseType)
 	}
 	if err := checkOssOptions(opts, manager); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
@@ -43,7 +54,7 @@ func (ns *nodeServer) publishFileVolume(ctx context.Context, req *csi.NodePublis
 	}
 	options = manager.AddDefaultMountOptions(options, flags)
 	err = filevolume.Publish(filevolume.Root(ossFileRoot), req.VolumeContext["csi.storage.k8s.io/pod.uid"], req.VolumeId, req.TargetPath, proxy.MountRequest{
-		Fstype: "ossfs2", Source: fmt.Sprintf("%s:%s", opts.MountBucket(), opts.Path), Options: options, Secrets: auth.Secrets,
+		Fstype: opts.FuseType, Source: fmt.Sprintf("%s:%s", opts.MountBucket(), opts.Path), Options: options, Secrets: auth.Secrets,
 	})
 	if err != nil {
 		code := codes.InvalidArgument

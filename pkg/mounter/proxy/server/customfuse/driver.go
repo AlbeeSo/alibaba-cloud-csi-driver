@@ -161,15 +161,7 @@ func (h *Driver) Mount(ctx context.Context, req *proxy.MountRequest, _ int) erro
 }
 
 func (h *Driver) MountFile(ctx context.Context, req *proxy.MountRequest) (<-chan error, error) {
-	op := &mounter.MountOperation{Source: req.Source, Target: req.Target, Options: req.Options, Secrets: req.Secrets}
-	if err := h.ExtendedMount(ctx, op); err != nil {
-		return nil, err
-	}
-	result, ok := op.MountResult.(server.FuseMountResult)
-	if !ok {
-		return nil, fmt.Errorf("missing FUSE process supervision")
-	}
-	return result.ExitChan, nil
+	return server.MountFile(ctx, h.Mounter, req)
 }
 
 type extendedMounter struct {

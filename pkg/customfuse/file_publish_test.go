@@ -9,20 +9,27 @@ import (
 	"testing"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/features"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/filevolume"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils"
 	"github.com/stretchr/testify/require"
+	core "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
+	gatetesting "k8s.io/component-base/featuregate/testing"
 	"k8s.io/mount-utils"
+	"k8s.io/utils/ptr"
 )
 
 func TestFilePublishNoSocketAndPodIsolation(t *testing.T) {
+	gatetesting.SetFeatureGateDuringTest(t, features.FunctionalMutableFeatureGate, features.RundCSIProtocol3, true)
 	root := t.TempDir()
 	t.Setenv("CSI_FUSE_FILE_ROOT", root)
-	ns := &nodeServer{locks: utils.NewVolumeLocks(), rawMounter: mount.NewFakeMounter(nil)}
+	ns := &nodeServer{locks: utils.NewVolumeLocks(), rawMounter: mount.NewFakeMounter(nil), clientset: fileTestClient()}
 	var requests []*csi.NodePublishVolumeRequest
 	for _, uid := range []string{"pod-a", "pod-b"} {
 		req := &csi.NodePublishVolumeRequest{VolumeId: "shared-volume", TargetPath: filepath.Join(t.TempDir(), "pods", uid, "volumes", "kubernetes.io~csi", "pv", "mount"),
-			VolumeContext:    map[string]string{fileTransportKey: "file", "csi.storage.k8s.io/pod.uid": uid},
+			VolumeContext:    map[string]string{"csi.storage.k8s.io/pod.name": uid, "csi.storage.k8s.io/pod.namespace": "test", "csi.storage.k8s.io/pod.uid": uid},
 			VolumeCapability: &csi.VolumeCapability{AccessType: &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{}}, AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER}},
 			Secrets:          map[string]string{"password": "test-secret"}}
 		_, err := ns.NodePublishVolume(context.Background(), req)
@@ -53,9 +60,17 @@ func TestFilePublishNoSocketAndPodIsolation(t *testing.T) {
 }
 
 func TestControllerFilePublishDoesNotCreateFusePod(t *testing.T) {
+	gatetesting.SetFeatureGateDuringTest(t, features.FunctionalMutableFeatureGate, features.RundCSIProtocol3, true)
 	// A nil manager would panic if file mode accidentally attempted Pod creation.
 	_, err := (&controllerServer{}).ControllerPublishVolume(context.Background(), &csi.ControllerPublishVolumeRequest{
-		VolumeId: "one", NodeId: "node", VolumeContext: map[string]string{fileTransportKey: "file"},
+		VolumeId: "one", NodeId: "node", VolumeContext: map[string]string{},
 	})
 	require.NoError(t, err)
+}
+
+func fileTestClient() *fake.Clientset {
+	return fake.NewSimpleClientset(
+		&core.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-a", Namespace: "test", UID: "pod-a"}, Spec: core.PodSpec{RuntimeClassName: ptr.To("rund")}},
+		&core.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-b", Namespace: "test", UID: "pod-b"}, Spec: core.PodSpec{RuntimeClassName: ptr.To("rund")}},
+	)
 }

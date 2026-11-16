@@ -1,5 +1,5 @@
 // Package filevolume implements the experimental Pod-scoped FUSE file transport.
-// This is a CSI/mount-proxy extension, not the block/NFS vol_attr.json schema.
+// The RunD MountInfo envelope is shared with block/NFS; MountProxy is its FUSE extension.
 package filevolume
 
 import (
@@ -13,26 +13,33 @@ import (
 	"time"
 
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils/rund/directvolume"
 )
 
 const Version = "fuse.csi.alibabacloud.com/v1alpha1"
 
 type Desired struct {
-	APIVersion string             `json:"apiVersion"`
-	PodUID     string             `json:"podUID"`
-	Generation string             `json:"generation"`
-	Mount      proxy.MountRequest `json:"mount"`
+	directvolume.MountInfo
+	APIVersion       string             `json:"apiVersion"`
+	PodUID           string             `json:"podUID"`
+	Generation       string             `json:"generation"`
+	RequiredFeatures []string           `json:"requiredFeatures,omitempty"`
+	Mount            proxy.MountRequest `json:"MountProxy"`
 }
 
 type Status struct {
-	APIVersion         string    `json:"apiVersion"`
-	PodUID             string    `json:"podUID"`
-	VolumeID           string    `json:"volumeID"`
-	ObservedGeneration string    `json:"observedGeneration"`
-	Session            string    `json:"session"`
-	Phase              string    `json:"phase"`
-	Error              string    `json:"error,omitempty"`
-	UpdatedAt          time.Time `json:"updatedAt"`
+	// Result is the mount-proxy response for this observed generation. Phase
+	// additionally describes asynchronous process/mount lifecycle changes.
+	Result             *proxy.Response `json:"result,omitempty"`
+	UnmountResult      *proxy.Response `json:"unmountResult,omitempty"`
+	APIVersion         string          `json:"apiVersion"`
+	PodUID             string          `json:"podUID"`
+	VolumeID           string          `json:"volumeID"`
+	ObservedGeneration string          `json:"observedGeneration"`
+	Session            string          `json:"session"`
+	Phase              string          `json:"phase"`
+	Error              string          `json:"error,omitempty"`
+	UpdatedAt          time.Time       `json:"updatedAt"`
 }
 
 func ID(volumeID string) string {
@@ -45,6 +52,9 @@ func ValidComponent(s string) bool {
 }
 
 func (d Desired) Validate(uid string) error {
+	if len(d.RequiredFeatures) > 0 {
+		return fmt.Errorf("unsupported required file-protocol features: %v", d.RequiredFeatures)
+	}
 	if d.APIVersion != Version || !ValidComponent(uid) || d.PodUID != uid {
 		return fmt.Errorf("unsupported version or mismatched Pod UID")
 	}
@@ -52,11 +62,32 @@ func (d Desired) Validate(uid string) error {
 	if len(parts) != 2 || !ValidComponent(parts[0]) || parts[1] != "mount" {
 		return fmt.Errorf("target must be <CSI-volume-directory>/mount")
 	}
-	if d.Mount.VolumeID == "" || (d.Mount.Fstype != "customfuse" && d.Mount.Fstype != "ossfs2") || d.Mount.FdPassing || d.Mount.Recovery || d.Mount.Overlay || d.Mount.MetricsPath != "" {
-		return fmt.Errorf("file demo supports customfuse/ossfs2 without fd-passing, recovery, overlay or external metrics paths")
+	if err := ValidateMount(d.Mount); err != nil {
+		return err
 	}
 	if d.Generation == "" || d.Generation != d.Digest() {
 		return fmt.Errorf("invalid generation digest")
+	}
+	return nil
+}
+
+// ValidateMount validates transport capabilities independently of the client.
+// Driver availability is checked by the mount-proxy dispatcher in the sidecar.
+func ValidateMount(m proxy.MountRequest) error {
+	if m.VolumeID == "" || m.Fstype == "" {
+		return fmt.Errorf("file transport requires volume ID and filesystem type")
+	}
+	if m.FdPassing {
+		return fmt.Errorf("file transport does not transfer FUSE file descriptors")
+	}
+	if m.Recovery {
+		return fmt.Errorf("file transport does not support transparent recovery")
+	}
+	if m.Overlay {
+		return fmt.Errorf("file transport does not manage overlay mounts")
+	}
+	if m.MetricsPath != "" {
+		return fmt.Errorf("file transport does not expose host metrics paths")
 	}
 	return nil
 }
@@ -91,7 +122,19 @@ func WriteJSON(path string, value any) error {
 	if closeErr != nil {
 		return closeErr
 	}
-	return os.Rename(f.Name(), path)
+	if err := os.Rename(f.Name(), path); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	err = dir.Sync()
+	closeErr = dir.Close()
+	if err != nil {
+		return err
+	}
+	return closeErr
 }
 
 func ReadJSON(path string, value any) error {

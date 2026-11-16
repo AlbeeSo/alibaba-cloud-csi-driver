@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"path/filepath"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/common"
@@ -16,6 +15,7 @@ import (
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 	mountutils "k8s.io/mount-utils"
 )
@@ -23,6 +23,7 @@ import (
 const metricsPathPrefix = "/host/var/run/customfuse/"
 
 type nodeServer struct {
+	clientset  kubernetes.Interface
 	locks      *utils.VolumeLocks
 	rawMounter mountutils.Interface
 	// mountProxySock is the override half of ResolveMountProxySocket: the
@@ -71,7 +72,10 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		return nil, status.Errorf(codes.InvalidArgument, "auth config error: %v", err)
 	}
 	authCfg := makeAuthConfig(opts)
-	if fileTransport(req.VolumeContext) {
+	if filevolume.Enabled() {
+		if err := filevolume.ValidateRundPod(ctx, ns.clientset, req); err != nil {
+			return nil, status.Error(codes.FailedPrecondition, err.Error())
+		}
 		if err := publishFile(req, opts); err != nil {
 			code := codes.InvalidArgument
 			var pathError *os.PathError
@@ -175,19 +179,8 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 	}
 	defer ns.locks.Release(req.VolumeId)
 
-	if uid, relative, err := fileTarget(req.TargetPath); err == nil {
-		path := filevolume.RequestPath(filepath.Join(fileRoot(), uid), req.VolumeId)
-		var d filevolume.Desired
-		if err := filevolume.ReadJSON(path, &d); err == nil {
-			if d.PodUID != uid || d.Mount.VolumeID != req.VolumeId || d.Mount.Target != relative {
-				return nil, status.Error(codes.FailedPrecondition, "file request does not match unpublish target")
-			}
-			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-				return nil, status.Errorf(codes.Internal, "remove file request: %v", err)
-			}
-		} else if !os.IsNotExist(err) {
-			return nil, status.Errorf(codes.Internal, "read file request: %v", err)
-		}
+	if err := filevolume.Unpublish(fileRoot(), req.VolumeId, req.TargetPath); err != nil {
+		return nil, status.Errorf(codes.Internal, "remove file request: %v", err)
 	}
 	err := mountutils.CleanupMountPoint(req.TargetPath, ns.rawMounter, true)
 	if err != nil {

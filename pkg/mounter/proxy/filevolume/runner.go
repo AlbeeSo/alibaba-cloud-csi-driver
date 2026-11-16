@@ -91,9 +91,11 @@ func (r *Runner) volume(ctx context.Context, id, session string) (result error) 
 		}
 		if err := r.Backend.Unmount(target); err != nil {
 			s.Phase, s.Error = "Failed", "cleanup failed: "+redact(err.Error(), current)
+			s.UnmountResult = &proxy.Response{Error: s.Error}
 			result = fmt.Errorf("volume %s cleanup failed", id)
 		} else {
 			s.Phase = "Unmounted"
+			s.UnmountResult = &proxy.Response{}
 		}
 		if err := write(); err != nil {
 			result = err
@@ -154,6 +156,7 @@ func (r *Runner) volume(ctx context.Context, id, session string) (result error) 
 				} else {
 					s.Phase = "Mounted"
 				}
+				s.Result = &proxy.Response{Error: s.Error}
 			}
 		}
 		if attempted && s.Phase == "Mounted" {

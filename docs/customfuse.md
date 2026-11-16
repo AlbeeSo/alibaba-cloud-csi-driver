@@ -104,11 +104,10 @@ is the adapter's job.
 
 ## Configuration
 
-For the experimental Pod-scoped file transport, see the
-[native sidecar demo](../examples/customfuse/6-file-sidecar/README.md). It uses
-Kubernetes 1.33+ native sidecars and desired/status JSON files instead of a
-mount-proxy socket. The example includes two volumes and manual sidecar setup;
-webhook injection and RunD integration are separate follow-up work.
+For RunD 3 FUSE volumes, see the [shared protocol and optional webhook](rund3-fuse.md)
+and [manual native sidecar example](../examples/customfuse/6-file-sidecar/README.md).
+The protocol supports ossfs, ossfs2 and customfuse, selected by runtimeClass rund
+and the installation's RundCSIProtocol3 feature gate.
 
 ### Fuse pod image (csi-plugin ConfigMap)
 

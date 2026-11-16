@@ -28,11 +28,9 @@ import (
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/cloud/metadata"
 	cnfsv1beta1 "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/cnfs/v1beta1"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/common"
-	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/features"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter"
 	ossfpm "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/fuse_pod_manager/oss"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/filevolume"
-
 	mounterutils "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils"
 	utilsos "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils/os"
@@ -154,15 +152,11 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		return nil, err
 	}
 
-	if req.VolumeContext[filevolume.TransportKey] == "file" {
-		return ns.publishFileVolume(ctx, req)
-	}
-	// Rund 3.0 protocol: In rund 3.0 node server (non csi-agent), skip all parameter validation and exit directly
-	if features.FunctionalMutableFeatureGate.Enabled(features.RundCSIProtocol3) {
-		if ns.clientset != nil && utils.GetPodRunTime(ctx, req, ns.clientset) == utils.RundRunTimeTag {
-			klog.Infof("NodePublishVolume: skip as %s enabled", features.RundCSIProtocol3)
-			return &csi.NodePublishVolumeResponse{}, nil
+	if filevolume.Enabled() {
+		if err := filevolume.ValidateRundPod(ctx, ns.clientset, req); err != nil {
+			return nil, status.Error(codes.FailedPrecondition, err.Error())
 		}
+		return ns.publishFileVolume(ctx, req)
 	}
 
 	// Parse options and ensure fuseType is not empty

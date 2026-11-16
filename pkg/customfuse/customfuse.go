@@ -9,6 +9,7 @@ import (
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/common"
 	fpm "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/fuse_pod_manager"
 	customfusefpm "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/fuse_pod_manager/customfuse"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/filevolume"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/options"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/version"
@@ -61,7 +62,16 @@ func NewServers(endpoint string, serviceType utils.ServiceType, csiCfg utils.Con
 		}
 	}
 	if serviceType&utils.Node != 0 {
+		var nodeClient kubernetes.Interface
+		if filevolume.Enabled() {
+			cfg, err := options.GetRestConfig()
+			if err != nil {
+				klog.Fatalf("Failed to get RunD 3 rest config: %v", err)
+			}
+			nodeClient = kubernetes.NewForConfigOrDie(cfg)
+		}
 		servers.NodeServer = &nodeServer{
+			clientset:       nodeClient,
 			locks:           utils.NewVolumeLocks(),
 			rawMounter:      mountutils.NewWithoutSystemd(""),
 			skipGlobalMount: utils.GetSkipGlobalMount(false),

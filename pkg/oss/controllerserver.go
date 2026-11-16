@@ -175,9 +175,9 @@ func (cs *controllerServer) ControllerPublishVolume(ctx context.Context, req *cs
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
-	if req.VolumeContext[filevolume.TransportKey] == "file" {
-		if opts.FuseType != "ossfs2" || opts.AuthType != "" || opts.Overlay || opts.FdPassing || opts.Recovery {
-			return nil, status.Error(codes.InvalidArgument, "file mode requires ossfs2 with Secret credentials, without overlay, fd-passing or recovery")
+	if filevolume.Enabled() {
+		if err := validateFileOptions(opts); err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
 		}
 		return &csi.ControllerPublishVolumeResponse{}, nil
 	}

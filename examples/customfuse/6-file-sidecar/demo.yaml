@@ -17,7 +17,6 @@ spec:
     driver: customfuseplugin.csi.alibabacloud.com
     volumeHandle: fuse-file-demo-a
     volumeAttributes:
-      mountTransport: file
       source: first-volume
 ---
 apiVersion: v1
@@ -34,7 +33,6 @@ spec:
     driver: customfuseplugin.csi.alibabacloud.com
     volumeHandle: fuse-file-demo-b
     volumeAttributes:
-      mountTransport: file
       source: second-volume
 ---
 apiVersion: v1
@@ -75,9 +73,11 @@ spec:
       app: fuse-file-reader
   template:
     metadata:
+      annotations: {fuse.csi.alibabacloud.com/inject: "false"}
       labels:
         app: fuse-file-reader
     spec:
+      runtimeClassName: rund
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 45
       initContainers:

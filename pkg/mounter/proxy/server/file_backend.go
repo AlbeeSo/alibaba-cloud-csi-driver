@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy"
 	mounterutils "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
 	"k8s.io/mount-utils"
@@ -14,6 +15,20 @@ import (
 // Socket mounts retain their existing monitoring path.
 type FileMounter interface {
 	MountFile(context.Context, *proxy.MountRequest) (<-chan error, error)
+}
+
+// MountFile uses the same interceptor entry point for every FUSE driver. Keep
+// request-to-operation conversion here, rather than duplicating it per client.
+func MountFile(ctx context.Context, m mounter.Mounter, req *proxy.MountRequest) (<-chan error, error) {
+	op := &mounter.MountOperation{Source: req.Source, Target: req.Target, FsType: req.Fstype, Options: req.Options, Args: req.MountFlags, Secrets: req.Secrets, VolumeID: req.VolumeID}
+	if err := m.ExtendedMount(ctx, op); err != nil {
+		return nil, err
+	}
+	result, ok := op.MountResult.(FuseMountResult)
+	if !ok {
+		return nil, fmt.Errorf("missing FUSE process supervision")
+	}
+	return result.ExitChan, nil
 }
 
 type FileBackend struct{ Mounter mount.Interface }

@@ -1,0 +1,133 @@
+{{- if .Values.fuseSidecarWebhook.enabled }}
+{{- if not (regexMatch "(^|,)RundCSIProtocol3=true(,|$)" (replace " " "" (default "" .Values.deploy.featureGates))) }}
+{{- fail "fuseSidecarWebhook requires deploy.featureGates to include RundCSIProtocol3=true" }}
+{{- end }}
+{{- $name := printf "%s-fuse-sidecar" .Release.Name }}
+{{- $w := .Values.fuseSidecarWebhook }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}-{{ .Release.Namespace }}
+rules:
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims, persistentvolumes]
+    verbs: [get]
+  - apiGroups: [storage.k8s.io]
+    resources: [storageclasses]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}-{{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $name }}-{{ .Release.Namespace }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+data:
+  config.json: {{ dict "kubeletRoot" .Values.deploy.kubeletRootDir "ossStateRoot" $w.ossStateRoot "customStateRoot" $w.customStateRoot "profiles" $w.profiles "imagePullSecrets" .Values.imagePullSecrets | toJson | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ $w.replicas }}
+  selector:
+    matchLabels: {app: {{ $name }}}
+  template:
+    metadata:
+      labels: {app: {{ $name }}}
+      annotations:
+        checksum/config: {{ dict "profiles" $w.profiles "gates" .Values.deploy.featureGates "kubeletRoot" .Values.deploy.kubeletRootDir "ossRoot" $w.ossStateRoot "customRoot" $w.customStateRoot "pullSecrets" .Values.imagePullSecrets | toJson | sha256sum }}
+    spec:
+      serviceAccountName: {{ $name }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: webhook
+          image: {{ required "fuseSidecarWebhook.image is required" $w.image | quote }}
+          args:
+            - {{ printf "--feature-gates=%s" (default "" .Values.deploy.featureGates) | quote }}
+          ports: [{name: https, containerPort: 9443}]
+          resources: {{ toYaml $w.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          readinessProbe:
+            httpGet: {path: /healthz, port: https, scheme: HTTPS}
+          livenessProbe:
+            httpGet: {path: /healthz, port: https, scheme: HTTPS}
+          volumeMounts:
+            - {name: config, mountPath: /etc/webhook, readOnly: true}
+            - {name: tls, mountPath: /etc/tls, readOnly: true}
+      volumes:
+        - name: config
+          configMap: {name: {{ $name }}}
+        - name: tls
+          secret:
+            secretName: {{ required "fuseSidecarWebhook.tlsSecretName is required" $w.tlsSecretName | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector: {app: {{ $name }}}
+  ports: [{port: 443, targetPort: https}]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: {{ $name }}-{{ .Release.Namespace }}
+webhooks:
+  - name: fuse-sidecar.csi.alibabacloud.com
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    reinvocationPolicy: Never
+    timeoutSeconds: 10
+    matchConditions:
+      - name: rund-runtime
+        expression: 'has(object.spec.runtimeClassName) && object.spec.runtimeClassName == "rund"'
+      - name: automatic-sidecar
+        expression: '!has(object.metadata.annotations) || !("fuse.csi.alibabacloud.com/inject" in object.metadata.annotations) || object.metadata.annotations["fuse.csi.alibabacloud.com/inject"] != "false"'
+    namespaceSelector: {{ toYaml $w.namespaceSelector | nindent 6 }}
+    clientConfig:
+      caBundle: {{ required "fuseSidecarWebhook.caBundle is required" $w.caBundle | quote }}
+      service:
+        name: {{ $name }}
+        namespace: {{ .Release.Namespace }}
+        path: /mutate
+        port: 443
+    rules:
+      - operations: [CREATE]
+        apiGroups: [""]
+        apiVersions: [v1]
+        resources: [pods]
+        scope: Namespaced
+{{- end }}

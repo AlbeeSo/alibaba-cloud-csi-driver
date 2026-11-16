@@ -8,9 +8,8 @@ import (
 	"strings"
 
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils/rund/directvolume"
 )
-
-const TransportKey = "mountTransport"
 
 var ErrConfigurationChanged = errors.New("file transport configuration changed; unpublish before changing it")
 
@@ -43,7 +42,7 @@ func Publish(root, uid, volumeID, hostTarget string, request proxy.MountRequest)
 		return fmt.Errorf("PodInfo UID missing or does not match target")
 	}
 	request.Target, request.VolumeID = relative, volumeID
-	d := Desired{APIVersion: Version, PodUID: uid, Mount: request}
+	d := Desired{MountInfo: directvolume.MountInfo{Source: request.Source, DeviceType: directvolume.DeviceTypeFUSE, FSType: request.Fstype, MountOpts: request.Options, Extra: map[string]string{}}, APIVersion: Version, PodUID: uid, Mount: request}
 	d.Generation = d.Digest()
 	if err := d.Validate(uid); err != nil {
 		return err
@@ -51,14 +50,20 @@ func Publish(root, uid, volumeID, hostTarget string, request proxy.MountRequest)
 	path := RequestPath(filepath.Join(root, uid), volumeID)
 	var old Desired
 	if err := ReadJSON(path, &old); err == nil {
+		if err := old.Validate(uid); err != nil {
+			return fmt.Errorf("existing file request is invalid: %w", err)
+		}
 		if old.Generation != d.Generation {
 			return ErrConfigurationChanged
 		}
-		return nil
+		return WriteJSON(filepath.Join(filepath.Dir(hostTarget), directvolume.RunD3MountInfoFileName), d)
 	} else if !os.IsNotExist(err) {
 		return err
 	}
 	if err := os.MkdirAll(hostTarget, 0755); err != nil {
+		return err
+	}
+	if err := WriteJSON(filepath.Join(filepath.Dir(hostTarget), directvolume.RunD3MountInfoFileName), d); err != nil {
 		return err
 	}
 	return WriteJSON(path, d)
@@ -73,14 +78,26 @@ func Unpublish(root, volumeID, hostTarget string) error {
 	var d Desired
 	if err := ReadJSON(path, &d); err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			if err := ReadJSON(filepath.Join(filepath.Dir(hostTarget), directvolume.RunD3MountInfoFileName), &d); err != nil {
+				if os.IsNotExist(err) {
+					return nil
+				}
+				return err
+			}
+			if d.APIVersion != Version {
+				return nil
+			}
+		} else {
+			return err
 		}
-		return err
 	}
 	if d.PodUID != uid || d.Mount.VolumeID != volumeID || d.Mount.Target != relative {
 		return fmt.Errorf("file request does not match unpublish target")
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.Remove(filepath.Join(filepath.Dir(hostTarget), directvolume.RunD3MountInfoFileName)); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	return nil
