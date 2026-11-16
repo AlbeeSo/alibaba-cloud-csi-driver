@@ -1,8 +1,11 @@
 # RunD 3 FUSE volumes and optional native sidecars
 
 This implementation supports ossfs, ossfs2 and customfuse through the same
-Pod-scoped file protocol. The installation serves either legacy RunD or RunD 3;
-mixed runc/RunD service in one enabled CSI installation is not supported.
+Pod-scoped file protocol. Current validation uses a RuntimeClass named `rund`
+with a runc handler, to exercise Kubernetes wiring before a real RunD environment
+is available. Compatibility with the existing Serverless host-plugin skip and
+guest csi-agent execution model remains an open design/validation item. This PR
+does not introduce an additional feature gate or delivery-mode parameter.
 
 ## Selecting the protocol
 
@@ -156,10 +159,11 @@ binding/profile/path conflicts, UID identity, stale status, process exit,
 teardown, the common RunD envelope and unknown-field preservation. Kernel mount
 operations and Kubernetes API storage are simulated in those integration tests.
 
-Real OSSFS2 two-Pod/two-volume reads, independently verified object write-back,
-read-only enforcement, failed-mount startup blocking, Job completion and no
-leaked host mounts were validated on the earlier manually injected runc version.
-That result does not certify this newer webhook/gating/schema or real RunD.
-Cluster acceptance for this revision must repeat those cases with automatic
-injection, manual bypass, mixed ossfs/ossfs2/customfuse clients and the target
-RunD runtime. The static manifests remain useful for manual-sidecar tests.
+The current webhook/gating/schema revision has passed cluster E2E on Kubernetes
+1.33.3 with a runc handler: two Pods each using five volumes across all three
+clients, independent OSS API write-back checks, read-only enforcement, failures
+for each client, automatically injected Job completion, webhook-outage/manual
+bypass, process-exit readiness and explicit unmount/no-leak checks. See the
+[validation record](rund3-fuse-validation.md) for scope and remaining work.
+These results do not certify real RunD host/guest sharing or Serverless
+compatibility. The static manifests remain useful for manual-sidecar tests.

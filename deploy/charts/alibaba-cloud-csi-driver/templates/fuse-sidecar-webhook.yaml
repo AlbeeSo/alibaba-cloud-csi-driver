@@ -4,6 +4,10 @@
 {{- end }}
 {{- $name := printf "%s-fuse-sidecar" .Release.Name }}
 {{- $w := .Values.fuseSidecarWebhook }}
+{{- $pullSecrets := list }}
+{{- range .Values.imagePullSecrets }}
+{{- $pullSecrets = append $pullSecrets (dict "name" .) }}
+{{- end }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -41,7 +45,7 @@ metadata:
   name: {{ $name }}
   namespace: {{ .Release.Namespace }}
 data:
-  config.json: {{ dict "kubeletRoot" .Values.deploy.kubeletRootDir "ossStateRoot" $w.ossStateRoot "customStateRoot" $w.customStateRoot "profiles" $w.profiles "imagePullSecrets" .Values.imagePullSecrets | toJson | quote }}
+  config.json: {{ dict "kubeletRoot" .Values.deploy.kubeletRootDir "ossStateRoot" $w.ossStateRoot "customStateRoot" $w.customStateRoot "profiles" $w.profiles "imagePullSecrets" $pullSecrets | toJson | quote }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -59,7 +63,7 @@ spec:
         checksum/config: {{ dict "profiles" $w.profiles "gates" .Values.deploy.featureGates "kubeletRoot" .Values.deploy.kubeletRootDir "ossRoot" $w.ossStateRoot "customRoot" $w.customStateRoot "pullSecrets" .Values.imagePullSecrets | toJson | sha256sum }}
     spec:
       serviceAccountName: {{ $name }}
-      {{- with .Values.imagePullSecrets }}
+      {{- with $pullSecrets }}
       imagePullSecrets: {{ toYaml . | nindent 8 }}
       {{- end }}
       securityContext:

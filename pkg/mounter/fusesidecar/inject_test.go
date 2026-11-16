@@ -73,7 +73,7 @@ func TestMixedDriversAndAdmissionRoundTrip(t *testing.T) {
 	defer server.Close()
 	response, err := server.Client().Post(server.URL, "application/json", bytes.NewReader(body))
 	require.NoError(t, err)
-	defer response.Body.Close()
+	defer func() { require.NoError(t, response.Body.Close()) }()
 	var got admission.AdmissionReview
 	require.NoError(t, json.NewDecoder(response.Body).Decode(&got))
 	require.Equal(t, review.Request.UID, got.Response.UID)

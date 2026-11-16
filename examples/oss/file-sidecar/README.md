@@ -36,8 +36,8 @@ Secret passthrough, including supplied STS credentials, is supported. Recreate
 Pods to change credentials/configuration. See the shared documentation for other
 capability restrictions, lifecycle semantics and validation boundaries.
 
-The earlier manually injected runc revision passed real OSSFS2 multi-Pod,
-multi-volume read/write/read-only, failed mount startup blocking, Job completion
-and explicit unmount/no-host-leak checks. The newer gate/schema/webhook revision
-requires its own cluster acceptance, especially on real RunD. Integration and
+The current gate/schema/webhook revision passed mixed-client cluster E2E using
+a runc handler, including real OSS writes, manual bypass and mount cleanup.
+See the [validation record](../../../docs/rund3-fuse-validation.md). Real RunD
+and Serverless compatibility still require separate validation. Integration and
 process tests cover both OSS clients without a cluster.
