@@ -1,5 +1,8 @@
 # RunD 3 FUSE volumes and optional native sidecars
 
+For the environment findings, lifecycle details, review order and Fluid comparison,
+see the [Chinese design and review guide](rund3-fuse-design-review-zh.md).
+
 This implementation supports ossfs, ossfs2 and customfuse through the same
 Pod-scoped file protocol. ACK security sandbox exposes RunD as RuntimeClass
 handler `runv` (`io.containerd.rund.v2` on the node). Selection uses that runtime
