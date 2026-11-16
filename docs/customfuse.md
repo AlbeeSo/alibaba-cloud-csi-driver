@@ -104,6 +104,12 @@ is the adapter's job.
 
 ## Configuration
 
+For the experimental Pod-scoped file transport, see the
+[native sidecar demo](../examples/customfuse/6-file-sidecar/README.md). It uses
+Kubernetes 1.33+ native sidecars and desired/status JSON files instead of a
+mount-proxy socket. The example includes two volumes and manual sidecar setup;
+webhook injection and RunD integration are separate follow-up work.
+
 ### Fuse pod image (csi-plugin ConfigMap)
 
 Key format: `fuse-<fuseType>`, where `fuseType` matches the PV's `volumeAttributes.fuseType`.

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"net"
@@ -16,6 +17,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/filevolume"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/server"
 	_ "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/server/alinas"
 	_ "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/server/customfuse"
@@ -23,17 +25,26 @@ import (
 	_ "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/server/ossfs2"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils"
 	"k8s.io/klog/v2"
+	"k8s.io/mount-utils"
 )
 
 var (
-	socketPath       string
-	drivers          []string
-	handleTimeout    time.Duration
-	enableNftables   bool
-	cleanupNASMounts bool
+	socketPath                              string
+	drivers                                 []string
+	handleTimeout                           time.Duration
+	enableNftables                          bool
+	cleanupNASMounts                        bool
+	fileStateDir, fileTargetDir, filePodUID string
+	fileExpected                            []string
+	fileCheckReady                          bool
 )
 
 func main() {
+	flag.StringVar(&fileStateDir, "file-state-dir", "", "experimental Pod-scoped desired/status directory; enables file mode instead of socket mode")
+	flag.StringVar(&fileTargetDir, "file-target-dir", "/pod-volumes", "this Pod's CSI volume directory inside the sidecar")
+	flag.StringVar(&filePodUID, "file-pod-uid", os.Getenv("POD_UID"), "Pod UID from Downward API")
+	flag.StringSliceVar(&fileExpected, "file-expected-volumes", nil, "required volume handles; all must mount before readiness succeeds")
+	flag.BoolVar(&fileCheckReady, "file-check-ready", false, "check file statuses and exit (startup/readiness probe)")
 	flag.StringVar(&socketPath, "socket", "/var/run/csi/mounter.sock", "socket path")
 	flag.StringSliceVar(&drivers, "driver", nil, "drivers to enable (e.g. 'ossfs,alinas')")
 	flag.DurationVar(&handleTimeout, "timeout", proxy.DefaultConnectionTimeout,
@@ -44,6 +55,20 @@ func main() {
 	utils.AddKlogFlags(flag.CommandLine)
 	utils.AddGoFlags(flag.CommandLine)
 	flag.Parse()
+	if fileCheckReady {
+		if err := filevolume.CheckReady(fileStateDir, filePodUID, fileExpected, time.Now()); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	if fileStateDir != "" {
+		if err := runFileMode(); err != nil {
+			klog.ErrorS(err, "File mode stopped")
+			os.Exit(1)
+		}
+		return
+	}
 
 	_ = os.Remove(socketPath)
 	server.SetCleanupNASMountsOnExit(cleanupNASMounts)
@@ -80,6 +105,16 @@ func main() {
 		klog.ErrorS(err, "Failed to close server")
 	}
 	server.Terminate(drivers)
+}
+
+func runFileMode() error {
+	server.Init(drivers)
+	defer server.Terminate(drivers)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	r := filevolume.Runner{Root: fileStateDir, PodUID: filePodUID, TargetRoot: fileTargetDir,
+		Expected: fileExpected, Timeout: handleTimeout, Backend: server.FileBackend{Mounter: mount.NewWithoutSystemd("")}}
+	return r.Run(ctx)
 }
 
 func listen(socketPath string) (*net.UnixListener, error) {

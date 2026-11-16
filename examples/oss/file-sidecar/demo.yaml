@@ -1,0 +1,135 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fuse-file-demo
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: ossfs2-file-a
+spec:
+  capacity: {storage: 1Gi}
+  accessModes: [ReadWriteMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  csi:
+    driver: ossplugin.csi.alibabacloud.com
+    volumeHandle: ossfs2-file-a
+    nodePublishSecretRef: {name: ossfs2-file-credentials, namespace: fuse-file-demo}
+    volumeAttributes:
+      mountTransport: file
+      fuseType: ossfs2
+      bucket: OSS_BUCKET
+      url: oss-cn-beijing-internal.aliyuncs.com
+      region: cn-beijing
+      path: /first/
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: ossfs2-file-b
+spec:
+  capacity: {storage: 1Gi}
+  accessModes: [ReadOnlyMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  csi:
+    driver: ossplugin.csi.alibabacloud.com
+    volumeHandle: ossfs2-file-b
+    nodePublishSecretRef: {name: ossfs2-file-credentials, namespace: fuse-file-demo}
+    volumeAttributes:
+      mountTransport: file
+      fuseType: ossfs2
+      bucket: OSS_BUCKET
+      url: oss-cn-beijing-internal.aliyuncs.com
+      region: cn-beijing
+      path: /second/
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: oss-first, namespace: fuse-file-demo}
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: ""
+  volumeName: ossfs2-file-a
+  resources: {requests: {storage: 1Gi}}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: oss-second, namespace: fuse-file-demo}
+spec:
+  accessModes: [ReadOnlyMany]
+  storageClassName: ""
+  volumeName: ossfs2-file-b
+  resources: {requests: {storage: 1Gi}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: ossfs2-reader, namespace: fuse-file-demo}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: ossfs2-file-reader}}
+  template:
+    metadata: {labels: {app: ossfs2-file-reader}}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 45
+      initContainers:
+        - name: mountproxy
+          image: OSSFS2_FILE_IMAGE
+          restartPolicy: Always
+          securityContext: {privileged: true, runAsUser: 0}
+          env:
+            - name: POD_UID
+              valueFrom: {fieldRef: {fieldPath: metadata.uid}}
+          args:
+            - --driver=ossfs2
+            - --file-state-dir=/volume-state
+            - --file-target-dir=/pod-volumes
+            - --file-expected-volumes=ossfs2-file-a,ossfs2-file-b
+            - --timeout=30s
+          startupProbe:
+            exec:
+              command: [csi-mount-proxy-server, --file-check-ready, --file-state-dir=/volume-state, "--file-expected-volumes=ossfs2-file-a,ossfs2-file-b"]
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            exec:
+              command: [csi-mount-proxy-server, --file-check-ready, --file-state-dir=/volume-state, "--file-expected-volumes=ossfs2-file-a,ossfs2-file-b"]
+            periodSeconds: 2
+            timeoutSeconds: 2
+          volumeMounts:
+            - {name: state, mountPath: /volume-state, subPathExpr: "$(POD_UID)"}
+            - name: pod-csi-volumes
+              mountPath: /pod-volumes
+              subPathExpr: $(POD_UID)/volumes/kubernetes.io~csi
+              mountPropagation: Bidirectional
+      containers:
+        - name: reader
+          image: mirrors-ssl.aliyuncs.com/busybox:1.36
+          env:
+            - name: POD_UID
+              valueFrom: {fieldRef: {fieldPath: metadata.uid}}
+          command: [sh, -ec]
+          args:
+            - |
+              test "$(cat /first/hello.txt)" = first-ossfs2-volume
+              test "$(cat /second/hello.txt)" = second-ossfs2-volume
+              printf '%s' "$POD_UID" > "/first/write-$POD_UID"
+              test "$(cat "/first/write-$POD_UID")" = "$POD_UID"
+              if touch /second/forbidden; then echo 'read-only mount accepted a write'; exit 1; fi
+              echo 'OSSFS2: two prefixes, write-back and read-only checks passed'
+              while true; do sleep 10; done
+          volumeMounts:
+            - {name: first, mountPath: /first, mountPropagation: HostToContainer}
+            - {name: second, mountPath: /second, readOnly: true, mountPropagation: HostToContainer}
+      volumes:
+        - name: state
+          hostPath: {path: /var/run/ossfs/file-volumes, type: DirectoryOrCreate}
+        - name: pod-csi-volumes
+          hostPath: {path: /var/lib/kubelet/pods, type: Directory}
+        - name: first
+          persistentVolumeClaim: {claimName: oss-first}
+        - name: second
+          persistentVolumeClaim: {claimName: oss-second, readOnly: true}

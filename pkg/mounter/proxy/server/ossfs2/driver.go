@@ -83,6 +83,18 @@ func (h *Driver) Mount(ctx context.Context, req *proxy.MountRequest, fuseFd int)
 
 func (h *Driver) Init() {}
 
+func (h *Driver) MountFile(ctx context.Context, req *proxy.MountRequest) (<-chan error, error) {
+	op := &mounter.MountOperation{Source: req.Source, Target: req.Target, FsType: req.Fstype, Options: req.Options, Secrets: req.Secrets, VolumeID: req.VolumeID}
+	if err := h.ExtendedMount(ctx, op); err != nil {
+		return nil, err
+	}
+	result, ok := op.MountResult.(server.FuseMountResult)
+	if !ok {
+		return nil, fmt.Errorf("missing OSSFS2 process supervision")
+	}
+	return result.ExitChan, nil
+}
+
 // ApplyOptionDefaults applies driver-specific option defaults to mount options.
 // Rules are divided into:
 //   - Append: add option only if not already present (user options take precedence)

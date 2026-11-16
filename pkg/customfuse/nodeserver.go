@@ -4,10 +4,14 @@ package customfuse
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/common"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/filevolume"
 	mounterutils "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils"
 	"google.golang.org/grpc/codes"
@@ -67,6 +71,20 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		return nil, status.Errorf(codes.InvalidArgument, "auth config error: %v", err)
 	}
 	authCfg := makeAuthConfig(opts)
+	if fileTransport(req.VolumeContext) {
+		if err := publishFile(req, opts); err != nil {
+			code := codes.InvalidArgument
+			var pathError *os.PathError
+			if errors.Is(err, errFileConfigurationChanged) {
+				code = codes.AlreadyExists
+			}
+			if errors.As(err, &pathError) {
+				code = codes.Internal
+			}
+			return nil, status.Errorf(code, "publish file configuration: %v", err)
+		}
+		return &csi.NodePublishVolumeResponse{}, nil
+	}
 
 	// Resolve mount-proxy socket path. ns.mountProxySock is set by csi-plugin
 	// (--customfuse-mount-proxy-sock flag) or csi-agent (NewCSIAgent), overriding PublishContext.
@@ -157,6 +175,20 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 	}
 	defer ns.locks.Release(req.VolumeId)
 
+	if uid, relative, err := fileTarget(req.TargetPath); err == nil {
+		path := filevolume.RequestPath(filepath.Join(fileRoot(), uid), req.VolumeId)
+		var d filevolume.Desired
+		if err := filevolume.ReadJSON(path, &d); err == nil {
+			if d.PodUID != uid || d.Mount.VolumeID != req.VolumeId || d.Mount.Target != relative {
+				return nil, status.Error(codes.FailedPrecondition, "file request does not match unpublish target")
+			}
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return nil, status.Errorf(codes.Internal, "remove file request: %v", err)
+			}
+		} else if !os.IsNotExist(err) {
+			return nil, status.Errorf(codes.Internal, "read file request: %v", err)
+		}
+	}
 	err := mountutils.CleanupMountPoint(req.TargetPath, ns.rawMounter, true)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to unmount target %q: %v", req.TargetPath, err)

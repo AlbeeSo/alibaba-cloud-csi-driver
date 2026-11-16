@@ -31,6 +31,7 @@ import (
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/features"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter"
 	ossfpm "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/fuse_pod_manager/oss"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/filevolume"
 
 	mounterutils "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils"
@@ -153,6 +154,9 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		return nil, err
 	}
 
+	if req.VolumeContext[filevolume.TransportKey] == "file" {
+		return ns.publishFileVolume(ctx, req)
+	}
 	// Rund 3.0 protocol: In rund 3.0 node server (non csi-agent), skip all parameter validation and exit directly
 	if features.FunctionalMutableFeatureGate.Enabled(features.RundCSIProtocol3) {
 		if ns.clientset != nil && utils.GetPodRunTime(ctx, req, ns.clientset) == utils.RundRunTimeTag {
@@ -441,6 +445,9 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 	}
 	if isDirectVolumePath(targetPath) {
 		return ns.unPublishDirectVolume(ctx, req)
+	}
+	if err := filevolume.Unpublish(filevolume.Root(ossFileRoot), req.VolumeId, targetPath); err != nil {
+		return nil, status.Errorf(codes.Internal, "remove file request: %v", err)
 	}
 
 	// fuseUnsafe=false: by the time NodeUnpublish runs, kubelet has already killed

@@ -48,6 +48,12 @@ func (cs *controllerServer) ControllerPublishVolume(ctx context.Context, req *cs
 	if err := precheckAuthConfig(opts); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "auth config error: %v", err)
 	}
+	if fileTransport(req.VolumeContext) {
+		if opts.AuthType != "" {
+			return nil, status.Error(codes.InvalidArgument, "file demo currently supports Secret passthrough authentication only")
+		}
+		return &csi.ControllerPublishVolumeResponse{}, nil
+	}
 	authCfg := makeAuthConfig(opts)
 	ptCfg := &fpm.PodTemplateConfig{
 		DnsPolicy:          opts.DnsPolicy,

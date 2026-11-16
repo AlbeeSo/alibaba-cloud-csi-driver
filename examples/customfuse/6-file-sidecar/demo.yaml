@@ -1,0 +1,157 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fuse-file-demo
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: fuse-file-demo-a
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadOnlyMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  csi:
+    driver: customfuseplugin.csi.alibabacloud.com
+    volumeHandle: fuse-file-demo-a
+    volumeAttributes:
+      mountTransport: file
+      source: first-volume
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: fuse-file-demo-b
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadOnlyMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  csi:
+    driver: customfuseplugin.csi.alibabacloud.com
+    volumeHandle: fuse-file-demo-b
+    volumeAttributes:
+      mountTransport: file
+      source: second-volume
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: first
+  namespace: fuse-file-demo
+spec:
+  accessModes: [ReadOnlyMany]
+  storageClassName: ""
+  volumeName: fuse-file-demo-a
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: second
+  namespace: fuse-file-demo
+spec:
+  accessModes: [ReadOnlyMany]
+  storageClassName: ""
+  volumeName: fuse-file-demo-b
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reader
+  namespace: fuse-file-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fuse-file-reader
+  template:
+    metadata:
+      labels:
+        app: fuse-file-reader
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 45
+      initContainers:
+        - name: mountproxy
+          # Build this image from the repository root; replace before applying.
+          image: FUSE_FILE_DEMO_IMAGE
+          restartPolicy: Always
+          securityContext:
+            privileged: true
+            runAsUser: 0
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+          args:
+            - --driver=customfuse
+            - --file-state-dir=/volume-state
+            - --file-target-dir=/pod-volumes
+            - --file-expected-volumes=fuse-file-demo-a,fuse-file-demo-b
+            - --timeout=30s
+          startupProbe:
+            exec:
+              command: [csi-mount-proxy-server, --file-check-ready, --file-state-dir=/volume-state, "--file-expected-volumes=fuse-file-demo-a,fuse-file-demo-b"]
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            exec:
+              command: [csi-mount-proxy-server, --file-check-ready, --file-state-dir=/volume-state, "--file-expected-volumes=fuse-file-demo-a,fuse-file-demo-b"]
+            periodSeconds: 2
+            timeoutSeconds: 2
+          volumeMounts:
+            - name: state
+              mountPath: /volume-state
+              subPathExpr: $(POD_UID)
+            - name: pod-csi-volumes
+              mountPath: /pod-volumes
+              subPathExpr: $(POD_UID)/volumes/kubernetes.io~csi
+              mountPropagation: Bidirectional
+      containers:
+        - name: reader
+          image: mirrors-ssl.aliyuncs.com/busybox:1.36
+          command: [sh, -ec]
+          args:
+            - |
+              test "$(cat /first/hello.txt)" = 'hello from first-volume'
+              test "$(cat /second/hello.txt)" = 'hello from second-volume'
+              echo 'Both FUSE volumes are available before the application starts'
+              while true; do sleep 10; done
+          volumeMounts:
+            - name: first
+              mountPath: /first
+              readOnly: true
+              mountPropagation: HostToContainer
+            - name: second
+              mountPath: /second
+              readOnly: true
+              mountPropagation: HostToContainer
+      volumes:
+        - name: state
+          hostPath:
+            path: /var/run/customfuse/file-volumes
+            type: DirectoryOrCreate
+        - name: pod-csi-volumes
+          hostPath:
+            # Adjust when the cluster uses a non-default kubelet root.
+            path: /var/lib/kubelet/pods
+            type: Directory
+        - name: first
+          persistentVolumeClaim:
+            claimName: first
+            readOnly: true
+        - name: second
+          persistentVolumeClaim:
+            claimName: second
+            readOnly: true
