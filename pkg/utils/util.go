@@ -384,12 +384,19 @@ func WithPodInfo(ctx context.Context, client kubernetes.Interface, req *csi.Node
 	pod, err := getPodFromK8s(ctx, client, req)
 	if err != nil {
 		klog.Errorf("WithPodInfo: failed to get pod: %v", err)
-		return ctx, nil
+		// Remember failures too: downstream routing must not retry the same GET
+		// within one NodePublish request. Kubelet owns retrying the request.
+		return context.WithValue(ctx, podInfo, podLookup{err: err}), nil
 	}
 	return context.WithValue(ctx, podInfo, pod), pod
 }
 
+type podLookup struct{ err error }
+
 func GetPodFromContextOrK8s(ctx context.Context, client kubernetes.Interface, req *csi.NodePublishVolumeRequest) (*v1.Pod, error) {
+	if lookup, ok := ctx.Value(podInfo).(podLookup); ok {
+		return nil, lookup.err
+	}
 	pod, ok := ctx.Value(podInfo).(*v1.Pod)
 	if ok {
 		return pod, nil

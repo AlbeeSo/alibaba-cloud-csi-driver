@@ -332,6 +332,9 @@ func main() {
 				driver = nasServers
 			case TypePluginOSS:
 				driver = oss.NewServers(endpoint, meta, serviceType, csiCfg, k8sVersion, *mountProxySock)
+				if serviceType&utils.Node != 0 {
+					wg.Go(func() { oss.RunFileStateGC(ctx) })
+				}
 			case TypePluginDISK:
 				driver = disk.NewServers(meta, ecsClient, endpoint, serviceType, csiCfg, *useLabeler)
 			case TypePluginCPFS:

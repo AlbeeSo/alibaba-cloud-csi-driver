@@ -1,0 +1,85 @@
+# Native file-coherence reproducer. No CSI, FUSE, mountproxy or credentials.
+# Replace TEST_NODE_NAME with one sandbox-capable test node for all three Pods.
+# Requires RuntimeClasses runc/rund and permission to use this dedicated HostPath.
+apiVersion: v1
+kind: Namespace
+metadata: {name: csi-file-coherence}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: coherence, namespace: csi-file-coherence}
+data: {value: v1}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: writer, namespace: csi-file-coherence}
+spec:
+  runtimeClassName: runc
+  nodeSelector: {kubernetes.io/hostname: TEST_NODE_NAME}
+  automountServiceAccountToken: false
+  containers:
+    - name: writer
+      image: mirrors-ssl.aliyuncs.com/busybox:1.36
+      command: [sh, -ec]
+      args:
+        - |
+          mkdir -p /probe/direct /probe/nested
+          printf v1 > /probe/direct/value
+          printf v1 > /probe/nested/value
+          sleep 86400
+      volumeMounts: [{name: probe, mountPath: /probe}]
+  volumes:
+    - name: probe
+      hostPath: {path: /var/run/csi-fuse-file-coherence-repro, type: DirectoryOrCreate}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: reader-runc, namespace: csi-file-coherence}
+spec:
+  runtimeClassName: runc
+  nodeSelector: {kubernetes.io/hostname: TEST_NODE_NAME}
+  automountServiceAccountToken: false
+  containers:
+    - name: reader
+      image: mirrors-ssl.aliyuncs.com/busybox:1.36
+      command: [sh, -c, sleep 86400]
+      volumeMounts:
+        - {name: direct, mountPath: /direct}
+        - {name: nested, mountPath: /nested, subPath: nested}
+        - {name: config, mountPath: /config}
+        - {name: projected, mountPath: /projected}
+  volumes:
+    - name: direct
+      hostPath: {path: /var/run/csi-fuse-file-coherence-repro/direct, type: Directory}
+    - name: nested
+      hostPath: {path: /var/run/csi-fuse-file-coherence-repro, type: Directory}
+    - name: config
+      configMap: {name: coherence}
+    - name: projected
+      projected: {sources: [{configMap: {name: coherence}}]}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: reader-rund, namespace: csi-file-coherence}
+spec:
+  runtimeClassName: rund
+  nodeSelector: {kubernetes.io/hostname: TEST_NODE_NAME}
+  automountServiceAccountToken: false
+  containers:
+    - name: reader
+      image: mirrors-ssl.aliyuncs.com/busybox:1.36
+      command: [sh, -c, sleep 86400]
+      volumeMounts:
+        - {name: direct, mountPath: /direct}
+        - {name: nested, mountPath: /nested, subPath: nested}
+        - {name: config, mountPath: /config}
+        - {name: projected, mountPath: /projected}
+  volumes:
+    - name: direct
+      hostPath: {path: /var/run/csi-fuse-file-coherence-repro/direct, type: Directory}
+    - name: nested
+      hostPath: {path: /var/run/csi-fuse-file-coherence-repro, type: Directory}
+    - name: config
+      configMap: {name: coherence}
+    - name: projected
+      projected: {sources: [{configMap: {name: coherence}}]}

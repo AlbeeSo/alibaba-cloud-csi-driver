@@ -31,6 +31,7 @@ import (
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/features"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter"
 	ossfpm "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/fuse_pod_manager/oss"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/filevolume"
 
 	mounterutils "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils"
@@ -54,6 +55,7 @@ type nodeServer struct {
 	common.GenericNodeServer
 	skipGlobalMount bool
 	mountProxySock  string
+	fileBindings    fileBindingCache
 	// kernelSupportsRecovery records whether this node's kernel has the
 	// fuse_flush_pq symbol (see utilsos.CheckKernelForRecovery). Probed once at
 	// startup. When false, opts.Recovery is forced off even if the feature gate
@@ -183,6 +185,18 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		return nil, status.Errorf(codes.InvalidArgument, "failed to determine runtime type: %v", err)
 	}
 	klog.V(4).InfoS("Determined runtime type", "runtimeType", runtimeType, "directAssigned", opts.DirectAssigned, "hasSocketPath", socketPath != "", "skipGlobalMount", ns.skipGlobalMount)
+
+	// Only kata-remote retains the historical COCO path. Resolve before the
+	// host probe: a guest PVC projection is not a completed FUSE mount.
+	if runtimeType == RuntimeTypeCOCO {
+		pod, err := ns.podForDirectPublish(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		if pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != "kata-remote" {
+			return ns.publishFileVolume(ctx, req, opts, pod)
+		}
+	}
 
 	// Fold per-pod readOnly into opts.ReadOnly. RunC ignores it (shared
 	// attachPath; kubelet/CRI enforces per-pod ro at container bind).
@@ -442,6 +456,14 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 	if isDirectVolumePath(targetPath) {
 		return ns.unPublishDirectVolume(ctx, req)
 	}
+	if err := filevolume.Unpublish(filevolume.Root(ossFileRoot), req.VolumeId, targetPath); err != nil {
+		// Kubelet only unpublishes after stopping Pod containers/sandboxes.
+		// A stopped sidecar cannot ACK. Retain the diagnostic distinction, but
+		// do not block the standard runtime -> CSI teardown on a guest reply.
+		// The CO request, not mutable guest-shared JSON, authorizes this exact
+		// target. Corrupt controls must not redirect cleanup or deadlock it.
+		klog.InfoS("Guest cleanup acknowledgment unavailable; continuing kubelet-requested teardown", "target", targetPath, "error", err)
+	}
 
 	// fuseUnsafe=false: by the time NodeUnpublish runs, kubelet has already killed
 	// the pod's containers, closing all fds to the FUSE mount — connection is dead.
@@ -451,6 +473,9 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 	err = mounterutils.SafeCleanupFuseMount(targetPath, ns.rawMounter, false)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to unmount target %q: %v", targetPath, err)
+	}
+	if err := filevolume.Retire(filevolume.Root(ossFileRoot), targetPath); err != nil {
+		return nil, status.Errorf(codes.Internal, "retire file controls: %v", err)
 	}
 	klog.Infof("NodeUnpublishVolume: Umount OSS Successful: %s", targetPath)
 

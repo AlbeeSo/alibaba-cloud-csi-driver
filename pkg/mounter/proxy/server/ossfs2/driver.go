@@ -83,6 +83,10 @@ func (h *Driver) Mount(ctx context.Context, req *proxy.MountRequest, fuseFd int)
 
 func (h *Driver) Init() {}
 
+func (h *Driver) MountFile(ctx context.Context, req *proxy.MountRequest, ready func(string) (bool, error)) (<-chan error, error) {
+	return server.MountFile(ctx, h.Mounter, req, ready)
+}
+
 // ApplyOptionDefaults applies driver-specific option defaults to mount options.
 // Rules are divided into:
 //   - Append: add option only if not already present (user options take precedence)

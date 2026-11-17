@@ -12,14 +12,13 @@ import (
 	"syscall"
 	"time"
 
-	"golang.org/x/sys/unix"
-
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/interceptors"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/server"
 	mounterutils "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils/agentidentity"
+	"golang.org/x/sys/unix"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 	"k8s.io/mount-utils"
@@ -85,6 +84,10 @@ func (h *Driver) Mount(ctx context.Context, req *proxy.MountRequest, fuseFd int)
 }
 
 func (h *Driver) Init() {}
+
+func (h *Driver) MountFile(ctx context.Context, req *proxy.MountRequest, ready func(string) (bool, error)) (<-chan error, error) {
+	return server.MountFile(ctx, h.Mounter, req, ready)
+}
 
 // ApplyOptionDefaults applies driver-specific option defaults to mount options.
 // Rules are divided into:
@@ -220,6 +223,11 @@ func (m *extendedMounter) ExtendedMount(ctx context.Context, op *mounter.MountOp
 			return false, fmt.Errorf("ossfs exited")
 		default:
 			notMnt, err := m.IsLikelyNotMountPoint(target)
+			if op.MountReady != nil {
+				var ready bool
+				ready, err = op.MountReady(target)
+				notMnt = !ready
+			}
 			if err != nil {
 				logger.Error(err, "check mountpoint", "mountpoint", target)
 				return false, nil

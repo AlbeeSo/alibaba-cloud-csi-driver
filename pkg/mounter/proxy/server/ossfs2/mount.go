@@ -16,6 +16,7 @@ import (
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/server"
 	mounterutils "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 )
 
@@ -113,7 +114,18 @@ func (m *extendedMounter) startAndWaitReady(
 		err = m.waitForFdPassingMountReady(ctx, op.Target, op.FuseFd, exited)
 	} else {
 		klog.InfoS("Waiting for legacy mount readiness", "target", op.Target, "pid", cmd.Process.Pid)
-		err = m.waitForLegacyMountReady(ctx, op.Target, exited)
+		if op.MountReady == nil {
+			err = m.waitForLegacyMountReady(ctx, op.Target, exited)
+		} else {
+			err = wait.PollUntilContextCancel(ctx, 100*time.Millisecond, true, func(context.Context) (bool, error) {
+				select {
+				case err := <-exited:
+					return false, ossfs2ExitError(err)
+				default:
+					return op.MountReady(op.Target)
+				}
+			})
+		}
 	}
 
 	if err != nil {
