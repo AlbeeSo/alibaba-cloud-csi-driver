@@ -18,6 +18,69 @@
 
 非目标：改变 Legacy 默认路径；默认切换到 virtiofs；接管原 csi-agent；透明恢复业务已有 FUSE 连接；在第一阶段实现 runc sidecar RPC。
 
+### 1.1 阻塞项一：固定的是命令，还是完整 sidecar spec
+
+当前实验实现只能确认启动参数和探针不随卷集合变化，不能把它描述为完整 sidecar 配置不变：
+
+| 配置部分 | 当前效果 |
+| --- | --- |
+| 启动命令和探针 | 固定，预期卷由 CSI manifest 提供 |
+| PV 中的 source、挂载选项、凭据 | 请求自动携带，无需复制到 sidecar args；配置变更仍可能要求重建 Pod，不是热更新承诺 |
+| sidecar.volumeMounts | 每个 PVC 仍需一项，目标路径含 PV 名；手动用户增加卷时仍须调整 |
+| 镜像与资源 | 镜像必须已有对应客户端；不能承诺固定资源配置支持任意多卷 |
+
+开启 webhook 后，用户无需维护 sidecar 段，但最终生成的 volumeMounts 仍随 PVC 集合变化。关闭 webhook 后，当前方案还不满足“整个 sidecar container 段完全固定”。
+
+要满足严格的固定 spec，需要一个固定挂载入口，使该 Pod 所有选中目标在其下可见，并与业务 PVC 的视图一致。RunD 只提供配置目录 bind mount 还不够，还需目标卷视图及传播契约。原实验中“额外挂 kubelet CSI 父目录 HostPath”的方案已出现 guest alias 不一致，不能重新当成已验证方案。
+
+因此该项按两级验收：固定 args/probe 已有代码；无 webhook 的固定完整 sidecar spec 仍是待解决的设计问题，不能因自动 manifest 已实现而关闭。
+
+### 1.2 阻塞项二：清理完成与数据安全不是同一个保证
+
+**当前不能保证挂载成功、失败、force delete、进程强杀、guest/节点故障等所有情况下均无遗留。Kubernetes 1.33 不提供这样的保证。** 原生 sidecar 改进停止顺序，但主容器可能耗尽宽限期，使 sidecar 来不及优雅清理；force delete 也不等待节点确认进程终止。见 [1.33 sidecar 终止说明](https://v1-33.docs.kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/)、[kubectl 强删语义](https://kubernetes.io/docs/reference/kubectl/generated/kubectl_delete/)。
+
+需要先分开两个目录和两种风险：
+
+- 配置 HostPath 只放 manifest、请求和状态，不能承载业务 FUSE 挂载或业务数据。
+- 业务目标路径若仍能到达一个存活、可写的远端文件系统，外部递归删除其父目录就可能变成远端 unlink；Pod 对象消失、探针失败或某个 namespace 中已看不到挂载都不是充分保护。
+
+runc 的 Bidirectional 传播会涉及 host 可见挂载；rund 是否把 FUSE 限制在 guest 内，需验证实际 namespace/export 图。此前 E2E 的检查是 node-plugin 可见的挂载表、guest 状态与优雅终止，不是覆盖所有 namespace 的强删清理证明。若要让 host 上任意特权递归删除都无法触及远端，必须通过实际隔离保证 host 无此访问路径；一旦远端挂载对 host 可达，CSI 无法约束所有外部 root 操作。
+
+1.33 文档要求容器自行卸载其创建的传播挂载，并提示 mount propagation 并非对所有卷类型都一致，建议使用 hostPath 或内存 emptyDir。当前使用 CSI PVC 传播的方案必须按具体 runtime 验证，不能仅凭集群版本给出通用保证。见 [1.33 mount propagation](https://v1-33.docs.kubernetes.io/docs/concepts/storage/volumes/#mount-propagation)。
+
+当前实现还存在以下缺口：
+
+1. runner 的显式卸载依赖进程能执行收尾；SIGKILL 不会运行 Go defer。
+2. EBUSY 时使用 MNT_DETACH，随后写 Unmounted。该结果只能说明相应卸载操作已处理，不能证明全部别名、namespace 或已有引用都消失；应区分“已分离”和“已验证完成”。见 [Linux umount 语义](https://man7.org/linux/man-pages/man2/umount.2.html)。
+3. NodeUnpublish 删除请求并清理自身可见目标，没有等待和验证 guest 卸载完成，也没有独立的异常挂载回收器。
+4. 挂载失败原因主要保存在状态文件与日志中，探针通常只显示 phase；强杀后依靠 heartbeat 失效，没有稳定的 Pod 外部失败/清理记录及完整 Events/诊断闭环。
+
+这里不是说现有代码已经执行了危险递归删除：当前文件取消只删除指定请求/描述文件，mount-utils 目标清理使用单路径删除。问题在于，尚未证明遗留挂载不会被其他清理流程遇到，更不能把一次成功的状态回写当成后续目录 GC 的授权。
+
+### 1.3 第一阶段必须补齐的安全契约
+
+以下是设计要求，尚未实现，不能用普通 E2E 通过替代：
+
+```text
+请求取消 / Pod 结束
+→ 记录 CleanupRequested，阻止旧会话继续执行或重新挂载
+→ 活跃 consumer 显式卸载并报告结果
+→ consumer 不可达时，由独立生命周期管理方接管
+→ 确认对应 runtime/guest/进程状态，并验证自身拥有的挂载及别名
+→ 已验证清理完成：才允许删除本地空目标与配置元数据
+→ 不能确认：CleanupPending / CleanupFailed / CleanupUnknown，保留隔离记录并报警
+```
+
+- 外部管理方可由 DS 与 runtime 能力协作，但不能假定 DS 能进入任意 RunD guest。guest 不可达时需要 runtime 确认销毁/隔离，不能只依据 API Pod NotFound；没有这种能力就必须保留 Unknown，而不是伪造 Cleaned。
+- 持久化所有权需关联 Pod UID、卷、session、runtime/sandbox 标识及挂载身份，不能只凭 PID、路径前缀或当前 feature gate 判断。
+- 清理不得递归遍历可能到达远端文件系统的目标树；不确定时保留本地目录，不能通过递归删除“回收”未知挂载。仅清理明确属于自己的本地元数据，以及验证后的空目录。
+- 状态必须区别挂载结果、卸载请求、lazy detach、清理失败和清理未知。Pod 消失后仍应能按 UID/卷诊断，不只依赖已消失 Pod 的探针输出。
+- DS/runtime 恢复后重试异常清理；不能承诺在节点永久不可达时立刻回收。目标是可观测的最终收敛与安全保留，不是任意故障下即时无残留。
+
+新环境验收需覆盖：成功后删除、挂载中取消、失败后部分挂载、busy mount、sidecar 强杀、DS 重启、Pod 强删、guest/节点失联及恢复。数据安全验证使用隔离测试数据、远端删除审计和 sentinel；既看自身注册范围内的挂载，也检查真实 host/guest/runtime 视图。不能只测目录不存在或 Unmounted 字符串。
+
+在固定目标视图、异常清理所有者和上述安全契约明确前，第一阶段应保持实验状态，不能宣称已解决生产环境的挂载泄漏与误删风险。runc 换成 gRPC 也不会自动解决这些数据面生命周期问题。
+
 ## 2. 默认行为基线
 
 ### 2.1 不能把 rund 的默认行为写成 virtiofs
