@@ -72,6 +72,8 @@ func ossFileTestClient() *fake.Clientset {
 	return fake.NewSimpleClientset(
 		&core.Node{ObjectMeta: metav1.ObjectMeta{Name: "node", Labels: map[string]string{filevolume.RuntimeLabel: filevolume.ACKSandboxRuntime}}},
 		&node.RuntimeClass{ObjectMeta: metav1.ObjectMeta{Name: "business-guest"}, Handler: "runv", Scheduling: &node.Scheduling{NodeSelector: map[string]string{filevolume.RuntimeLabel: filevolume.ACKSandboxRuntime}}},
-		&core.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-a", Namespace: "test", UID: "pod-a"}, Spec: core.PodSpec{NodeName: "node", RuntimeClassName: ptr.To("business-guest")}},
+		&core.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: "test", UID: "claim-uid"}, Spec: core.PersistentVolumeClaimSpec{VolumeName: "pv"}},
+		&core.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv"}, Spec: core.PersistentVolumeSpec{ClaimRef: &core.ObjectReference{Name: "claim", Namespace: "test", UID: "claim-uid"}, PersistentVolumeSource: core.PersistentVolumeSource{CSI: &core.CSIPersistentVolumeSource{Driver: filevolume.OSSDriver, VolumeHandle: "oss-file"}}}},
+		&core.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-a", Namespace: "test", UID: "pod-a"}, Spec: core.PodSpec{NodeName: "node", RuntimeClassName: ptr.To("business-guest"), Volumes: []core.Volume{{Name: "data", VolumeSource: core.VolumeSource{PersistentVolumeClaim: &core.PersistentVolumeClaimVolumeSource{ClaimName: "claim"}}}}}},
 	)
 }

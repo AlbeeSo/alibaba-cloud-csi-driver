@@ -98,19 +98,16 @@ spec:
                 fieldRef:
                   fieldPath: metadata.uid
           args:
-            - --file-state-dir=/volume-state
-            - --file-target-dir=/pod-volumes
-            - --file-expected-volumes=fuse-file-demo-a,fuse-file-demo-b
-            - --timeout=30s
+            - --file-mode
           startupProbe:
             exec:
-              command: [csi-mount-proxy-server, --file-check-ready, --file-state-dir=/volume-state, "--file-expected-volumes=fuse-file-demo-a,fuse-file-demo-b"]
+              command: [csi-mount-proxy-server, --file-check-ready]
             periodSeconds: 2
             timeoutSeconds: 2
             failureThreshold: 60
           readinessProbe:
             exec:
-              command: [csi-mount-proxy-server, --file-check-ready, --file-state-dir=/volume-state, "--file-expected-volumes=fuse-file-demo-a,fuse-file-demo-b"]
+              command: [csi-mount-proxy-server, --file-check-ready]
             periodSeconds: 2
             timeoutSeconds: 2
           volumeMounts:

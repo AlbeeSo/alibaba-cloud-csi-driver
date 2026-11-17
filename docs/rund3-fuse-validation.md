@@ -5,6 +5,10 @@ change that enables all linked file-capable drivers without `--driver` passed
 local Linux regression tests with the race detector; its E2E is deferred to a new test
 environment. No cluster was created or changed for that adjustment.
 
+The fixed `--file-mode` startup/default probe paths and CSI-generated volume
+inventory are later changes, checked with targeted local tests only. They have
+not been exercised in the recorded RunD E2E environment.
+
 Validated on 2026-11-16 with Kubernetes 1.33.3-aliyun.1 and ACK security sandbox
 2.2.4, containerd 1.6.28. RuntimeClass `runv` uses handler `runv`; the node's
 handler resolves to `io.containerd.rund.v2`, running `containerd-shim-rund-v2`.

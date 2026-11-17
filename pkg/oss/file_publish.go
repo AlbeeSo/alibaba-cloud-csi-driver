@@ -53,6 +53,9 @@ func (ns *nodeServer) publishFileVolume(ctx context.Context, req *csi.NodePublis
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	options = manager.AddDefaultMountOptions(options, flags)
+	if err := filevolume.PublishPodManifest(ctx, ns.clientset, req, filevolume.OSSDriver, filevolume.Root(ossFileRoot)); err != nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "publish Pod volume manifest: %v", err)
+	}
 	err = filevolume.Publish(filevolume.Root(ossFileRoot), req.VolumeContext["csi.storage.k8s.io/pod.uid"], req.VolumeId, req.TargetPath, proxy.MountRequest{
 		Fstype: opts.FuseType, Source: fmt.Sprintf("%s:%s", opts.MountBucket(), opts.Path), Options: options, Secrets: auth.Secrets,
 	})

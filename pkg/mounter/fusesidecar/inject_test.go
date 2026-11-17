@@ -62,7 +62,11 @@ func TestMixedDriversAndAdmissionRoundTrip(t *testing.T) {
 			require.False(t, strings.HasPrefix(arg, "--driver"), "file mode selects the driver from each request")
 		}
 	}
-	require.Contains(t, out.Spec.InitContainers[0].Args, "--file-expected-volumes=oss-a,oss-b")
+	for _, side := range out.Spec.InitContainers[:2] {
+		require.Equal(t, []string{"--file-mode"}, side.Args)
+		require.Equal(t, []string{"csi-mount-proxy-server", "--file-check-ready"}, side.StartupProbe.Exec.Command)
+		require.Equal(t, side.StartupProbe.Exec.Command, side.ReadinessProbe.Exec.Command)
+	}
 	require.Equal(t, "$(POD_UID)", out.Spec.InitContainers[0].VolumeMounts[0].SubPathExpr)
 	require.Equal(t, core.MountPropagationBidirectional, *out.Spec.InitContainers[0].VolumeMounts[1].MountPropagation)
 	require.Equal(t, "oss-a", out.Spec.InitContainers[0].VolumeMounts[1].Name)

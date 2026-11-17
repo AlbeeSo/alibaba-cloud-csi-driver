@@ -37,13 +37,15 @@ var (
 	fileStateDir, fileTargetDir, filePodUID string
 	fileExpected                            []string
 	fileCheckReady                          bool
+	fileMode                                bool
 )
 
 func main() {
-	flag.StringVar(&fileStateDir, "file-state-dir", "", "experimental Pod-scoped desired/status directory; enables file mode instead of socket mode")
-	flag.StringVar(&fileTargetDir, "file-target-dir", "/pod-volumes", "this Pod's CSI volume directory inside the sidecar")
+	flag.BoolVar(&fileMode, "file-mode", false, "run Pod-scoped file transport instead of socket mode")
+	flag.StringVar(&fileStateDir, "file-state-dir", filevolume.DefaultStateDir, "Pod-scoped desired/status directory; explicitly setting this also enables file mode")
+	flag.StringVar(&fileTargetDir, "file-target-dir", filevolume.DefaultTargetDir, "this Pod's CSI volume directory inside the sidecar")
 	flag.StringVar(&filePodUID, "file-pod-uid", os.Getenv("POD_UID"), "Pod UID from Downward API")
-	flag.StringSliceVar(&fileExpected, "file-expected-volumes", nil, "required volume handles; all must mount before readiness succeeds")
+	flag.StringSliceVar(&fileExpected, "file-expected-volumes", nil, "optional legacy override; by default load the CSI-published Pod volume manifest")
 	flag.BoolVar(&fileCheckReady, "file-check-ready", false, "check file statuses and exit (startup/readiness probe)")
 	flag.StringVar(&socketPath, "socket", "/var/run/csi/mounter.sock", "socket path")
 	flag.StringSliceVar(&drivers, "driver", nil, "socket-mode drivers to enable (e.g. 'ossfs,alinas'); file mode automatically enables all file-capable drivers")
@@ -62,7 +64,7 @@ func main() {
 		}
 		return
 	}
-	if fileStateDir != "" {
+	if fileMode || flag.CommandLine.Changed("file-state-dir") {
 		if err := runFileMode(); err != nil {
 			klog.ErrorS(err, "File mode stopped")
 			os.Exit(1)

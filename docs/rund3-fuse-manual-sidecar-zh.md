@@ -25,7 +25,7 @@ ACK 安全沙箱使用 `runtimeClassName: runv`。也支持 handler 为 `runv`�
 | first | oss-first | ossfs2-file-a | ossfs2-file-a |
 | second | oss-second | ossfs2-file-b | ossfs2-file-b |
 
-下面例子恰好让 PV 名与 volumeHandle 相同，实际可以不同：**sidecar 的目标路径使用 PV 名，`--file-expected-volumes` 使用 volumeHandle，`volumes` 引用 PVC 名。** 可以用 `kubectl get pvc` 查看绑定关系，再用 `kubectl get pv <PV名> -o yaml` 查看 handle。
+下面例子恰好让 PV 名与 volumeHandle 相同，实际可以不同：**sidecar 的目标路径使用 PV 名，`volumes` 引用 PVC 名；完整 volumeHandle 集合由 CSI 从 Pod 的 PVC/PV 自动获取，不需要填写启动或探针参数。** 可以用 `kubectl get pvc` 查看绑定关系。
 
 ```yaml
 apiVersion: apps/v1
@@ -67,17 +67,12 @@ spec:
               valueFrom:
                 fieldRef: {fieldPath: metadata.uid}
           args:
-            - --file-state-dir=/volume-state
-            - --file-target-dir=/pod-volumes
-            - --file-expected-volumes=ossfs2-file-a,ossfs2-file-b
-            - --timeout=30s
+            - --file-mode
           startupProbe:
             exec:
               command:
                 - csi-mount-proxy-server
                 - --file-check-ready
-                - --file-state-dir=/volume-state
-                - --file-expected-volumes=ossfs2-file-a,ossfs2-file-b
             periodSeconds: 2
             timeoutSeconds: 2
             failureThreshold: 60
@@ -86,8 +81,6 @@ spec:
               command:
                 - csi-mount-proxy-server
                 - --file-check-ready
-                - --file-state-dir=/volume-state
-                - --file-expected-volumes=ossfs2-file-a,ossfs2-file-b
             periodSeconds: 2
             timeoutSeconds: 2
             failureThreshold: 3
@@ -134,8 +127,8 @@ spec:
 
 - `POD_UID` 由 Downward API 提供，配置目录使用 `subPathExpr`。不要手写 UID，不要把其他 Pod 的配置一起挂进容器。
 - `/var/run/ossfs/file-volumes` 必须与 host CSI 的 `CSI_FUSE_FILE_ROOT` 一致。sidecar 需要读 desired，也需要写 status/session，因此不能把整个 state 挂成只读。
-- `--file-state-dir` 与 state 的 mountPath 一致；`--file-target-dir` 加 `<PV名>/mount` 与 sidecar 的 PVC mountPath 一致。
-- runner 和两个探针的预期 volumeHandle 集合相同，包含该 sidecar 管理的全部卷。增加卷时同步修改参数、探针、sidecar volumeMounts 和业务 volumeMounts/volumes。
+- state 默认挂到 `/volume-state`，目标根目录默认 `/pod-volumes`，无须填写目录参数。CSI 在 state 中自动发布 `manifest.json`，完整列出该 Pod、该 CSI driver 的预期卷；sidecar 和探针读取同一个清单。
+- 增加卷时只需调整 PVC、sidecar volumeMounts 和业务 volumeMounts/volumes，启动 args 和探针命令不变。不能用扫描已收到的 desired 文件替代完整清单，否则可能漏掉未成功发布的卷。
 - sidecar 和业务引用相同的 Pod PVC volume，分别使用 Bidirectional 和 HostToContainer。不要另挂 kubelet CSI 目录的 HostPath 别名；真实 RunD 测试中该别名不能传播到业务 PVC。
 - 不要省略 startupProbe，也不要把 sidecar 移到普通 `containers` 中。前者保证首次挂载成功后才启动业务，原生 sidecar 保证 Job 完成与停止顺序。
 - 业务只读卷应显式配置 `readOnly: true`。当前不支持业务 FUSE 卷的 subPath/subPathExpr；state 的 UID subPathExpr 是另一回事。
@@ -154,6 +147,8 @@ spec:
 文件模式自动启用所有已编入 mountproxy、支持文件挂载的驱动，无需配置 `--driver`；每卷 JSON 的 `MountProxy.Fstype` 决定实际分派。旧文件模式配置中的该参数不再限制驱动集合，socket 模式仍保留原来的显式选择。注册驱动不代表镜像里包含任意客户端程序，仍须选择具备所需 ossfs/ossfs2 或自定义入口的镜像。
 
 省略参数需要使用包含本次调整的 mountproxy 镜像；旧版本仍需显式选择驱动。升级 webhook 时也要同步更新其 profile 镜像，自定义镜像里的 mountproxy binary 同样需要更新。
+
+自动卷清单需要同步升级 host CSI 和 mountproxy。固定配置为 `args: [--file-mode]`（可选增加固定超时），startup/readiness 命令为 `[csi-mount-proxy-server, --file-check-ready]`。手动注入和 webhook 注入使用同一套 CSI 清单，不需要额外 ConfigMap、API token 或人为维护卷列表。
 
 customfuse 完整例子见 [demo.yaml](../examples/customfuse/6-file-sidecar/demo.yaml) 和 [镜像说明](../examples/customfuse/6-file-sidecar/README.md)。同一个 Pod 同时使用 OSS 和 customfuse 时，配置两个原生 sidecar，各用独立的 state volume、预期卷集合和 PVC mount；都通过 startupProbe 后才启动业务。
 

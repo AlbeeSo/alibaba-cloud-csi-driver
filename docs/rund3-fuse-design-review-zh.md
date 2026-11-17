@@ -1,6 +1,6 @@
 # RunD 3 FUSE 方案设计、生命周期与 Review 指南
 
-本文对应 [PR #12](https://github.com/AlbeeSo/alibaba-cloud-csi-driver/pull/12)，功能代码基于 `8ab92f00e`，环境验证于 2026-11-16 完成，文档整理于 2026-11-17。
+本文对应 [PR #12](https://github.com/AlbeeSo/alibaba-cloud-csi-driver/pull/12)，E2E 基线为 `8ab92f00e`，环境验证于 2026-11-16 完成，文档整理于 2026-11-17。后续驱动自动启用、固定启动配置和 CSI 自动卷清单仅进行本地代码测试，尚未在新环境 E2E。
 
 当前方案是在宿主机 CSI 中发布 Pod 隔离的挂载请求，由业务 Pod 的原生 sidecar 在 RunD guest 内执行 FUSE 挂载。ossfs、ossfs2、customfuse 复用同一文件协议、状态模型和生命周期。webhook 只负责自动构造 sidecar，可以关闭或逐 Pod 绕过。
 
@@ -73,7 +73,7 @@ sidecar:
   /pod-volumes/<PV-name>/mount          # 与业务共享同一个 PVC volume
 ```
 
-sidecar 的 PVC mount 使用 Bidirectional，业务 mount 使用 HostToContainer，保留业务只读标志。预期 volume handle 列表显式传入 runner；多出来的请求文件不会被执行。隔离限制了正常进程可见的配置范围，但 privileged sidecar 本身是可信组件，不构成抵御恶意特权租户的安全边界。
+sidecar 的 PVC mount 使用 Bidirectional，业务 mount 使用 HostToContainer，保留业务只读标志。CSI 根据真实 Pod 的 PVC/PV 自动生成每个 driver 的完整 `manifest.json`，runner 和探针使用该清单，不需要用户填写预期卷参数；多出来的请求文件不会被执行。隔离限制了正常进程可见的配置范围，但 privileged sidecar 本身是可信组件，不构成抵御恶意特权租户的安全边界。
 
 ### 2.3 JSON 和 mountproxy 语义
 
@@ -98,7 +98,7 @@ sequenceDiagram
     participant B as 业务容器
     A->>K: 注入原生 sidecar、共享 PVC、UID subPathExpr 和探针
     K->>C: NodePublish，携带 PodInfo
-    C->>C: 身份校验，发布 vol_attr.json 和 desired JSON
+    C->>C: 身份与绑定校验，发布完整 manifest、vol_attr.json 和 desired JSON
     C-->>K: 成功：请求已可靠发布
     K->>M: 启动首个原生 sidecar
     M->>M: 新 session，每个预期卷启动一个 worker

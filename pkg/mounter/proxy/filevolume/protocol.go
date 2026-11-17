@@ -156,7 +156,11 @@ func StatusPath(root, volumeID string) string {
 // fresh heartbeats. A stale status from a previous sidecar cannot open the gate.
 func CheckReady(root, uid string, expected []string, now time.Time) error {
 	if len(expected) == 0 {
-		return fmt.Errorf("expected volumes must not be empty")
+		var err error
+		expected, err = ReadExpected(root, uid)
+		if err != nil {
+			return fmt.Errorf("read expected volume manifest: %w", err)
+		}
 	}
 	var session string
 	if err := ReadJSON(filepath.Join(root, "session.json"), &session); err != nil || session == "" {

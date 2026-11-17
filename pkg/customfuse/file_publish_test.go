@@ -16,6 +16,8 @@ import (
 	core "k8s.io/api/core/v1"
 	node "k8s.io/api/node/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	gatetesting "k8s.io/component-base/featuregate/testing"
 	"k8s.io/mount-utils"
@@ -69,11 +71,32 @@ func TestControllerFilePublishDoesNotCreateFusePod(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func fileTestClient() *fake.Clientset {
-	return fake.NewSimpleClientset(
+func fileTestClient(ids ...string) *fake.Clientset {
+	if len(ids) == 0 {
+		ids = []string{"shared-volume"}
+	}
+	objects := []runtime.Object{
 		&core.Node{ObjectMeta: metav1.ObjectMeta{Name: "node", Labels: map[string]string{filevolume.RuntimeLabel: filevolume.ACKSandboxRuntime}}},
 		&node.RuntimeClass{ObjectMeta: metav1.ObjectMeta{Name: "business-guest"}, Handler: "runv", Scheduling: &node.Scheduling{NodeSelector: map[string]string{filevolume.RuntimeLabel: filevolume.ACKSandboxRuntime}}},
-		&core.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-a", Namespace: "test", UID: "pod-a"}, Spec: core.PodSpec{NodeName: "node", RuntimeClassName: ptr.To("business-guest")}},
-		&core.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-b", Namespace: "test", UID: "pod-b"}, Spec: core.PodSpec{NodeName: "node", RuntimeClassName: ptr.To("business-guest")}},
-	)
+	}
+	var volumes []core.Volume
+	for _, id := range ids {
+		pv := id
+		if id == "shared-volume" {
+			pv = "pv"
+		}
+		claim := "claim-" + id
+		objects = append(objects,
+			&core.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: claim, Namespace: "test", UID: types.UID(claim)}, Spec: core.PersistentVolumeClaimSpec{VolumeName: pv}},
+			&core.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: pv}, Spec: core.PersistentVolumeSpec{ClaimRef: &core.ObjectReference{Name: claim, Namespace: "test", UID: types.UID(claim)}, PersistentVolumeSource: core.PersistentVolumeSource{CSI: &core.CSIPersistentVolumeSource{Driver: filevolume.CustomDriver, VolumeHandle: id}}}})
+		volumes = append(volumes, core.Volume{Name: id, VolumeSource: core.VolumeSource{PersistentVolumeClaim: &core.PersistentVolumeClaimVolumeSource{ClaimName: claim}}})
+	}
+	for _, name := range []string{"pod-a", "pod-b"} {
+		vs := volumes
+		if name == "pod-b" {
+			vs = volumes[:1]
+		}
+		objects = append(objects, &core.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "test", UID: types.UID(name)}, Spec: core.PodSpec{NodeName: "node", RuntimeClassName: ptr.To("business-guest"), Volumes: vs}})
+	}
+	return fake.NewSimpleClientset(objects...)
 }

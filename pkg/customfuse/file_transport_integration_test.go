@@ -74,14 +74,14 @@ type fileFixture struct {
 	backend        integrationFileBackend
 }
 
-func newFileFixture(t *testing.T) *fileFixture {
+func newFileFixture(t *testing.T, ids ...string) *fileFixture {
 	t.Helper()
 	gatetesting.SetFeatureGateDuringTest(t, features.FunctionalMutableFeatureGate, features.RundCSIProtocol3, true)
 	raw := mount.NewFakeMounter(nil)
 	d := &integrationFileDriver{raw: raw, exits: map[string]chan error{}}
 	server.RegisterDriver(d)
 	server.Init([]string{d.Name()})
-	f := &fileFixture{t: t, state: t.TempDir(), kubelet: t.TempDir(), driver: d, node: &nodeServer{locks: utils.NewVolumeLocks(), rawMounter: raw, clientset: fileTestClient()}, backend: integrationFileBackend{FileBackend: server.FileBackend{Mounter: raw}, raw: raw}}
+	f := &fileFixture{t: t, state: t.TempDir(), kubelet: t.TempDir(), driver: d, node: &nodeServer{locks: utils.NewVolumeLocks(), rawMounter: raw, clientset: fileTestClient(ids...)}, backend: integrationFileBackend{FileBackend: server.FileBackend{Mounter: raw}, raw: raw}}
 	t.Setenv("CSI_FUSE_FILE_ROOT", f.state)
 	return f
 }
@@ -128,15 +128,15 @@ func (f *fileFixture) status(uid, id, phase string) bool {
 }
 
 func TestFileTransportIntegrationMultiPodLifecycle(t *testing.T) {
-	f := newFileFixture(t)
+	f := newFileFixture(t, "shared", "second")
 	first := f.publish("pod-a", "shared", "first-source")
-	stopA := f.run("pod-a", "shared", "second")
+	stopA := f.run("pod-a")
 	require.Eventually(t, func() bool { return f.status("pod-a", "shared", "Mounted") }, 3*time.Second, 10*time.Millisecond)
-	require.False(t, f.ready("pod-a", "shared", "second"), "a missing second publish must keep the application blocked")
+	require.False(t, f.ready("pod-a"), "the automatically discovered missing second publish must keep the application blocked")
 	f.publish("pod-a", "second", "second-source")
-	require.Eventually(t, func() bool { return f.ready("pod-a", "shared", "second") }, 3*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return f.ready("pod-a") }, 3*time.Second, 10*time.Millisecond)
 	other := f.publish("pod-b", "shared", "other-pod-source")
-	stopB := f.run("pod-b", "shared")
+	stopB := f.run("pod-b")
 	require.Eventually(t, func() bool { return f.ready("pod-b", "shared") }, 3*time.Second, 10*time.Millisecond)
 	// Repeated CSI publish must not rewrite generation or trigger another mount.
 	_, err := f.node.NodePublishVolume(context.Background(), first)
@@ -163,7 +163,7 @@ func TestFileTransportIntegrationMultiPodLifecycle(t *testing.T) {
 }
 
 func TestFileTransportIntegrationFailuresAndRestart(t *testing.T) {
-	f := newFileFixture(t)
+	f := newFileFixture(t, "good", "bad", "slow")
 	f.publish("pod-a", "good", "valid")
 	f.publish("pod-a", "bad", "invalid-endpoint")
 	f.publish("pod-a", "slow", "blocked")
@@ -198,7 +198,7 @@ func TestFileTransportIntegrationFailuresAndRestart(t *testing.T) {
 }
 
 func TestFileTransportIntegrationProcessExit(t *testing.T) {
-	f := newFileFixture(t)
+	f := newFileFixture(t, "one")
 	req := f.publish("pod-a", "one", "valid")
 	stop := f.run("pod-a", "one")
 	require.Eventually(t, func() bool { return f.ready("pod-a", "one") }, 3*time.Second, 10*time.Millisecond)

@@ -81,6 +81,9 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		if !sidecar {
 			return &csi.NodePublishVolumeResponse{}, nil
 		}
+		if err := filevolume.PublishPodManifest(ctx, ns.clientset, req, filevolume.CustomDriver, fileRoot()); err != nil {
+			return nil, status.Errorf(codes.FailedPrecondition, "publish Pod volume manifest: %v", err)
+		}
 		if err := publishFile(req, opts); err != nil {
 			code := codes.InvalidArgument
 			var pathError *os.PathError

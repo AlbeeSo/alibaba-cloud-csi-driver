@@ -140,6 +140,17 @@ unmount removes only that FUSE layer and preserves the shared volume directory.
 Custom state roots must also match the corresponding CSI node component's
 `CSI_FUSE_FILE_ROOT`; the default chart roots already match.
 
+Startup is fixed: `csi-mount-proxy-server --file-mode`; probes run only
+`csi-mount-proxy-server --file-check-ready`. State and target roots default to
+`/volume-state` and `/pod-volumes`. CSI resolves the live Pod's bound PVC/PV set
+and publishes `manifest.json` containing all expected volume handles for that
+CSI driver before publishing a mount request. Both the runner and probes use
+this inventory automatically, including manual sidecars without a webhook or
+Kubernetes API credentials. An absent manifest or mount request keeps readiness
+closed. Adding a volume does not change startup/probe arguments. Upgrade CSI
+and mountproxy together; legacy explicit directory/expected-volume overrides
+remain accepted for existing deployments.
+
 Mountproxy currently uses JSON over Unix sockets, while CSI uses gRPC. File
 delivery preserves the mount request and `proxy.Response` result semantics,
 but is asynchronous: NodePublish acknowledges durable delivery, not successful

@@ -29,8 +29,18 @@ type Runner struct {
 // blocked client cannot hide another volume's result. Failed mounts stay failed
 // until a sidecar restart; no unbounded background remount loop is introduced.
 func (r *Runner) Run(ctx context.Context) error {
-	if !ValidComponent(r.PodUID) || len(r.Expected) == 0 || !filepath.IsAbs(r.Root) || !filepath.IsAbs(r.TargetRoot) || r.Timeout <= 0 || r.Backend == nil {
-		return fmt.Errorf("file mode requires Pod UID, absolute roots, expected volumes, backend and positive timeout")
+	if !ValidComponent(r.PodUID) || !filepath.IsAbs(r.Root) || !filepath.IsAbs(r.TargetRoot) || r.Timeout <= 0 || r.Backend == nil {
+		return fmt.Errorf("file mode requires Pod UID, absolute roots, backend and positive timeout")
+	}
+	if len(r.Expected) == 0 {
+		ids, err := waitExpected(ctx, r.Root, r.PodUID)
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		r.Expected = ids
 	}
 	seen := map[string]bool{}
 	for _, id := range r.Expected {

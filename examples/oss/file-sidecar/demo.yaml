@@ -88,19 +88,16 @@ spec:
             - name: POD_UID
               valueFrom: {fieldRef: {fieldPath: metadata.uid}}
           args:
-            - --file-state-dir=/volume-state
-            - --file-target-dir=/pod-volumes
-            - --file-expected-volumes=ossfs2-file-a,ossfs2-file-b
-            - --timeout=30s
+            - --file-mode
           startupProbe:
             exec:
-              command: [csi-mount-proxy-server, --file-check-ready, --file-state-dir=/volume-state, "--file-expected-volumes=ossfs2-file-a,ossfs2-file-b"]
+              command: [csi-mount-proxy-server, --file-check-ready]
             periodSeconds: 2
             timeoutSeconds: 2
             failureThreshold: 60
           readinessProbe:
             exec:
-              command: [csi-mount-proxy-server, --file-check-ready, --file-state-dir=/volume-state, "--file-expected-volumes=ossfs2-file-a,ossfs2-file-b"]
+              command: [csi-mount-proxy-server, --file-check-ready]
             periodSeconds: 2
             timeoutSeconds: 2
           volumeMounts:

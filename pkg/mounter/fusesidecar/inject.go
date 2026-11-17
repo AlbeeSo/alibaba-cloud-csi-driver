@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
-	"strings"
 
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/filevolume"
 	core "k8s.io/api/core/v1"
@@ -63,7 +62,6 @@ func (c Config) Validate() error {
 
 type group struct {
 	profile string
-	handles map[string]bool
 	names   map[string]bool
 	targets map[string]string // PV directory -> existing Pod PVC volume name
 }
@@ -142,17 +140,16 @@ func Mutate(ctx context.Context, client kubernetes.Interface, cfg Config, pod *c
 		}
 		g := groups[driver]
 		if g == nil {
-			g = &group{profile: profile, handles: map[string]bool{}, names: map[string]bool{}, targets: map[string]string{}}
+			g = &group{profile: profile, names: map[string]bool{}, targets: map[string]string{}}
 			groups[driver] = g
 		}
 		if g.profile != profile {
 			return nil, fmt.Errorf("one Pod cannot use different sidecar profiles for CSI driver %s; use a dispatching image or manual sidecars", driver)
 		}
 		id := pv.Spec.CSI.VolumeHandle
-		if id == "" || strings.ContainsAny(id, ",\r\n") {
+		if id == "" {
 			return nil, fmt.Errorf("PV %s has an invalid file-protocol volume handle", pv.Name)
 		}
-		g.handles[id] = true
 		g.names[v.Name] = true
 		if _, exists := g.targets[pv.Name]; !exists {
 			g.targets[pv.Name] = v.Name
@@ -169,11 +166,6 @@ func Mutate(ctx context.Context, client kubernetes.Interface, cfg Config, pod *c
 		if driver == CustomDriver {
 			name, root = "customfuse", cfg.CustomStateRoot
 		}
-		var ids []string
-		for id := range g.handles {
-			ids = append(ids, id)
-		}
-		sort.Strings(ids)
 		stateName := "fuse-" + name + "-state"
 		state := core.Volume{Name: stateName, VolumeSource: core.VolumeSource{HostPath: &core.HostPathVolumeSource{Path: root, Type: ptr.To(core.HostPathDirectoryOrCreate)}}}
 		for _, v := range []core.Volume{state} {
@@ -190,14 +182,14 @@ func Mutate(ctx context.Context, client kubernetes.Interface, cfg Config, pod *c
 				out.Spec.Volumes = append(out.Spec.Volumes, v)
 			}
 		}
-		args := []string{"--file-state-dir=/volume-state", "--file-target-dir=/pod-volumes", "--file-expected-volumes=" + strings.Join(ids, ","), "--timeout=30s"}
-		probe := append([]string{"csi-mount-proxy-server", "--file-check-ready"}, args[:3]...)
+		args := []string{"--file-mode"}
+		probe := []string{"csi-mount-proxy-server", "--file-check-ready"}
 		side := core.Container{Name: "fuse-" + name, Image: cfg.Profiles[g.profile].Image, ImagePullPolicy: core.PullIfNotPresent, Command: []string{"csi-mount-proxy-server"}, Args: args, RestartPolicy: ptr.To(core.ContainerRestartPolicyAlways), Resources: cfg.Profiles[g.profile].Resources,
 			SecurityContext: &core.SecurityContext{Privileged: ptr.To(true), RunAsUser: ptr.To(int64(0))},
 			Env:             []core.EnvVar{{Name: "POD_UID", ValueFrom: &core.EnvVarSource{FieldRef: &core.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.uid"}}}},
 			StartupProbe:    &core.Probe{ProbeHandler: core.ProbeHandler{Exec: &core.ExecAction{Command: probe}}, PeriodSeconds: 2, TimeoutSeconds: 2, FailureThreshold: 60},
 			ReadinessProbe:  &core.Probe{ProbeHandler: core.ProbeHandler{Exec: &core.ExecAction{Command: probe}}, PeriodSeconds: 2, TimeoutSeconds: 2, FailureThreshold: 3},
-			VolumeMounts:    []core.VolumeMount{{Name: stateName, MountPath: "/volume-state", SubPathExpr: "$(POD_UID)"}},
+			VolumeMounts:    []core.VolumeMount{{Name: stateName, MountPath: filevolume.DefaultStateDir, SubPathExpr: "$(POD_UID)"}},
 		}
 		// Share the exact PVC source used by the application. A hostPath of its
 		// kubelet parent is exported as a different virtio-fs path by RunD, and
@@ -208,7 +200,7 @@ func Mutate(ctx context.Context, client kubernetes.Interface, cfg Config, pod *c
 		}
 		sort.Strings(pvs)
 		for _, pv := range pvs {
-			side.VolumeMounts = append(side.VolumeMounts, core.VolumeMount{Name: g.targets[pv], MountPath: filepath.Join("/pod-volumes", pv, "mount"), MountPropagation: ptr.To(core.MountPropagationBidirectional)})
+			side.VolumeMounts = append(side.VolumeMounts, core.VolumeMount{Name: g.targets[pv], MountPath: filepath.Join(filevolume.DefaultTargetDir, pv, "mount"), MountPropagation: ptr.To(core.MountPropagationBidirectional)})
 		}
 		found := false
 		for _, c := range out.Spec.Containers {
