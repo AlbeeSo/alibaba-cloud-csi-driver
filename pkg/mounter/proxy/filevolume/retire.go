@@ -26,8 +26,10 @@ func Retire(root, hostTarget string) error {
 	if err != nil {
 		return err
 	}
-	defer base.Close()
-	defer pod.Close()
+	// These handles only anchor directory operations; there are no buffered
+	// writes to flush. A close error cannot change the retirement result.
+	defer func() { _ = base.Close() }()
+	defer func() { _ = pod.Close() }()
 	key := strings.TrimSuffix(relative, "/mount")
 	for _, dir := range []string{"desired", "status", "unmount"} {
 		if err := removeControl(pod, dir+"/"+ID(key)+".json"); err != nil {
@@ -58,15 +60,15 @@ func openPodState(root, uid string) (*os.Root, *os.Root, error) {
 	}
 	info, err := base.Lstat(uid)
 	if err == nil && !info.IsDir() {
-		err = fmt.Errorf("Pod state is not a directory")
+		err = fmt.Errorf("pod state is not a directory")
 	}
 	if err != nil {
-		base.Close()
+		_ = base.Close() // preserve the directory lookup error
 		return nil, nil, err
 	}
 	pod, err := base.OpenRoot(uid)
 	if err != nil {
-		base.Close()
+		_ = base.Close() // preserve the OpenRoot error
 		return nil, nil, err
 	}
 	return base, pod, nil
@@ -77,7 +79,7 @@ func readControlDir(pod *os.Root, name string) ([]os.DirEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // read-only directory handle
 	return f.ReadDir(-1)
 }
 
@@ -193,8 +195,8 @@ func CollectOrphans(root, kubeletPods string) error {
 			continue
 		}
 		err = retirePod(base, pod, uid)
-		pod.Close()
-		base.Close()
+		_ = pod.Close() // directory handles have no buffered writes
+		_ = base.Close()
 		if err != nil {
 			errs = append(errs, err)
 		}

@@ -52,7 +52,7 @@ func Publish(root, uid, volumeID, hostTarget string, request proxy.MountRequest)
 	path := RequestPath(filepath.Join(root, uid), strings.TrimSuffix(relative, "/mount"))
 	var revoked UnmountRequest
 	if err := ReadJSON(UnmountPath(filepath.Join(root, uid), strings.TrimSuffix(relative, "/mount")), &revoked); err == nil {
-		return fmt.Errorf("Pod volume was revoked; recreate Pod before publishing again")
+		return fmt.Errorf("pod volume was revoked; recreate Pod before publishing again")
 	} else if !os.IsNotExist(err) {
 		return err
 	}

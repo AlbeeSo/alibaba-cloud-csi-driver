@@ -31,11 +31,19 @@ func TestFileUnmountSyscall(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "mount")
 	require.NoError(t, os.Mkdir(target, 0700))
 	require.NoError(t, unix.Mount("tmpfs", target, "tmpfs", 0, "size=1m"))
-	defer unix.Unmount(target, 0)
+	defer func() {
+		if err := unix.Unmount(target, 0); err != nil && err != unix.EINVAL {
+			t.Errorf("clean up test mount: %v", err)
+		}
+	}()
 	cwd, err := os.Getwd()
 	require.NoError(t, err)
 	require.NoError(t, os.Chdir(target))
-	defer os.Chdir(cwd)
+	defer func() {
+		if err := os.Chdir(cwd); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	}()
 	require.ErrorIs(t, unmountFileTarget(target), unix.EBUSY)
 	// EBUSY must leave the mount attached, without a lazy-detach fallback.
 	var st unix.Statfs_t

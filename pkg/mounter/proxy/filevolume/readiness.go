@@ -19,7 +19,7 @@ func markReady(root, uid, session string) error {
 	path := filepath.Join(root, "ready-session.json")
 	if err := ReadJSON(path, &old); err == nil {
 		if old.PodUID != uid || old.Session != session {
-			return fmt.Errorf("Pod recreation required after mountproxy restart")
+			return fmt.Errorf("pod recreation required after mountproxy restart")
 		}
 		return nil
 	} else if !os.IsNotExist(err) {
