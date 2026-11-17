@@ -165,9 +165,9 @@ func Mutate(ctx context.Context, client kubernetes.Interface, cfg Config, pod *c
 		if g == nil {
 			continue
 		}
-		name, root, drivers := "oss", cfg.OSSStateRoot, "ossfs,ossfs2"
+		name, root := "oss", cfg.OSSStateRoot
 		if driver == CustomDriver {
-			name, root, drivers = "customfuse", cfg.CustomStateRoot, "customfuse"
+			name, root = "customfuse", cfg.CustomStateRoot
 		}
 		var ids []string
 		for id := range g.handles {
@@ -192,7 +192,7 @@ func Mutate(ctx context.Context, client kubernetes.Interface, cfg Config, pod *c
 		}
 		args := []string{"--file-state-dir=/volume-state", "--file-target-dir=/pod-volumes", "--file-expected-volumes=" + strings.Join(ids, ","), "--timeout=30s"}
 		probe := append([]string{"csi-mount-proxy-server", "--file-check-ready"}, args[:3]...)
-		side := core.Container{Name: "fuse-" + name, Image: cfg.Profiles[g.profile].Image, ImagePullPolicy: core.PullIfNotPresent, Command: []string{"csi-mount-proxy-server"}, Args: append([]string{"--driver=" + drivers}, args...), RestartPolicy: ptr.To(core.ContainerRestartPolicyAlways), Resources: cfg.Profiles[g.profile].Resources,
+		side := core.Container{Name: "fuse-" + name, Image: cfg.Profiles[g.profile].Image, ImagePullPolicy: core.PullIfNotPresent, Command: []string{"csi-mount-proxy-server"}, Args: args, RestartPolicy: ptr.To(core.ContainerRestartPolicyAlways), Resources: cfg.Profiles[g.profile].Resources,
 			SecurityContext: &core.SecurityContext{Privileged: ptr.To(true), RunAsUser: ptr.To(int64(0))},
 			Env:             []core.EnvVar{{Name: "POD_UID", ValueFrom: &core.EnvVarSource{FieldRef: &core.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.uid"}}}},
 			StartupProbe:    &core.Probe{ProbeHandler: core.ProbeHandler{Exec: &core.ExecAction{Command: probe}}, PeriodSeconds: 2, TimeoutSeconds: 2, FailureThreshold: 60},

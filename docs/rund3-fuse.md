@@ -11,6 +11,14 @@ handler `runv` (`io.containerd.rund.v2` on the node). Selection uses that runtim
 contract, rather than assuming that a class named `rund` identifies a deployment
 role. No additional feature gate or delivery-mode parameter is introduced.
 
+File mode automatically enables all linked file-capable drivers (ossfs, ossfs2
+and customfuse), dispatching each request by `MountProxy.Fstype`. No `--driver`
+selection is needed; that flag continues to select drivers only in socket mode.
+The image must still contain the requested client binaries or custom entrypoint.
+Use a mountproxy image built with this change before removing the flag; older
+images require explicit drivers. Upgrade webhook profile images together with
+the webhook, including mountproxy binaries in customfuse images.
+
 ## Selecting the protocol
 
 Set `deploy.featureGates: RundCSIProtocol3=true` in the CSI chart and

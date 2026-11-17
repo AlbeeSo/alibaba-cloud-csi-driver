@@ -46,7 +46,7 @@ func main() {
 	flag.StringSliceVar(&fileExpected, "file-expected-volumes", nil, "required volume handles; all must mount before readiness succeeds")
 	flag.BoolVar(&fileCheckReady, "file-check-ready", false, "check file statuses and exit (startup/readiness probe)")
 	flag.StringVar(&socketPath, "socket", "/var/run/csi/mounter.sock", "socket path")
-	flag.StringSliceVar(&drivers, "driver", nil, "drivers to enable (e.g. 'ossfs,alinas')")
+	flag.StringSliceVar(&drivers, "driver", nil, "socket-mode drivers to enable (e.g. 'ossfs,alinas'); file mode automatically enables all file-capable drivers")
 	flag.DurationVar(&handleTimeout, "timeout", proxy.DefaultConnectionTimeout,
 		"how long a connection has to deliver a request and receive its answer; also caps a mount when shorter than what the client asks for")
 	flag.BoolVar(&enableNftables, "enable-nftables", false, "enable nftables rules to restrict mount proxy port access (default: false)")
@@ -111,8 +111,8 @@ func runFileMode() error {
 	if err := server.EnsureFuseDevice("/dev/fuse"); err != nil {
 		return err
 	}
-	server.Init(drivers)
-	defer server.Terminate(drivers)
+	fileDrivers := server.InitFileDrivers()
+	defer server.Terminate(fileDrivers)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	r := filevolume.Runner{Root: fileStateDir, PodUID: filePodUID, TargetRoot: fileTargetDir,

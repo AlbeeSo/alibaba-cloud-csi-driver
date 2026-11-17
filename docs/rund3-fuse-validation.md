@@ -1,5 +1,10 @@
 # RunD 3 FUSE file protocol validation
 
+The E2E record below covers the implementation at `8ab92f00e`. The subsequent
+change that enables all linked file-capable drivers without `--driver` passed
+local Linux regression tests with the race detector; its E2E is deferred to a new test
+environment. No cluster was created or changed for that adjustment.
+
 Validated on 2026-11-16 with Kubernetes 1.33.3-aliyun.1 and ACK security sandbox
 2.2.4, containerd 1.6.28. RuntimeClass `runv` uses handler `runv`; the node's
 handler resolves to `io.containerd.rund.v2`, running `containerd-shim-rund-v2`.

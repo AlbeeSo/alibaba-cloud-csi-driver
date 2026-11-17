@@ -26,6 +26,7 @@ jobs:
       - name: Publish, sidecar, readiness and process lifecycle
         run: |
           sudo -E env "PATH=$PATH" go test -race -count=1 \
+            ./cmd/mount-proxy-server \
             ./pkg/customfuse \
             ./pkg/oss \
             ./pkg/mounter/proxy/filevolume \

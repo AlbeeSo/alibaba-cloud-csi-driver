@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/features"
@@ -56,7 +57,11 @@ func TestMixedDriversAndAdmissionRoundTrip(t *testing.T) {
 	require.Equal(t, "fuse-oss", out.Spec.InitContainers[0].Name)
 	require.Equal(t, "fuse-customfuse", out.Spec.InitContainers[1].Name)
 	require.Equal(t, "init", out.Spec.InitContainers[2].Name)
-	require.Contains(t, out.Spec.InitContainers[0].Args, "--driver=ossfs,ossfs2")
+	for _, side := range out.Spec.InitContainers[:2] {
+		for _, arg := range side.Args {
+			require.False(t, strings.HasPrefix(arg, "--driver"), "file mode selects the driver from each request")
+		}
+	}
 	require.Contains(t, out.Spec.InitContainers[0].Args, "--file-expected-volumes=oss-a,oss-b")
 	require.Equal(t, "$(POD_UID)", out.Spec.InitContainers[0].VolumeMounts[0].SubPathExpr)
 	require.Equal(t, core.MountPropagationBidirectional, *out.Spec.InitContainers[0].VolumeMounts[1].MountPropagation)

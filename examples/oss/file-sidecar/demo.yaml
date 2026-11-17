@@ -88,7 +88,6 @@ spec:
             - name: POD_UID
               valueFrom: {fieldRef: {fieldPath: metadata.uid}}
           args:
-            - --driver=ossfs2
             - --file-state-dir=/volume-state
             - --file-target-dir=/pod-volumes
             - --file-expected-volumes=ossfs2-file-a,ossfs2-file-b

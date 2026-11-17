@@ -67,7 +67,6 @@ spec:
               valueFrom:
                 fieldRef: {fieldPath: metadata.uid}
           args:
-            - --driver=ossfs2
             - --file-state-dir=/volume-state
             - --file-target-dir=/pod-volumes
             - --file-expected-volumes=ossfs2-file-a,ossfs2-file-b
@@ -145,12 +144,16 @@ spec:
 
 ## 4. ossfs 和 customfuse 怎么改
 
-| 类型 | 镜像及参数 | state 的 hostPath |
+| 类型 | 镜像及 PV 配置 | state 的 hostPath |
 | --- | --- | --- |
-| ossfs2 | 包含 ossfs2 的 mountproxy 镜像，`--driver=ossfs2`，PV `fuseType: ossfs2` | `/var/run/ossfs/file-volumes` |
-| ossfs | 包含 ossfs 的镜像，`--driver=ossfs`，PV `fuseType: ossfs` | `/var/run/ossfs/file-volumes` |
-| 同组 ossfs + ossfs2 | 镜像包含两种客户端，`--driver=ossfs,ossfs2`，一个 sidecar 管理对应卷集合 | `/var/run/ossfs/file-volumes` |
-| customfuse | 镜像包含 mountproxy 和客户 `/entrypoint.sh`，`--driver=customfuse`，PV driver 为 `customfuseplugin.csi.alibabacloud.com` | `/var/run/customfuse/file-volumes` |
+| ossfs2 | 包含 ossfs2 的 mountproxy 镜像，PV `fuseType: ossfs2` | `/var/run/ossfs/file-volumes` |
+| ossfs | 包含 ossfs 的镜像，PV `fuseType: ossfs` | `/var/run/ossfs/file-volumes` |
+| 同组 ossfs + ossfs2 | 镜像包含两种客户端，一个 sidecar 管理对应卷集合 | `/var/run/ossfs/file-volumes` |
+| customfuse | 镜像包含 mountproxy 和客户 `/entrypoint.sh`，PV driver 为 `customfuseplugin.csi.alibabacloud.com` | `/var/run/customfuse/file-volumes` |
+
+文件模式自动启用所有已编入 mountproxy、支持文件挂载的驱动，无需配置 `--driver`；每卷 JSON 的 `MountProxy.Fstype` 决定实际分派。旧文件模式配置中的该参数不再限制驱动集合，socket 模式仍保留原来的显式选择。注册驱动不代表镜像里包含任意客户端程序，仍须选择具备所需 ossfs/ossfs2 或自定义入口的镜像。
+
+省略参数需要使用包含本次调整的 mountproxy 镜像；旧版本仍需显式选择驱动。升级 webhook 时也要同步更新其 profile 镜像，自定义镜像里的 mountproxy binary 同样需要更新。
 
 customfuse 完整例子见 [demo.yaml](../examples/customfuse/6-file-sidecar/demo.yaml) 和 [镜像说明](../examples/customfuse/6-file-sidecar/README.md)。同一个 Pod 同时使用 OSS 和 customfuse 时，配置两个原生 sidecar，各用独立的 state volume、预期卷集合和 PVC mount；都通过 startupProbe 后才启动业务。
 

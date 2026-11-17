@@ -98,7 +98,6 @@ spec:
                 fieldRef:
                   fieldPath: metadata.uid
           args:
-            - --driver=customfuse
             - --file-state-dir=/volume-state
             - --file-target-dir=/pod-volumes
             - --file-expected-volumes=fuse-file-demo-a,fuse-file-demo-b

@@ -83,6 +83,8 @@ CSI 同时写 kubelet 目标目录旁的 `vol_attr.json` 和上述 `desired` 文
 
 `result` 保留原挂载 `proxy.Response`，`unmountResult` 记录卸载响应，`phase/error` 表示后续生命周期；generation 对应请求内容，session 对应当前 runner。未知可选请求字段可以保留、回写并参与 digest；新行为仍需要新 consumer 实现，不能安全忽略的能力需使用 requiredFeatures 或版本升级。
 
+文件模式自动启用所有已编入、实现文件挂载接口的驱动（当前为 ossfs、ossfs2、customfuse），按每卷 `MountProxy.Fstype` 分派，不需要 `--driver`。该 flag 只保留 socket 模式的选择语义。自动启用不会启动客户端进程，也不会替镜像安装缺失的客户端；NAS 等未实现文件接口的驱动不会初始化。
+
 ## 3. 生命周期
 
 ### 3.1 正常启动

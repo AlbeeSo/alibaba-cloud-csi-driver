@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter"
@@ -15,6 +16,21 @@ import (
 // Socket mounts retain their existing monitoring path.
 type FileMounter interface {
 	MountFile(context.Context, *proxy.MountRequest, func(string) (bool, error)) (<-chan error, error)
+}
+
+// InitFileDrivers enables all linked drivers that implement the file transport.
+// Request Fstype selects the driver; socket-mode allowlists do not apply here.
+// Return the initialized names so shutdown terminates exactly these drivers.
+func InitFileDrivers() []string {
+	var names []string
+	for name, driver := range nameToDriver {
+		if _, ok := driver.(FileMounter); ok {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	Init(names)
+	return names
 }
 
 // MountFile uses the same interceptor entry point for every FUSE driver. Keep
@@ -37,7 +53,7 @@ type FileBackend struct{ Mounter mount.Interface }
 func (b FileBackend) Mount(ctx context.Context, req *proxy.MountRequest) (<-chan error, error) {
 	d, ok := fstypeToDriver[req.Fstype].(FileMounter)
 	if !ok {
-		return nil, fmt.Errorf("driver does not support file transport")
+		return nil, fmt.Errorf("fstype %q does not support file transport", req.Fstype)
 	}
 	if err := os.MkdirAll(req.Target, 0755); err != nil {
 		return nil, err
