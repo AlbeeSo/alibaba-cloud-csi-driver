@@ -1,5 +1,7 @@
 # Manual customfuse sidecar example
 
+中文配置步骤和多 driver 说明见 [手动 sidecar 指南](../../../docs/rund3-fuse-manual-sidecar-zh.md)。
+
 This example uses the shared [RunD 3 FUSE protocol](../../../docs/rund3-fuse.md).
 Enable `RundCSIProtocol3=true` on the CSI installation. The Pod uses
 `runtimeClassName: runv` on ACK sandbox and opts out of automatic injection so it can supply its

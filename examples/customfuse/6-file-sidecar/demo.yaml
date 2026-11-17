@@ -84,7 +84,11 @@ spec:
         - name: mountproxy
           # Build this image from the repository root; replace before applying.
           image: FUSE_FILE_DEMO_IMAGE
+          command: [csi-mount-proxy-server]
           restartPolicy: Always
+          resources:
+            requests: {cpu: 250m, memory: 128Mi}
+            limits: {cpu: "1", memory: 256Mi}
           securityContext:
             privileged: true
             runAsUser: 0
@@ -104,7 +108,7 @@ spec:
               command: [csi-mount-proxy-server, --file-check-ready, --file-state-dir=/volume-state, "--file-expected-volumes=fuse-file-demo-a,fuse-file-demo-b"]
             periodSeconds: 2
             timeoutSeconds: 2
-            failureThreshold: 30
+            failureThreshold: 60
           readinessProbe:
             exec:
               command: [csi-mount-proxy-server, --file-check-ready, --file-state-dir=/volume-state, "--file-expected-volumes=fuse-file-demo-a,fuse-file-demo-b"]

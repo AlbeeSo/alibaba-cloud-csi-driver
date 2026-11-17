@@ -2,6 +2,8 @@
 
 For the environment findings, lifecycle details, review order and Fluid comparison,
 see the [Chinese design and review guide](rund3-fuse-design-review-zh.md).
+For a Deployment without webhook injection, see the
+[Chinese manual-sidecar example](rund3-fuse-manual-sidecar-zh.md).
 
 This implementation supports ossfs, ossfs2 and customfuse through the same
 Pod-scoped file protocol. ACK security sandbox exposes RunD as RuntimeClass

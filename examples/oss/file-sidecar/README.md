@@ -1,5 +1,7 @@
 # Manual OSSFS2 sidecar example
 
+中文配置步骤和 Deployment 示例见 [手动 sidecar 指南](../../../docs/rund3-fuse-manual-sidecar-zh.md)。
+
 Use the [shared RunD 3 FUSE protocol](../../../docs/rund3-fuse.md) with
 `RundCSIProtocol3=true` on the self-managed CSI installation and
 `runtimeClassName: runv` on the ACK sandbox Pod. This manifest opts out of webhook injection

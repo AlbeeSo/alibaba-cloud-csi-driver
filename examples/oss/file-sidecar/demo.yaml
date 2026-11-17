@@ -78,7 +78,11 @@ spec:
       initContainers:
         - name: mountproxy
           image: OSSFS2_FILE_IMAGE
+          command: [csi-mount-proxy-server]
           restartPolicy: Always
+          resources:
+            requests: {cpu: 500m, memory: 512Mi}
+            limits: {cpu: "2", memory: 1Gi}
           securityContext: {privileged: true, runAsUser: 0}
           env:
             - name: POD_UID
@@ -94,7 +98,7 @@ spec:
               command: [csi-mount-proxy-server, --file-check-ready, --file-state-dir=/volume-state, "--file-expected-volumes=ossfs2-file-a,ossfs2-file-b"]
             periodSeconds: 2
             timeoutSeconds: 2
-            failureThreshold: 30
+            failureThreshold: 60
           readinessProbe:
             exec:
               command: [csi-mount-proxy-server, --file-check-ready, --file-state-dir=/volume-state, "--file-expected-volumes=ossfs2-file-a,ossfs2-file-b"]
