@@ -1,4 +1,4 @@
-# FUSE Sidecar 挂载模式设计
+# FUSE 请求交付与挂载生命周期重构设计
 
 状态：待评审，本文描述目标设计，不代表当前 PR 已实现。
 
@@ -6,17 +6,18 @@
 
 ## 1. 目标与边界
 
-新增一个由集群 CSI 管理的 FUSE 挂载模式：业务 Pod 中的 mountproxy sidecar 执行挂载。runc、rund 均可使用，但不接管原来的 guest csi-agent 与 host 委托场景。
+补齐“集群 DS 将挂载请求直接交给 Pod 内 mountproxy”的执行组合，支持 rund 文件交付和后续 runc RPC。原 guest csi-agent 本来也可以调用 guest mountproxy sidecar，因此不能用“Legacy / Sidecar”把新旧流程分成互斥两类。
 
-设计区分三个维度：
+设计区分四个维度：
 
 | 维度 | 取值 | 谁负责选择 |
 | --- | --- | --- |
-| 挂载模式 | Legacy / Sidecar | 新的全局默认与 PV 显式配置 |
-| sidecar 提供方式 | 用户手动配置 / webhook 注入 | 独立的 webhook 配置和 Pod opt-out |
-| 控制请求传输 | rund 用 HostPath 文件；runc 目标使用 RPC/gRPC | 内部按运行环境选择，不增加用户必须配置的 transport 开关 |
+| 接收入口与所有权 | 集群 DS、guest agent、既有委托 | 执行入口、部署契约和持久化执行记录 |
+| 挂载作用域 | 共享 attachPath / Pod 级目标 | 已确认的执行计划，按请求决定 |
+| 请求交付 | 既有 socket RPC / 文件 / 后续 Pod RPC | 已有契约或目标环境能力，不按 runv/rund 名称区分 |
+| 消费方提供方式 | 独立 FUSE Pod、runtime/外部 controller、手动、webhook | 原提供者或独立的注入配置 |
 
-非目标：改变 Legacy 默认路径；默认切换到 virtiofs；接管原 csi-agent；透明恢复业务已有 FUSE 连接；在第一阶段实现 runc sidecar RPC。
+非目标：改变未显式迁移的既有路径；默认切换到 virtiofs；接管原 csi-agent；透明恢复业务已有 FUSE 连接；在第一阶段实现 runc Pod RPC。runv 仅作为 RunD family 的测试实现，最终部署目标是实际 rund。
 
 ### 1.1 阻塞项一：固定的是命令，还是完整 sidecar spec
 
@@ -106,12 +107,12 @@ runc 的 Bidirectional 传播会涉及 host 可见挂载；rund 是否把 FUSE �
 
 ### 2.2 本设计如何对待默认行为
 
-`Legacy` 的含义是“调用既有流程”，不是“保证成功”：
+保持既有部署契约意味着“调用既有流程”，不是“保证成功”，也不是“禁止 sidecar”：
 
 - runc 的常规部署继续使用独立 FUSE Pod。
 - rund 继续既有判断；原来需要 agent 就仍需要，原来报错就仍可报错。
 - 如果某种现有部署实际由 host 挂载再经 virtiofs 共享，本设计保留它，但不新增该 fallback。
-- 第一阶段先记录新环境中不启用 Sidecar、不配 sidecar 的实测结果，作为后续比较基线。
+- 第一阶段先记录新环境中未要求 DS→Pod 交付、不配新消费方的实测结果，作为后续比较基线。
 
 virtiofs 描述 host/guest 的文件共享方式，独立 FUSE Pod / 业务 sidecar 描述 FUSE 进程的执行位置，两者不应混成同一个枚举。
 
@@ -163,210 +164,263 @@ csi-agent 使用同名 flags，默认分别为 `/run/kube-agent/csi-agent.sock` 
 
 源码入口：[direct 推导](../pkg/oss/utils.go)、[socket 优先级](../pkg/mounter/utils/utils.go)、[skipGlobalMount 环境解析](../pkg/utils/util.go)、[插件 flags](../main.go)、[agent flags](../cmd/csi-agent/main.go)。
 
-## 3. 配置模型
+## 3. 重构模型：不使用 Legacy / Sidecar 二分
 
-### 3.1 挂载模式配置
+sidecar 是 mountproxy 的部署形态，不是互斥的执行模式。旧 csi-agent、本来就由外部 controller 管理的 sandbox，以及新增 DS 文件交付，都可能使用 guest 内的 mountproxy sidecar。
 
-以下名称暂定，待评审后确定：
+因此，重构不应建立一个包含所有新逻辑的大 Sidecar 分支，再把其余代码全部留在 Legacy 分支。应明确哪些执行组合已经存在、哪个组合缺失，以及哪些机制可复用。
 
-```yaml
-# 新 gate，默认 false；不复用 RundCSIProtocol3
-FuseSidecar: false
+### 3.1 四个独立维度
 
-# PV.spec.csi.volumeAttributes，可从 StorageClass 传入
-fuse.csi.alibabacloud.com/mount-mode: sidecar  # sidecar / legacy / 未配置
-```
-
-这里的新 gate 表示“全局默认选择 Sidecar”，不是“gate 关闭就禁止 PV 单独启用”。PV 显式配置优先，以满足“gate 或 PV 配置均可开启”，并允许全局开启后的逐 PV 回退。
-
-| 新 gate | PV 模式 | 最终模式 |
+| 维度 | 要表达的事实 | 不能用什么替代 |
 | --- | --- | --- |
-| false | 未配置 | Legacy |
-| false | sidecar | Sidecar |
-| false | legacy | Legacy |
-| true | 未配置 | Sidecar |
-| true | sidecar | Sidecar |
-| true | legacy | Legacy |
-| 任意 | 非法值 | InvalidArgument，不能静默回退 |
+| CSI 接收入口与执行所有权 | 集群 DS 接收、guest csi-agent 接收，或 host 只负责委托；谁有权提交挂载 | binary 名、clientset 非空、RuntimeClass 名均不能独立证明全部所有权 |
+| 挂载作用域 | 共享 attachPath，再 bind；或者直接挂该 Pod 的目标 | 不能认为只有 rund 才需要直接挂目标 |
+| 请求交付方式 | 现有 socket RPC、HostPath 文件、新的 Pod RPC/gRPC | socket 字符串非空不能证明消费方、可达性和执行权 |
+| mountproxy 提供方式 | 独立 FUSE Pod、原 runtime/外部 controller、用户手动配置、webhook 注入 | “有 sidecar”不等于使用了本次新增交付路径 |
 
-全局默认仅适用于集群插件支持的常规 FUSE 数据卷；不自动改造 rootfs 等特殊 publish 路径。PV 同时显式要求 Sidecar 和冲突的旧执行语义时，应明确报配置冲突，不能靠分支先后猜测。
+runtime family、具体能力、目录映射、完成响应语义及 cleanup owner 是执行计划的约束，不再通过上述布尔值反推。
 
-### 3.2 webhook 配置
+### 3.2 已有组合与新增组合
 
-`webhook.enabled` 是第二类配置，只决定是否帮助用户提供 sidecar，不决定挂载模式。
+| 组合 | CSI 接收/提交方 | 挂载作用域 | 交付方式 | mountproxy 提供者 | 定位 |
+| --- | --- | --- | --- | --- | --- |
+| 普通 host FUSE | 集群 DS | SharedAttach | 现有 socket RPC | 独立 FUSE Pod | 既有路径 |
+| guest agent | guest csi-agent | PodTarget | guest 本地 socket RPC | 原 runtime/编排，可能就是 guest sidecar | 既有路径，与新路径共享 Pod 级执行能力 |
+| 外部编排 sandbox | 按已有部署确认的 CSI 执行方 | 按环境配置，可为 PodTarget | 外部注入或 flag 提供的 socket RPC | 外部 controller/runtime | 既有路径，不等同于 agent binary |
+| DS 到 RunD Pod | 集群 DS | PodTarget | HostPath 文件 | 用户手动提供，之后可 webhook 注入 | 第一、二阶段新增组合 |
+| DS 到 runc Pod | 集群 DS | PodTarget | 新 Pod RPC/gRPC | 用户手动提供或 webhook 注入 | 第三阶段新增组合 |
 
-Pod 的 `inject: "false"` 是提供方式的 opt-out，不是把挂载模式改回 Legacy：全局安装 webhook 的情况下，用户仍可手动提供 sidecar。
+新增组合与既有组合共享 BuildMountRequest、FSType 分派、凭据/选项处理、PodTarget 执行、进程监管及部分状态语义。只在请求交付、目标映射、启动编排和清理责任发生差异的地方引入接口。
 
-| 模式 | webhook | sidecar 提供与预期效果 |
+runc 业务 Pod 内的 FUSE 也应使用 PodTarget，不应占用其他 Pod 共用的 attachPath。因此“是否跳过 global mount”是作用域决定的，而不是按 runc/rund 一刀切。
+
+### 3.3 runv 属于 RunD 测试实现，不是路径选择依据
+
+实际部署目标是 rund。之前验证过的 runv 环境，只视为 RunD family 的一种测试实现。
+
+不能通过 handler == runv、RuntimeClass 字面值、ACK 特定 label，把 agent、DS 和外部 controller 分开；也不能因为叫 rund 就判定必须 agent。RuntimeClass 是入口线索，具体运行时实现、目录共享、设备、RPC 可达性与 cleanup 能力需另行核实。
+
+实验代码里的 ACK runv 精确匹配不是最终设计。runv 上的验证不能认证其他 rund 版本的传播、强杀清理或扩展功能。本文不根据名称宣称两个实现完全等价。
+
+## 4. 配置与所有权
+
+### 4.1 用户仍只有两类主要配置
+
+第一类选择“是否由集群 CSI 直接向 Pod 的 mountproxy 交付请求”，不再命名为是否使用 sidecar。第二类控制是否使用 webhook 构造消费方。
+
+新 gate 和 PV key 的正式名字待评审，不再沿用此前草案中的 FuseSidecar / mount-mode=sidecar；以下使用逻辑值描述契约：
+
+| 全局 DS 直接交付默认 | PV 显式意图 | 对集群插件的要求 |
 | --- | --- | --- |
-| Legacy | 关闭 | 完整执行旧流程 |
-| Legacy | 开启 | 不为该卷注入 sidecar，完整执行旧流程 |
-| Sidecar | 关闭 | 用户手动提供；DS 验证存在符合契约的消费方，缺失则明确报错 |
-| Sidecar | 开启 | webhook 注入；若显式 opt-out，则验证用户手动提供的消费方 |
+| 关闭 | 未配置 | 保持当前部署契约 |
+| 开启 | 未配置 | 尝试解析受支持的 DS→Pod 交付计划；不越过已有所有权约束 |
+| 任意 | 启用 DS→Pod 交付 | 显式要求新交付契约 |
+| 任意 | 保持当前部署契约 | 覆盖全局默认，不改变原提供者和交付方式 |
+| 任意 | 非法值 | 配置错误，不静默猜测 |
 
-**选择 Sidecar 与提供消费方是两个条件，不能只满足第一个就报告实际挂载成功。** 不开启 webhook 是受支持的，不提供任何消费方不是一种受支持的 Sidecar 配置。
+“保持当前部署契约”可能仍是 guest sidecar 或外部 sandbox RPC，不代表禁止 sidecar。全局默认只作用于集群插件支持的常规 FUSE 数据卷，不改变 guest agent 的进程默认，不自动改造 rootfs、COCO 等特殊路径。
 
-### 3.3 所有组件必须使用一致的模式选择
+guest agent 收到声明由 DS 独占交付的执行计划时，应报告所有权冲突；普通全局默认不能让 agent 擅自接管或让 host 与 agent 同时提交同一次挂载。原 RundCSIProtocol3 保留原语义，与新意图分开解析。
 
-ControllerPublish 没有 PodInfo，webhook admission 时 Pod 通常尚未调度，DS 却知道实际 Node。因此不能分别让三处代码自由猜测模式。
+### 4.2 webhook 的四格矩阵
 
-拟采用统一的 `ResolveMode(PV, defaultPolicy)`，并让 controller、DS、webhook 使用同源默认策略。ControllerPublish 将解析后的模式及策略版本作为执行计划交给 NodePublish，DS 校验一致性。策略不一致时报告 `ModePolicyMismatch`，不能一边创建独立 FUSE Pod、一边等业务 sidecar。
+| DS→Pod 交付意图 | webhook | 预期 |
+| --- | --- | --- |
+| 未选择 | 关闭 | 原提供者继续工作，原成功/失败语义保留 |
+| 未选择 | 开启 | 不接管原提供者，不为这些卷新增消费方 |
+| 已选择且执行权成立 | 关闭 | 使用用户手动提供的合法消费方；缺失明确报错 |
+| 已选择且执行权成立 | 开启 | 注入或验证匹配的消费方；opt-out 时验证手动配置 |
 
-如果严格要求“仅修改某个 DS 的 gate 就自动生效”，还需要权威的节点策略发布机制。controller 可以按 Node 读取，但尚未调度的 Pod 在 admission 时不能确定落在哪个 DS 策略上。**异构节点默认值、DS-only 开关与自动 webhook 注入的组合，尚不能直接宣称支持。**
+Pod 的 inject=false 只取消自动构造，不撤销交付意图。webhook 的存在也不证明 Pod 已被正确注入；NodePublish 仍要验证实际 PodSpec。验证的是消费方契约，不是在同步 CSI 调用里等进程启动。
 
-评审建议：全局默认由一处安装配置同步给相关组件；逐卷差异通过 PV 配置表达，不增加第三类用户开关。第一阶段优先用显式 PV 配置验证路径。如果必须支持 DS-only 的异构默认，需先补齐调度/admission 的设计。
+外部 controller 已提供的消费方不能因为启用了 webhook 再重复注入；应先验证它是否属于该卷的已声明提供者。容器名称或 socket 非空都不足以认领执行权。
 
-## 4. 执行角色与优先级
+### 4.3 组件策略与迁移
 
-`clientset != nil`、RuntimeClass 字面名称、节点是否为裸金属都不能单独证明执行角色。
+ControllerPublish 没有 PodInfo，admission 时 Pod 通常未调度，DS 才知道实际 Node。因此 controller、DS、webhook 需要同源交付策略和版本校验，不可分别猜测是否创建独立 FUSE Pod。
 
-角色优先于新的全局默认：
+若严格要求只修改某个 DS 的 gate，需设计节点策略发布与 admission/调度协调。在异构节点上，webhook 不能在未调度时自动得知未来 DS 的默认值；这仍是待解决项。建议全局策略从一处安装配置分发，逐卷差异由 PV 表达，不再增加用户必须填写的 transport 开关。
 
-1. csi-agent 执行入口继续原有行为；不继承集群插件的新 Sidecar 默认。
-2. 明确属于旧 host→guest agent 委托的请求保留委托。
-3. PV 在这些旧角色上显式要求新 Sidecar 时，报 `SidecarRoleConflict`，避免两个执行方争抢同一卷。
-4. 只有集群插件拥有执行权的请求，才进入新的 Legacy / Sidecar 选择。
+变更交付意图不是热迁移。旧共享挂载、agent 或外部 controller 仍拥有该卷时，不得直接再启动新的挂载执行者。需明确迁移顺序及旧挂载清理；不满足条件时返回 OwnershipConflict。阶段一不包含对外部 controller 管理路径的自动迁移。
 
-旧 `RundCSIProtocol3` 恢复旧语义，不负责选择新 Sidecar。旧委托的识别应依赖已确认的部署/执行契约，不能将所有 rund Pod 都归为旧委托，否则新 rund sidecar 永远进不去。
+## 5. 中央执行计划与伪代码
 
-还应保留“外部 controller 注入 socket、普通 CSI 进程执行”的既有 sandbox 路径，不把它误归为 guest csi-agent，也不因为有 socket 就判定已提供新业务 sidecar。该路径在 Legacy 下完整保留；显式迁移到新模式时需确认外部 controller 不再同时拥有挂载执行权。binary 角色、挂载目标策略、socket 提供者与实际运行位置应分别记录，而不是再用三个布尔值猜出唯一部署名称。
+### 5.1 执行计划
 
-## 5. 目标伪代码
+以下字段是内部模型，不要求用户逐项配置：
 
-目标是把策略判断集中在计划解析器中。具体 CSI handler 和 driver 不应再各自堆积 gate、RuntimeClass、socket、webhook 的判断。
+~~~text
+ExecutionPlan {
+    receiver             # ClusterDS / GuestAgent / ExistingDelegate
+    submissionOwner      # 谁有权提交这次挂载
+    mountScope           # SharedAttach / PodTarget
+    delivery             # ExistingSocket / File / PodRPC
+    consumerProvider     # FusePod / Runtime / ExternalController / Manual / Webhook
+    runtimeFamily        # Runc / RunD / Other；runv 不单列为一种模式
+    targetMapping        # host 请求目标到消费方可见目标的明确映射
+    completionPolicy     # 既有同步结果 / 异步交付加独立执行结果
+    cleanupOwner         # 优雅清理者、异常接管者与其实际能力
+    policyRevision
+}
+~~~
 
-### 5.1 模式及执行计划
+SharedAttach 计划才使用共享 attachPath；PodTarget 计划直接使用该 Pod 的目标。这个派生结果只影响当前请求，不修改进程级 SKIP_GLOBAL_MOUNT。
 
-```text
-ResolveMode(pv, policy):
-    choice = ParsePVMode(pv)                  # 非法值直接报错
-    if choice explicitly set:
-        return choice
-    return Sidecar if policy.sidecarDefault else Legacy
+旧参数解析器作为兼容适配器保留，包括原来会报错的 direct=true、有 socket、skipGlobalMount=false 组合。新组合应在验证新意图与所有权后生成独立计划，不通过修改旧组合表把错误配置直接变成合法 sidecar。
 
-ResolveNodePlan(request, role, policy, supportedStage):
-    choice = ParsePVMode(request.volumeContext)
+### 5.2 解析器
 
-    if role is Agent or ConfirmedLegacyDelegate:
-        if choice == Sidecar:
-            return error(SidecarRoleConflict)
-        return ExistingExecutionPlan(role)    # 不让全局默认接管 agent
+~~~text
+ResolvePlan(context):
+    if an execution record already exists:
+        return ValidateAndReuseRecordedPlan(context)  # 不按新 gate 偷换所有者
 
-    mode = ResolveMode(request.volume, policy)
-    if mode == Legacy:
-        return LegacyPlan                    # 不新增 virtiofs fallback
+    facts = DescribeExistingContract(context)
+    # 记录输入来源：binary/环境、PV、请求 socket、外部编排契约
+    # 不把 socket 来源未知，猜成 FusePod / agent / 新 sidecar
 
-    pod = GetAndVerifyPod(request.PodInfo)    # API/UID/调度节点不符就报错
-    runtime = ResolveActualRuntime(pod)      # 失败不能默认为 runc
-    ValidateSidecarCompatibility(request)    # 特殊旧路径、能力冲突在这里拒绝
+    if context.receiver == GuestAgent:
+        ValidateNoConflictingDSOwnership(context)
+        return ExistingAgentAdapter(facts)
+        # 通常同样得到 PodTarget + 本地 RPC + guest mountproxy
 
-    if runtime == Rund:
-        transport = HostPathFile
-    else if runtime == Runc and supportedStage >= 3:
-        transport = RPC
+    intent = ResolveDSDeliveryIntent(PV, sharedPolicy)
+    if intent preserves existing deployment:
+        return ExistingDeploymentAdapter(facts)
+        # 可能是 SharedAttach，也可能已经是 PodTarget + 外部 RPC
+
+    ValidateExclusiveSubmissionOwnership(facts, intent)
+    ValidateSupportedDataVolume(context)
+
+    if an existing consumer contract is explicitly compatible and retained:
+        return ReuseCompatiblePlan(facts)
+        # 必须有真实提供者/所有权依据；不能仅凭“有 socket”复用
+        # 第一阶段不自动迁移外部编排路径
+
+    pod = GetAndVerifyPodIdentityAndNode(context)
+    runtime = ResolveRuntimeFamilyAndCapabilities(context, pod)
+
+    if runtime is RunD and file-sharing contract is verified:
+        delivery = File
+    else if runtime is Runc and stage >= 3 and PodRPC is supported:
+        delivery = PodRPC
     else:
-        return error(UnsupportedSidecarRuntime)
+        return error(UnsupportedDeliveryCapability)
 
-    consumer = ValidateConsumerContract(pod, request.volume, transport)
+    consumer = ValidateDeclaredConsumer(pod, selectedVolumes, delivery)
     if consumer missing:
-        return error(MissingSidecarConsumer)
-    if consumer invalid or ambiguous:
-        return error(InvalidSidecarConsumer)
+        return error(MissingMountConsumer)
+    if consumer ambiguous or incompatible:
+        return error(InvalidMountConsumer)
 
-    return SidecarPlan(mode, runtime, transport, consumer, policy.revision)
-```
+    return ExecutionPlan(
+        receiver=ClusterDS, mountScope=PodTarget, delivery=delivery,
+        provider=consumer.provider, cleanupOwner=verifiedLifecycleContract)
+~~~
 
-`ValidateConsumerContract` 校验约定的 mountproxy 容器、模式、UID 注入、配置与目标卷挂载、探针和唯一所有者，不只检查容器名称。它验证的是 PodSpec 中有合理消费方，不是在 NodePublish 中等待尚未启动的进程上线。
+消费方验证包括约定命令、UID、配置与业务目标卷映射、探针和唯一所有者。RuntimeClass 名不能替代 runtime 能力证据。API 或身份解析失败不能自动当作 runc。
 
-管理员可以在 admission 时提前发现问题，但 webhook 关闭时，DS 仍必须做这层验证。静态检查不能保证镜像一定含有正确客户端或进程一定成功；实际执行错误仍由结果和探针报告。
+核心区别是“事实与计划”分离：先记录当前部署和请求真正提供了什么，再判断能否组成一个支持的计划；driver 不负责猜测部署类型。
 
-### 5.2 CSI handlers
+### 5.3 CSI 与执行层
 
-```text
+AttachmentPlan 是卷/节点级的部分计划，只决定 controller 是否需要维护独立 FUSE Pod、既有委托动作及策略版本。完整 ExecutionPlan 在 NodePublish 获得 PodInfo 后完成。controller 不能从节点支持 RunD 推断该 Pod 的 runtime，也不能提前确定同卷各 Pod 是手动还是 webhook 提供消费方。两端只比较共同字段，不要求 controller 预知 Pod 级 transport/provider。
+
+~~~text
 ControllerPublish(volume, node):
-    plan = ResolveControllerPlan(volume, sharedPolicy(node))
-    if plan.mode == Legacy:
-        return ExistingControllerPublish(volume, node)
-    ValidateControllerSideCompatibility(plan)
-    PersistAttachmentPlan(plan)               # 非仅内存，供重试/解绑使用
-    return PublishContext(plan)              # 不创建独立 FUSE Pod
+    plan = ResolveAttachmentPlan(volume, node, sharedPolicy)
+    if plan.requiresStandaloneFusePod:
+        return ExistingFusePodManager.EnsureAndReturnEndpoint(plan)
+    if plan is managed by an existing runtime/controller:
+        return ExistingControllerAdapter.Publish(plan)
+    PersistAttachmentPlan(plan)
+    return PublishContext(plan)             # 新 Pod 消费方不在这里同步启动
 
 NodePublish(request):
-    plan = ResolveNodePlan(request, executionRole, sharedPolicy, stage)
-    ValidateControllerNodePlanAgreement(plan, request.PublishContext)
-    if plan is ExistingExecutionPlan or LegacyPlan:
-        return ExistingNodePublish(request)
+    plan = ResolvePlan(request.context)
+    if plan.receiver == ExistingDelegate or plan requires an opaque old adapter:
+        return ExistingDeploymentAdapter.NodePublish(request)
+        # 保留 host skip、COCO/rootfs 等旧语义，不强制进入新的构造/交付流程
+    ValidateControllerNodePlanAgreement(plan)
+    PersistPublicationOwnership(plan)
 
-    manifest = ResolveAllSelectedSidecarVolumes(request.Pod, plan.consumer)
-    # 清单只包含选择 Sidecar 且属于该消费方的卷，不包含 Legacy 卷
-    PersistPublicationPlan(request.identity, plan)
-    transport = TransportFactory(plan.transport)
-    transport.PublishManifest(manifest)
-    transport.PublishMountRequest(BuildMountRequest(request))
-    return Delivered                         # 不能等这个 Pod 的 sidecar 启动
+    mountRequest = BuildMountRequest(request)
+    executor = MountExecutorFor(plan.mountScope, plan.delivery)
+
+    if plan.completionPolicy == ExistingSynchronousResult:
+        return executor.ExecuteAndWait(plan, mountRequest)
+
+    manifest = ResolveCompleteInventoryForConsumer(plan)
+    # 只包含该消费方管理的卷，不包含共享 attach 或其他提供者的卷
+    executor.Deliver(plan, manifest, mountRequest)
+    return Delivered                        # 尚未启动的业务 sidecar 不能被同步等待
 
 NodeUnpublish(request):
-    plan = LoadRecordedPublicationPlan(request.identity)
-    # 按发布时的实际所有者清理，不能根据当前 gate 重新猜
-    if plan belongs to Legacy:
-        return ExistingNodeUnpublish(request)
-    return TransportFactory(plan.transport).Cancel(request.identity)
+    plan = LoadRecordedPlanOrIdentifyOldDeployment(request)
+    return CleanupCoordinatorFor(plan.mountScope, plan.cleanupOwner).Release(plan)
 
 ControllerUnpublish(volume, node):
-    plan = LoadRecordedAttachmentPlan(volume, node)
-    if plan belongs to Legacy:
-        return ExistingControllerUnpublish(volume, node)
-    return CleanupSidecarAttachmentMetadata(plan)
-```
+    plan = LoadRecordedAttachmentPlanOrIdentifyOldDeployment(volume, node)
+    return AttachmentManager.ReleaseRecordedResources(plan)
+~~~
 
-首次启用和旧状态迁移时，可能没有新执行记录；需要明确的旧路径识别规则。无法确认所有权时应报告诊断错误，不应同时尝试两种清理。执行记录的具体持久化位置需在第一阶段实现前选定，不能仅保存在 DS/controller 的进程内。
+BuildMountRequest、驱动分派和 PodTarget 执行尽量复用；SharedAttach 与 PodTarget 的挂载位置由计划决定。ExistingSocket 也可以执行 PodTarget，不能把“RPC”默认解释成共享挂载。
 
-### 5.3 webhook
+SharedAttach 的 Pod 解绑只解除该 Pod 的 bind，不能直接终止其他 Pod 仍在使用的共享客户端；后者由既有 attach/引用生命周期释放。PodTarget 则针对该 Pod 的独立目标清理。取消请求、解除本地路径和确认 guest/runtime 清理结果仍需协调，不能仅调用一个 transport.Cancel 就视为完成。
 
-```text
+没有旧记录时需要可验证的兼容识别规则；无法确认所有权就保留并报错，不能同时调用两种清理。执行记录持久化位置、控制器与 DS 的计划一致性检查，是实现前必须明确的接口。
+
+### 5.4 webhook
+
+~~~text
 OnPodCreate(pod):
     if webhook disabled:
         admission is not called
 
-    selected = ResolveSidecarVolumes(pod.PVCs, sharedDefaultPolicy)
-    if selected is empty:
+    intents = ResolveDSDeliveryIntents(pod.PVCs, sharedDefaultPolicy)
+    if no selected volume requires a new Pod consumer:
         return pod unchanged
 
-    if pod opts out of injection:
-        ValidateManualConsumers(pod, selected)
+    ValidateNoExistingProviderConflict(pod, intents)
+
+    if injection opted out:
+        ValidateManualConsumers(pod, intents)
         return pod
 
-    ValidateBindingsProfilesAndRuntimeSupport(pod, selected, stage)
-    return InjectOrValidateExistingConsumers(pod, selected)
-```
+    return InjectOrValidateDeclaredConsumers(pod, intents)
+~~~
 
-注入失败时 admission 拒绝并说明原因。未注入、不允许注入的 Pod 仍会在 NodePublish 校验；DS 不把“安装了 webhook”等同于“该 Pod 一定被正确注入”。
+不开 webhook 时，DS 执行相同的消费方契约验证，缺失返回 FailedPrecondition。开启 webhook 时，可以提前在 admission 拒绝错误，但不能因此删除 DS 的校验。
 
-## 6. 每种分支的用户可见表现
+## 6. 分支与可见现象
 
-| 条件 | 目标表现 |
+| 条件 | 预期 |
 | --- | --- |
-| Legacy + runc | 原有独立 FUSE Pod 与原 RPC 结果，不创建业务 sidecar 请求 |
-| Legacy + rund | 原有委托、挂载或错误；记录实测，不承诺 virtiofs |
-| Sidecar + 手动合法消费方 | 不创建独立 FUSE Pod；发布请求，启动探针控制业务启动 |
-| Sidecar + 无消费方 | NodePublish `FailedPrecondition`，明确指出卷、Pod 和缺失契约；不写成“挂载成功” |
-| Sidecar + 容器存在但 state/UID/PVC 映射错误 | `InvalidSidecarConsumer`，指出缺失/冲突项，不静默回退 |
-| Sidecar + 两个消费方声称管理同一卷 | 拒绝，不能让两个 mountproxy 同时执行 |
-| Sidecar + rund + HostPath 无法共享 | 共享条件可预检时直接报错；否则缺清单/heartbeat，startupProbe 不通过；不能因请求在 host 写成功就认为 guest 可见 |
-| Sidecar + 挂载请求失败 | 保存/回传原 mountproxy 错误，startupProbe 不通过，业务不启动 |
-| Sidecar + 挂载成功后 daemon 退出 | readiness 失败，保留最初成功结果并记录生命周期错误；不承诺自动重启业务 |
-| Sidecar + 第一/二阶段的 runc | 明确 Unimplemented，不假装回退成另一种 Sidecar 传输 |
-| 非法 PV 配置或组件策略不一致 | 明确配置错误，不随机选择一个分支 |
-| 未启用 Sidecar 却手工放入等待文件的 mountproxy | 不会据此隐式开启 Sidecar；旧 CSI 流程照常，手工 sidecar 会因无清单无法启动就绪，属于用户配置冲突 |
+| 保持常规 host 部署 | 独立 FUSE Pod、原 socket 与共享 attach 行为保留 |
+| 保持 guest agent 部署 | guest mountproxy 可以仍是 sidecar；原本地 RPC 与 PodTarget 行为保留 |
+| 保持外部 controller sandbox 部署 | 原 endpoint 提供方式和配置语义保留，不误判为 agent binary |
+| 不启用新交付且原 rund 配置报错 | 保留错误，不新增 virtiofs fallback |
+| DS→Pod 意图、唯一合法手动消费方 | 新计划使用 PodTarget；RunD 文件、runc 后续 PodRPC |
+| DS→Pod 意图、没有消费方 | FailedPrecondition，说明 Pod、卷和缺失契约；不能静默回到共享 FUSE Pod |
+| 两个提交者/消费方声称拥有同一卷 | OwnershipConflict，不双重挂载 |
+| 仅有外部 socket，提供者/目标契约未知 | 不能据此启用新交付；显式新请求报不兼容/依据不足 |
+| 目录、UID、业务目标映射错误 | 可预检的错误提前拒绝；跨 guest 共享不可见时探针失败并记录诊断 |
+| RunD 被命名为 runv、rund 或其他 class | 不凭名称分支；验证具体能力，支持的同族实现采用同一执行组合 |
+| 第一、二阶段显式要求新增 runc PodRPC | Unimplemented，不暗中切到文件 |
+| 新消费者的挂载失败/进程退出 | 初始结果与运行期错误分开；startup/readiness 分别处理，不承诺透明恢复 |
+| Pod 被强删、cleanup 无法确认 | 保留 CleanupUnknown/Pending 与独立诊断，不递归删除目标树 |
+| 只放入一个等待文件的 sidecar，却没有相应交付契约 | 不隐式改变旧 CSI 执行；消费者缺清单无法就绪，属于配置冲突 |
+| 组件策略版本不一致 | PolicyMismatch，不能由 controller 与 DS 各选一个计划 |
 
-建议的缺消费方错误信息：
+错误需说明是哪一维不成立：输入配置、提交所有权、消费方契约、runtime 能力、交付可见性、执行失败或清理失败。例如：
 
-```text
-sidecar mode selected for volume <volume>, but Pod <namespace>/<name>
-has no matching mountproxy consumer; enable injection or configure a manual sidecar
-```
+~~~text
+Pod request delivery selected for volume <volume>, but Pod <namespace>/<name>
+has no matching mountproxy consumer; enable injection or configure a manual consumer
+~~~
 
-不要把所有错误合并成“mount failed”或“runtime unsupported”。诊断至少区分：模式选择错误、角色冲突、消费方缺失、共享不可见、请求执行失败、运行期进程退出、卸载失败。日志和 Events 不应包含凭据。
+所有日志、状态与 Events 均保留关联身份，不输出凭据。
 
 ## 7. rund HostPath 生命周期
 
@@ -435,15 +489,15 @@ RPC 可以直接传回客户端失败原因，免去 status 文件读取，但**
 
 ## 9. 分阶段实施与验证
 
-### 阶段一：用户手动 sidecar、rund、HostPath
+### 阶段一：DS→手动提供的 Pod mountproxy、rund、HostPath
 
 不部署 webhook，不实现 runc sidecar RPC。先集中验证一条新执行路径和默认分支。
 
 | 用例 | 预期 |
 | --- | --- |
-| 未选 Sidecar、未配 sidecar | 与旧环境基线一致，记录是原有成功路径还是原有错误；不新增 virtiofs fallback |
-| 选择 Sidecar、未配 sidecar | 明确 MissingSidecarConsumer；不创建新的挂载消费方，不静默成功 |
-| 选择 Sidecar、手动配置正确 | 完整 manifest、请求、响应均经 HostPath，业务真实 I/O 通过 |
+| 保持既有部署、未配新消费方 | 与旧环境基线一致，记录是原有成功路径还是原有错误；不新增 virtiofs fallback |
+| 要求 DS→Pod 交付、未配消费方 | 明确 MissingMountConsumer；不创建新的挂载消费方，不静默成功 |
+| 要求 DS→Pod 交付、手动配置正确 | 完整 manifest、请求、响应均经 HostPath，业务真实 I/O 通过 |
 | 手动配置目录/UID/目标错误 | 能识别的配置错误提前拒绝，共享不可见时探针明确失败 |
 | 多卷，其中一个缺失/失败 | 其他卷结果仍可观察，业务不启动；清单不因只收到部分请求而缩水 |
 | sidecar 重启、DS 重启 | 不重建 live 源目录，旧 session 不误放行，所有权可恢复或明确报错 |
@@ -452,26 +506,28 @@ RPC 可以直接传回客户端失败原因，免去 status 文件读取，但**
 
 ### 阶段二：增加可选 webhook
 
-验证第 3.2 节完整四格矩阵：Legacy/Sidecar × webhook 关闭/开启。另测 opt-out + 合法手动 sidecar、opt-out + 无消费方、webhook 不可用、无匹配 profile、重复注入和错误绑定。
+验证第 4.2 节完整四格矩阵：是否要求 DS→Pod 交付 × webhook 关闭/开启。另测 opt-out + 合法手动 sidecar、opt-out + 无消费方、webhook 不可用、无匹配 profile、重复注入和错误绑定。
 
 webhook 不可用时：需要自动注入的请求拒绝；符合 admission bypass 的手动配置仍应可运行。不开启自动注入的合法用法不能依赖 webhook 在线。
 
-混合卷必须单独覆盖：同 Pod 一个 Legacy 卷、一个 Sidecar 卷；manifest 和注入只管理后者，不能双重挂载，也不能等待 Legacy 卷的 sidecar 状态。
+混合卷必须单独覆盖：同 Pod 一个既有共享 FUSE 卷、一个新的 PodTarget 卷；新 manifest 和注入只管理后者，不能双重挂载，也不能等待其他提供者的状态。
 
-### 阶段三：runc sidecar RPC
+### 阶段三：DS→runc Pod mountproxy RPC
 
-保持相同的模式与 webhook 矩阵，将内部 transport 切到 RPC。验证实际挂载失败结果、启动顺序无死锁、会话与身份隔离、取消、重连、DS/sidecar 重启和结果持久化。
+保持交付意图与 webhook 的四格矩阵，为新的 runc PodTarget 计划增加 RPC executor，不改变既有 RPC 路径。验证实际挂载失败结果、启动顺序无死锁、会话与身份隔离、取消、重连、DS/sidecar 重启和结果持久化。
 
-runc Legacy 仍使用原独立 FUSE Pod。rund HostPath 不因新增 RPC 被迁移。旧 csi-agent 路径每阶段均做回归隔离。
+runc 的既有共享挂载仍使用原独立 FUSE Pod。rund HostPath 不因新增 RPC 被迁移。guest csi-agent 与外部 controller 路径每阶段均回归，验证共同执行能力复用而执行权没有变化。
 
 每次实现只跑直接相关的简单代码测试；完整 E2E 等新的环境按上述阶段执行，不提前创建集群。
 
 ## 10. 评审需确认的决策
 
-1. **缺消费方策略**：建议显式 Sidecar + 无消费方直接报配置错误；未选择 Sidecar 才执行默认流程，不将“默认”和“Sidecar 失败后的回退”混为一谈。
-2. **默认策略来源**：建议相关组件同源配置；若必须只改 DS gate，需先设计异构节点策略与 admission 的协调。
-3. **持久化执行计划**：确定 controller/node 的记录位置与旧状态迁移，保证解绑按原所有者执行。
-4. **runc RPC 结果契约**：确认接受异步交付加独立结果，还是要求改变启动编排以实现初次 NodePublish 同步挂载。
-5. **旧基线**：先验证新 rund 环境未启用 Sidecar 时的实际行为；默认报错是可接受基线，virtiofs 不是本次新增默认。
+1. **配置语义与命名**：选择的是集群 CSI 到 Pod 的请求交付契约，不是是否存在 sidecar；gate/PV key 正式名字待确认，不直接采用此前二分名称。
+2. **缺消费方策略**：显式要求新的 DS→Pod 交付但无消费方，建议直接报配置错误；保持当前部署契约时执行原流程，不将默认与失败后的回退混为一谈。
+3. **默认策略来源**：建议相关组件同源配置；若必须只改 DS gate，需先设计异构节点策略与 admission 的协调。
+4. **持久化执行计划**：确定 controller/node 的记录位置与旧状态迁移，保证解绑按原所有者执行。
+5. **runc RPC 结果契约**：确认接受异步交付加独立结果，还是要求改变启动编排以实现初次 NodePublish 同步挂载。
+6. **旧基线与 runtime 能力**：先验证实际 rund 环境的当前部署行为；默认报错是可接受基线，virtiofs 不是新增默认，runv/rund 名称不承担角色或能力判定。
+7. **第一阶段准入**：固定完整 sidecar spec 与异常清理仍未解决，不能用已有固定 args/probe 和优雅删除 E2E 代替。
 
 实验实现的历史环境与验证证据见 [既有调研与 Review 说明](rund3-fuse-design-review-zh.md)、[验证记录](rund3-fuse-validation.md)。这些记录不能替代本设计三个阶段的验收。

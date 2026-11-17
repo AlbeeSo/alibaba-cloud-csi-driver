@@ -1,6 +1,6 @@
 # RunD 3 FUSE 方案设计、生命周期与 Review 指南
 
-后续目标方案以 [FUSE Sidecar 挂载模式设计](fuse-sidecar-design-zh.md) 为准；该新设计尚未实现。本文保留实验实现及已完成验证的说明。
+后续目标方案见 [FUSE 请求交付与挂载生命周期重构设计](fuse-sidecar-design-zh.md)，采用四维执行计划而非 Legacy / Sidecar 二分；该新设计尚未实现。本文保留实验实现及已完成验证的说明。
 
 本文对应 [PR #12](https://github.com/AlbeeSo/alibaba-cloud-csi-driver/pull/12)，E2E 基线为 `8ab92f00e`，环境验证于 2026-11-16 完成，文档整理于 2026-11-17。后续驱动自动启用、固定启动配置和 CSI 自动卷清单仅进行本地代码测试，尚未在新环境 E2E。
 
