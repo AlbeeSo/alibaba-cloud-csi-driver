@@ -1,5 +1,23 @@
 enableSubstrate: false
 
+# Optional admission service for RundCSIProtocol3. The ACK runv runtime contract and
+# installation feature gate select the protocol; this only automates sidecars.
+fuseSidecarWebhook:
+  enabled: false
+  image: ""
+  replicas: 2
+  tlsSecretName: ""
+  caBundle: "" # base64 PEM; certificate SAN: <release>-fuse-sidecar.<namespace>.svc
+  profiles: {}
+  # oss: {driver: ossplugin.csi.alibabacloud.com, image: REGISTRY/mount-proxy-aio:TAG}
+  # customfuse: {driver: customfuseplugin.csi.alibabacloud.com, image: REGISTRY/custom-client:TAG}
+  namespaceSelector: {}
+  ossStateRoot: /var/run/ossfs/file-volumes
+  customStateRoot: /var/run/customfuse/file-volumes
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {memory: 256Mi}
+
 substrate:
   apiEndpoint: k8s:///ate-system/api:443
   apiServerName: api.ate-system.svc

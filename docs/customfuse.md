@@ -104,6 +104,11 @@ is the adapter's job.
 
 ## Configuration
 
+For RunD 3 FUSE volumes, see the [shared protocol and optional webhook](rund3-fuse.md)
+and [manual native sidecar example](../examples/customfuse/6-file-sidecar/README.md).
+The protocol supports ossfs, ossfs2 and customfuse, selected by runtimeClass rund
+and the installation's RundCSIProtocol3 feature gate.
+
 ### Fuse pod image (csi-plugin ConfigMap)
 
 Key format: `fuse-<fuseType>`, where `fuseType` matches the PV's `volumeAttributes.fuseType`.

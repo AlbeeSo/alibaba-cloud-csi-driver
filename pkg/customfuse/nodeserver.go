@@ -4,14 +4,18 @@ package customfuse
 
 import (
 	"context"
+	"errors"
+	"os"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/common"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/filevolume"
 	mounterutils "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 	mountutils "k8s.io/mount-utils"
 )
@@ -19,6 +23,8 @@ import (
 const metricsPathPrefix = "/host/var/run/customfuse/"
 
 type nodeServer struct {
+	isCSIAgent bool
+	clientset  kubernetes.Interface
 	locks      *utils.VolumeLocks
 	rawMounter mountutils.Interface
 	// mountProxySock is the override half of ResolveMountProxySocket: the
@@ -67,6 +73,30 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		return nil, status.Errorf(codes.InvalidArgument, "auth config error: %v", err)
 	}
 	authCfg := makeAuthConfig(opts)
+	if filevolume.Enabled() && !ns.isCSIAgent && req.VolumeContext["csi.alibabacloud.com/publish-method"] != "mount" {
+		sidecar, err := filevolume.ResolvePublish(ctx, ns.clientset, req, ns.NodeID)
+		if err != nil {
+			return nil, status.Error(codes.FailedPrecondition, err.Error())
+		}
+		if !sidecar {
+			return &csi.NodePublishVolumeResponse{}, nil
+		}
+		if err := filevolume.PublishPodManifest(ctx, ns.clientset, req, filevolume.CustomDriver, fileRoot()); err != nil {
+			return nil, status.Errorf(codes.FailedPrecondition, "publish Pod volume manifest: %v", err)
+		}
+		if err := publishFile(req, opts); err != nil {
+			code := codes.InvalidArgument
+			var pathError *os.PathError
+			if errors.Is(err, errFileConfigurationChanged) {
+				code = codes.AlreadyExists
+			}
+			if errors.As(err, &pathError) {
+				code = codes.Internal
+			}
+			return nil, status.Errorf(code, "publish file configuration: %v", err)
+		}
+		return &csi.NodePublishVolumeResponse{}, nil
+	}
 
 	// Resolve mount-proxy socket path. ns.mountProxySock is set by csi-plugin
 	// (--customfuse-mount-proxy-sock flag) or csi-agent (NewCSIAgent), overriding PublishContext.
@@ -157,6 +187,9 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 	}
 	defer ns.locks.Release(req.VolumeId)
 
+	if err := filevolume.Unpublish(fileRoot(), req.VolumeId, req.TargetPath); err != nil {
+		return nil, status.Errorf(codes.Internal, "remove file request: %v", err)
+	}
 	err := mountutils.CleanupMountPoint(req.TargetPath, ns.rawMounter, true)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to unmount target %q: %v", req.TargetPath, err)

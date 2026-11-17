@@ -20,6 +20,7 @@ type CSIAgent struct {
 
 func NewCSIAgent(socketPath string) *CSIAgent {
 	ns := &nodeServer{
+		isCSIAgent:      true,
 		locks:           utils.NewVolumeLocks(),
 		rawMounter:      mountutils.NewWithoutSystemd(""),
 		skipGlobalMount: utils.GetSkipGlobalMount(true),

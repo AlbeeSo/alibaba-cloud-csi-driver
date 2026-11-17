@@ -29,6 +29,7 @@ import (
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/common"
 	fpm "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/fuse_pod_manager"
 	ossfpm "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/fuse_pod_manager/oss"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/filevolume"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
 	mounterutils "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
 	"google.golang.org/grpc/codes"
@@ -174,6 +175,18 @@ func (cs *controllerServer) ControllerPublishVolume(ctx context.Context, req *cs
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
+	if filevolume.Enabled() {
+		sidecar, err := filevolume.SidecarNode(ctx, cs.client, req.NodeId)
+		if err != nil {
+			return nil, status.Error(codes.FailedPrecondition, err.Error())
+		}
+		if sidecar {
+			if err := validateFileOptions(opts); err != nil {
+				return nil, status.Error(codes.InvalidArgument, err.Error())
+			}
+			return &csi.ControllerPublishVolumeResponse{}, nil
+		}
+	}
 	// Note: Skip controller publish for direct=true.
 	//   The actual mounting of these volumes will be handled by rund/coco.
 	if opts.DirectAssigned {

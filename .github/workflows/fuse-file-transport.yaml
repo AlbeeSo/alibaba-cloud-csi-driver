@@ -1,0 +1,40 @@
+name: FUSE file transport contracts
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+        with:
+          version: v3.17.4
+      - name: Helm admission configuration contract
+        run: go test -count=1 ./test/chart
+      # Always run these contracts, including when only shared dependencies or
+      # interceptors changed. No Kubernetes cluster, FUSE device or registry needed.
+      - name: Publish, sidecar, readiness and process lifecycle
+        run: |
+          sudo -E env "PATH=$PATH" go test -race -count=1 \
+            ./cmd/mount-proxy-server \
+            ./pkg/customfuse \
+            ./pkg/oss \
+            ./pkg/mounter/proxy/filevolume \
+            ./pkg/mounter/proxy \
+            ./pkg/mounter/fusesidecar \
+            ./pkg/mounter/interceptors \
+            ./pkg/utils/rund/directvolume \
+            ./pkg/mounter/proxy/server \
+            ./pkg/mounter/proxy/server/customfuse \
+            ./pkg/mounter/proxy/server/ossfs \
+            ./pkg/mounter/proxy/server/ossfs2

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"net"
@@ -16,6 +17,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/filevolume"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/server"
 	_ "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/server/alinas"
 	_ "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/server/customfuse"
@@ -23,19 +25,30 @@ import (
 	_ "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/server/ossfs2"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils"
 	"k8s.io/klog/v2"
+	"k8s.io/mount-utils"
 )
 
 var (
-	socketPath       string
-	drivers          []string
-	handleTimeout    time.Duration
-	enableNftables   bool
-	cleanupNASMounts bool
+	socketPath                              string
+	drivers                                 []string
+	handleTimeout                           time.Duration
+	enableNftables                          bool
+	cleanupNASMounts                        bool
+	fileStateDir, fileTargetDir, filePodUID string
+	fileExpected                            []string
+	fileCheckReady                          bool
+	fileMode                                bool
 )
 
 func main() {
+	flag.BoolVar(&fileMode, "file-mode", false, "run Pod-scoped file transport instead of socket mode")
+	flag.StringVar(&fileStateDir, "file-state-dir", filevolume.DefaultStateDir, "Pod-scoped desired/status directory; explicitly setting this also enables file mode")
+	flag.StringVar(&fileTargetDir, "file-target-dir", filevolume.DefaultTargetDir, "this Pod's CSI volume directory inside the sidecar")
+	flag.StringVar(&filePodUID, "file-pod-uid", os.Getenv("POD_UID"), "Pod UID from Downward API")
+	flag.StringSliceVar(&fileExpected, "file-expected-volumes", nil, "optional legacy override; by default load the CSI-published Pod volume manifest")
+	flag.BoolVar(&fileCheckReady, "file-check-ready", false, "check file statuses and exit (startup/readiness probe)")
 	flag.StringVar(&socketPath, "socket", "/var/run/csi/mounter.sock", "socket path")
-	flag.StringSliceVar(&drivers, "driver", nil, "drivers to enable (e.g. 'ossfs,alinas')")
+	flag.StringSliceVar(&drivers, "driver", nil, "socket-mode drivers to enable (e.g. 'ossfs,alinas'); file mode automatically enables all file-capable drivers")
 	flag.DurationVar(&handleTimeout, "timeout", proxy.DefaultConnectionTimeout,
 		"how long a connection has to deliver a request and receive its answer; also caps a mount when shorter than what the client asks for")
 	flag.BoolVar(&enableNftables, "enable-nftables", false, "enable nftables rules to restrict mount proxy port access (default: false)")
@@ -44,6 +57,20 @@ func main() {
 	utils.AddKlogFlags(flag.CommandLine)
 	utils.AddGoFlags(flag.CommandLine)
 	flag.Parse()
+	if fileCheckReady {
+		if err := filevolume.CheckReady(fileStateDir, filePodUID, fileExpected, time.Now()); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	if fileMode || flag.CommandLine.Changed("file-state-dir") {
+		if err := runFileMode(); err != nil {
+			klog.ErrorS(err, "File mode stopped")
+			os.Exit(1)
+		}
+		return
+	}
 
 	_ = os.Remove(socketPath)
 	server.SetCleanupNASMountsOnExit(cleanupNASMounts)
@@ -80,6 +107,19 @@ func main() {
 		klog.ErrorS(err, "Failed to close server")
 	}
 	server.Terminate(drivers)
+}
+
+func runFileMode() error {
+	if err := server.EnsureFuseDevice("/dev/fuse"); err != nil {
+		return err
+	}
+	fileDrivers := server.InitFileDrivers()
+	defer server.Terminate(fileDrivers)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	r := filevolume.Runner{Root: fileStateDir, PodUID: filePodUID, TargetRoot: fileTargetDir,
+		Expected: fileExpected, Timeout: handleTimeout, Backend: server.FileBackend{Mounter: mount.NewWithoutSystemd("")}}
+	return r.Run(ctx)
 }
 
 func listen(socketPath string) (*net.UnixListener, error) {

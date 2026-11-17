@@ -1,0 +1,154 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fuse-file-demo
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: fuse-file-demo-a
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadOnlyMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  csi:
+    driver: customfuseplugin.csi.alibabacloud.com
+    volumeHandle: fuse-file-demo-a
+    volumeAttributes:
+      source: first-volume
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: fuse-file-demo-b
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadOnlyMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  csi:
+    driver: customfuseplugin.csi.alibabacloud.com
+    volumeHandle: fuse-file-demo-b
+    volumeAttributes:
+      source: second-volume
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: first
+  namespace: fuse-file-demo
+spec:
+  accessModes: [ReadOnlyMany]
+  storageClassName: ""
+  volumeName: fuse-file-demo-a
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: second
+  namespace: fuse-file-demo
+spec:
+  accessModes: [ReadOnlyMany]
+  storageClassName: ""
+  volumeName: fuse-file-demo-b
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reader
+  namespace: fuse-file-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fuse-file-reader
+  template:
+    metadata:
+      annotations: {fuse.csi.alibabacloud.com/inject: "false"}
+      labels:
+        app: fuse-file-reader
+    spec:
+      runtimeClassName: runv
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 45
+      initContainers:
+        - name: mountproxy
+          # Build this image from the repository root; replace before applying.
+          image: FUSE_FILE_DEMO_IMAGE
+          command: [csi-mount-proxy-server]
+          restartPolicy: Always
+          resources:
+            requests: {cpu: 250m, memory: 128Mi}
+            limits: {cpu: "1", memory: 256Mi}
+          securityContext:
+            privileged: true
+            runAsUser: 0
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+          args:
+            - --file-mode
+          startupProbe:
+            exec:
+              command: [csi-mount-proxy-server, --file-check-ready]
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command: [csi-mount-proxy-server, --file-check-ready]
+            periodSeconds: 2
+            timeoutSeconds: 2
+          volumeMounts:
+            - name: state
+              mountPath: /volume-state
+              subPathExpr: $(POD_UID)
+            - name: first
+              mountPath: /pod-volumes/fuse-file-demo-a/mount
+              mountPropagation: Bidirectional
+            - name: second
+              mountPath: /pod-volumes/fuse-file-demo-b/mount
+              mountPropagation: Bidirectional
+      containers:
+        - name: reader
+          image: mirrors-ssl.aliyuncs.com/busybox:1.36
+          command: [sh, -ec]
+          args:
+            - |
+              test "$(cat /first/hello.txt)" = 'hello from first-volume'
+              test "$(cat /second/hello.txt)" = 'hello from second-volume'
+              echo 'Both FUSE volumes are available before the application starts'
+              while true; do sleep 10; done
+          volumeMounts:
+            - name: first
+              mountPath: /first
+              readOnly: true
+              mountPropagation: HostToContainer
+            - name: second
+              mountPath: /second
+              readOnly: true
+              mountPropagation: HostToContainer
+      volumes:
+        - name: state
+          hostPath:
+            path: /var/run/customfuse/file-volumes
+            type: DirectoryOrCreate
+        - name: first
+          persistentVolumeClaim:
+            claimName: first
+            readOnly: true
+        - name: second
+          persistentVolumeClaim:
+            claimName: second
+            readOnly: true

@@ -9,6 +9,7 @@ import (
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/common"
 	fpm "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/fuse_pod_manager"
 	customfusefpm "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/fuse_pod_manager/customfuse"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/filevolume"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/options"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/version"
@@ -40,10 +41,8 @@ func NewServers(endpoint string, serviceType utils.ServiceType, csiCfg utils.Con
 	}
 
 	if serviceType&utils.Controller != 0 {
-		// Only the controller talks to the API server: it resolves the fuse image out
-		// of the csi-plugin ConfigMap and owns the fuse pods. The node reaches them
-		// through the mount-proxy socket, so building a clientset here would leave a
-		// node-only plugin able to fail on something it never uses.
+		// The controller owns legacy fuse Pods and resolves node capabilities.
+		// File-mode node plugins separately verify the consuming Pod identity.
 		cfg, err := options.GetRestConfig()
 		if err != nil {
 			klog.Fatalf("Failed to get rest config: %v", err)
@@ -57,11 +56,21 @@ func NewServers(endpoint string, serviceType utils.ServiceType, csiCfg utils.Con
 		constrainRV := fpm.ShouldConstrainResourceVersion(k8sVersion)
 		fusePodManager := fpm.NewFusePodManager(fuseManager, clientset, constrainRV)
 		servers.ControllerServer = &controllerServer{
+			clientset:      clientset,
 			fusePodManager: fusePodManager,
 		}
 	}
 	if serviceType&utils.Node != 0 {
+		var nodeClient kubernetes.Interface
+		if filevolume.Enabled() {
+			cfg, err := options.GetRestConfig()
+			if err != nil {
+				klog.Fatalf("Failed to get RunD 3 rest config: %v", err)
+			}
+			nodeClient = kubernetes.NewForConfigOrDie(cfg)
+		}
 		servers.NodeServer = &nodeServer{
+			clientset:       nodeClient,
 			locks:           utils.NewVolumeLocks(),
 			rawMounter:      mountutils.NewWithoutSystemd(""),
 			skipGlobalMount: utils.GetSkipGlobalMount(false),

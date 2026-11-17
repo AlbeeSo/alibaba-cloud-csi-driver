@@ -9,11 +9,13 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/common"
 	fpm "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/fuse_pod_manager"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/filevolume"
 	mounterutils "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 )
 
@@ -22,6 +24,7 @@ const (
 )
 
 type controllerServer struct {
+	clientset      kubernetes.Interface
 	fusePodManager *fpm.FusePodManager
 	common.GenericControllerServer
 }
@@ -47,6 +50,18 @@ func (cs *controllerServer) ControllerPublishVolume(ctx context.Context, req *cs
 
 	if err := precheckAuthConfig(opts); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "auth config error: %v", err)
+	}
+	if filevolume.Enabled() {
+		sidecar, err := filevolume.SidecarNode(ctx, cs.clientset, req.NodeId)
+		if err != nil {
+			return nil, status.Error(codes.FailedPrecondition, err.Error())
+		}
+		if sidecar {
+			if opts.AuthType != "" {
+				return nil, status.Error(codes.InvalidArgument, "file transport currently requires Secret credential passthrough")
+			}
+			return &csi.ControllerPublishVolumeResponse{}, nil
+		}
 	}
 	authCfg := makeAuthConfig(opts)
 	ptCfg := &fpm.PodTemplateConfig{
