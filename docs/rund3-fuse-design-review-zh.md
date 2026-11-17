@@ -1,5 +1,7 @@
 # RunD 3 FUSE 方案设计、生命周期与 Review 指南
 
+后续目标方案以 [FUSE Sidecar 挂载模式设计](fuse-sidecar-design-zh.md) 为准；该新设计尚未实现。本文保留实验实现及已完成验证的说明。
+
 本文对应 [PR #12](https://github.com/AlbeeSo/alibaba-cloud-csi-driver/pull/12)，E2E 基线为 `8ab92f00e`，环境验证于 2026-11-16 完成，文档整理于 2026-11-17。后续驱动自动启用、固定启动配置和 CSI 自动卷清单仅进行本地代码测试，尚未在新环境 E2E。
 
 当前方案是在宿主机 CSI 中发布 Pod 隔离的挂载请求，由业务 Pod 的原生 sidecar 在 RunD guest 内执行 FUSE 挂载。ossfs、ossfs2、customfuse 复用同一文件协议、状态模型和生命周期。webhook 只负责自动构造 sidecar，可以关闭或逐 Pod 绕过。
