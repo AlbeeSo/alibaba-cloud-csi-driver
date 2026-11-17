@@ -35,7 +35,7 @@
 | true | false | false | COCO 分支，不是 virtiofs fallback |
 | true | false | true | MicroVM 分支，directAssigned 不改变该结果 |
 
-正常构造时，DS nodeServer 的 `skipGlobalMount` 默认 false，csi-agent 默认 true；参数还可能受既有部署配置影响。因此，现有直接 RunD 挂载通常依赖 agent 的执行配置，不能宣称所有名为 rund 的 Pod 都有一种自动 fallback。
+正常构造时，DS nodeServer 的 `skipGlobalMount` 默认 false，csi-agent 默认 true；普通 csi-plugin 也能通过环境变量将其改为 true。因此，这张表里的 RunD 执行分支并不要求进程一定是 csi-agent binary；外部 controller 提供 socket、普通 CSI 进程以直接挂载配置运行的 sandbox 是另一条既有路径。不能宣称所有名为 rund 的 Pod 都有一种自动 fallback。
 
 原 OSS `RundCSIProtocol3` 分支还会在 host 插件识别到旧 `rund` 路径时直接 skip，将执行交给外部机制。skip 成功本身不能证明后续发生了 virtiofs 共享或成功挂载。customfuse 原默认代码则通过 socket 和 `skipGlobalMount` 选择 attach 或直接挂载，没有完全相同的旧 gate 分支。
 
@@ -51,6 +51,54 @@
 - 第一阶段先记录新环境中不启用 Sidecar、不配 sidecar 的实测结果，作为后续比较基线。
 
 virtiofs 描述 host/guest 的文件共享方式，独立 FUSE Pod / 业务 sidecar 描述 FUSE 进程的执行位置，两者不应混成同一个枚举。
+
+### 2.3 三个参数实际从哪里来
+
+以下三参数组合表是 OSS 的逻辑；customfuse 复用 socket 和 skipGlobalMount 的来源，但不使用 OSS 的 DirectAssigned/运行时组合表。
+
+| 参数 | 实际输入与优先级 | 不代表什么 |
+| --- | --- | --- |
+| DirectAssigned | `VolumeContext["direct"]` 的合法布尔值 > `VolumeContext["runtimeclass"]` 推导值 > CSI 进程环境变量 `DEFAULT_RUNTIME_CLASS` 推导值 > false | 不是实际 Pod RuntimeClass 自动检测，也不是是否使用新 sidecar |
+| socket | 非空进程 flag/构造传入值 > `NodePublishVolumeRequest.PublishContext["mountPorxySocket"]` > 空 | 非空不表示 socket 已存在或可达，更不表示一定由独立 FUSE Pod、csi-agent 或业务 sidecar 提供 |
+| skipGlobalMount | `SKIP_GLOBAL_MOUNT` > `OSS_SKIP_GLOBAL_MOUNT` > 构造默认值；普通插件默认 false，csi-agent 默认 true | 不是根据 binary 名或 RuntimeClass 自动检测出来的事实 |
+
+#### DirectAssigned
+
+PV 典型配置为 `spec.csi.volumeAttributes.direct: "true"`。请求解析按字段名转小写处理；显式合法的 `direct` 优先级最高。
+
+没有合法显式值时，读取 PV/请求参数 `runtimeclass`，为空才读取进程环境变量 `DEFAULT_RUNTIME_CLASS`。值为 `rund` 得到 true，`runc` 或空得到 false；其他值警告并得到 false。非法 `direct` 值警告后保留前面推导结果。**这里不是读取 Pod.spec.runtimeClassName。**
+
+DirectAssigned 也参与 ControllerPublish：OSS 的旧 controller 在其为 true 时跳过创建独立 FUSE Pod，所以 controller 与 node 的环境默认不一致同样可能造成接线错误。
+
+#### socket
+
+普通 csi-plugin 的 `--mount-proxy-sock` 用于 OSS，`--customfuse-mount-proxy-sock` 用于 customfuse，默认均为空。非空 flag 会覆盖请求中注入的 socket。
+
+csi-agent 使用同名 flags，默认分别为 `/run/kube-agent/csi-agent.sock` 与 `/run/kube-agent/customfuse-agent.sock`，经构造函数写入 nodeServer 的覆盖值。
+
+请求字段是 **PublishContext** 的 `mountPorxySocket`，不是 VolumeContext；`Porxy` 的拼写错误属于现有 wire format，不能直接改正。普通 controller 创建独立 FUSE Pod 后会返回该字段，kubelet 后续带给 NodePublish；外部 sandbox controller 也可以把它写入请求。接收端只解析值，不根据这个字段识别生产者。
+
+因此，用户指出的“外部 controller 注入 socket”的场景确实与“csi-agent 由 flag 获得 socket”不同。注入本身也不会自动把 skipGlobalMount 改为 true；需要另看运行进程的环境配置。
+
+#### skipGlobalMount
+
+它表示是否绕过共享 attach/global mount，直接挂到本次 TargetPath。变量是通过环境配置和构造默认计算的，不是一个同名 PV key 或 CLI flag。
+
+若高优先级的非空环境变量无法解析，当前代码会警告并返回构造默认，不再尝试低优先级环境变量。例如非法 SKIP_GLOBAL_MOUNT 不会继续使用 OSS_SKIP_GLOBAL_MOUNT。
+
+#### 同样有 socket，也可能是不同部署
+
+| 部署/输入 | direct | socket 来源 | skipGlobalMount | OSS 旧执行效果 |
+| --- | --- | --- | --- | --- |
+| 常规 host CSI + 独立 FUSE Pod | 默认 false | 本仓库 ControllerPublish 返回的 PublishContext | 默认 false | RunC：共享 attachPath 后 bind 到 Pod target |
+| guest csi-agent + mountproxy | false 或 true | agent flag 的默认值或显式值 | 默认 true | RunD：直接挂 TargetPath |
+| 外部 controller 管理的 sandbox，普通 CSI 进程执行 | false 或 true | 外部注入 PublishContext，且无非空 flag 覆盖 | 环境配置 true | 同样可进入 RunD 直接挂载分支，但不是 csi-agent binary |
+| 外部只注入 socket，未改变普通插件默认 | false | 外部 PublishContext | false | 仍走 RunC 的 attach/global mount 逻辑，不会仅因 Pod 是 sandbox 自动直接挂载 |
+| 普通插件配置 direct=true、有 socket，但未跳过 global mount | true | 任意有效来源 | false | 组合表报错，不 fallback 到 virtiofs |
+
+这些是接收端代码对给定输入的确定结果，不是对所有外部 sandbox 部署配置的推测。外部 controller 的具体注入流程与目标进程位置，需要结合该部署的请求/环境配置确认。
+
+源码入口：[direct 推导](../pkg/oss/utils.go)、[socket 优先级](../pkg/mounter/utils/utils.go)、[skipGlobalMount 环境解析](../pkg/utils/util.go)、[插件 flags](../main.go)、[agent flags](../cmd/csi-agent/main.go)。
 
 ## 3. 配置模型
 
@@ -117,6 +165,8 @@ ControllerPublish 没有 PodInfo，webhook admission 时 Pod 通常尚未调度�
 4. 只有集群插件拥有执行权的请求，才进入新的 Legacy / Sidecar 选择。
 
 旧 `RundCSIProtocol3` 恢复旧语义，不负责选择新 Sidecar。旧委托的识别应依赖已确认的部署/执行契约，不能将所有 rund Pod 都归为旧委托，否则新 rund sidecar 永远进不去。
+
+还应保留“外部 controller 注入 socket、普通 CSI 进程执行”的既有 sandbox 路径，不把它误归为 guest csi-agent，也不因为有 socket 就判定已提供新业务 sidecar。该路径在 Legacy 下完整保留；显式迁移到新模式时需确认外部 controller 不再同时拥有挂载执行权。binary 角色、挂载目标策略、socket 提供者与实际运行位置应分别记录，而不是再用三个布尔值猜出唯一部署名称。
 
 ## 5. 目标伪代码
 
