@@ -120,3 +120,21 @@ kubectl -n csi-file-coherence patch configmap coherence --type=merge -p '{"data"
 - 最终 v12 镜像验证：sidecar 前的 init 使用数据 PVC 时明确拒绝；损坏 desired 导致 NotReady 但不丢已有 I/O，标准删除仍完成；双副本共享 PV 缩容后，仅被删除 UID 退休，存活副本 daemon PID 和双卷读取保持。
 
 没有把客户端 QPS 限制自动调大来掩盖冷 GET 成本；也没有把缺少大规模压测包装成运行时问题。
+
+## 8. 实际 rund 环境的补充小实验
+
+2026-11-18，用户补充权限后，在实际 rund 环境的独立 namespace 执行原生文件对照，不部署本 PR 的 CSI，不修改共享组件或已有业务。环境为 Kubernetes 1.36.2、containerd 2.3.6 系列、RuntimeClass rund/handler rund；guest 这组挂载显示为 virtiofs。
+
+三个小 Pod 固定在同一节点，默认 runtime writer/reader 对照 rund reader；无 CSI、FUSE、OSS 凭据或 RRSA。每次读取新启动 cat，检查目录直接挂载、目录 subPath、ConfigMap 和 projected ConfigMap：
+
+| 操作 | 默认 runtime reader | 实际 rund reader |
+|---|---|---|
+| 初始读取 | 四处均 v1 | 四处均 v1 |
+| host 原子替换已有文件 | 两个目录均 v2 | 两个目录均 v2 |
+| host 删除已有文件 | 新 cat 报不存在 | 新 cat 报不存在 |
+| 新文件名 | 可读取 | 可读取 |
+| ConfigMap/projected 更新 | 首次观察到约 10 秒更新 | 首次观察到约 48 秒均更新 |
+
+时间是离散采样首次观察值，不是精确传播延迟或 SLO。测试目录里的已知文件单独删除，再用 rmdir 清空目录，不递归删除宿主机路径；测试 namespace/Pod/ConfigMap 随后清理。
+
+结论修正：第 5 节的问题在自建 runv 2.2.4 复现，但**未在本次实际 rund 原生文件实验中复现**。不能把旧测试版本的问题当作实际 rund 的既定阻塞。此次只验证文件接口前提；本实现的 CSI→sidecar→FUSE、真实业务视图和 RRSA token 轮换仍未在实际环境验收。已有 OSS PV 使用 Secret，不能替代业务 SA RRSA 验证，也没有读取这些 Secret。

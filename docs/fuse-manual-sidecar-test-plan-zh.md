@@ -316,7 +316,7 @@ RunD 存在 guest kernel 与 host kernel 边界。若 FUSE 仅存在于 guest，
 
 ## 10. 本轮实际验证与交付要求
 
-测试只在自建的独立 ACK 集群执行。用户提供的参考环境仅按需只读比对，不部署、不改配置。前一次自建集群已释放，本轮需要重新创建并记录资源所有权，结束后记录回收情况。测试环境版本不必与参考环境完全一致，但 runtime binary/配置、guest kernel、共享目录机制、传播语义的差异必须记录，不能仅比较 RuntimeClass 名字。
+完整故障验收只在自建的独立 ACK 集群执行，资源已释放。用户后续授权且权限放行后，在实际 rund 环境独立 namespace 补充了无 CSI/FUSE 的原生文件一致性小实验；不更改共享 CSI、现有业务或节点配置，不执行强删/节点重启。实验范围与结果见根因记录第 8 节。不同环境的 runtime/配置、guest 文件系统和传播行为必须分别记录，不能仅比较 RuntimeClass 名字，也不能把原生文件通过当作完整 RRSA/FUSE 验收。
 
 鉴权使用 **业务 Pod ServiceAccount 的 RRSA**：显式 projected OIDC token，由 FUSE 客户端读取并刷新；不使用节点身份，不让 CSI 把一次性 STS 凭据落进 desired 代替 RRSA。必须验证 issuer/audience/sub/role/prefix 限制、token 轮换和 sidecar 重启。
 

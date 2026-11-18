@@ -1,6 +1,6 @@
 # RunD 手动 FUSE sidecar 设计
 
-本分支实现集群 CSI DaemonSet 向业务 Pod 内的 mountproxy 交付挂载请求。2026-11-18 已修复并真实复测 PVC 绑定校验、无 ACK 的标准卸载和控制文件 GC；双卷 RRSA、混合 ossfs1/ossfs2、失败隔离与异常退出链路已有证据。剩余限制是测试运行时的共享文件更新/投射可见性，不能把这些结果解释为任意 RunD 都已支持。
+本分支实现集群 CSI DaemonSet 向业务 Pod 内的 mountproxy 交付挂载请求。2026-11-18 已修复并真实复测 PVC 绑定校验、无 ACK 的标准卸载和控制文件 GC；双卷 RRSA、混合 ossfs1/ossfs2、失败隔离与异常退出链路已有证据。自建旧运行时存在共享文件一致性问题；实际 rund 的补充原生文件实验已通过，没有复现该问题，但完整 FUSE/RRSA 链路仍须在实际环境验收。
 
 - [验证记录与未通过项](fuse-manual-sidecar-validation-zh.md)
 - [逐项根因、标准依据与修复](fuse-manual-sidecar-rootcause-zh.md)
@@ -67,7 +67,7 @@ MountRequest JSON 保留未知扩展字段；新增必须支持的语义需通�
 
 generation 是请求内容摘要。同一 UID/key 的重复交付幂等，参数变化要求重建 Pod。desired 与撤销指令在合法生命周期内不靠修改旧内容更新。写入采用临时文件、fsync、rename，文件 0600、UID 目录 0700。RRSA 不将 JWT 或 STS AK 写入 desired；Secret 鉴权路径仍可能含凭据，不能将完整 JSON 作为诊断日志输出。
 
-**运行时一致性前提尚未满足：**自建测试版本中，host 原子替换旧文件会出现 guest 旧内容，host 删除 desired 也未被目录扫描可靠感知；新文件首次创建已在真实撤销测试中可见。这些事实不能推出任意文件更新可靠，也不能靠长 token 修复。当前不在 CSI 内重做 runtime 文件同步。
+**按运行时分别验收一致性：**自建 runv 2.2.4 中，host 替换/删除已有文件会出现 guest 旧内容，长 token 无法修复。后续实际 rund 的无 CSI/FUSE 对照中，替换/删除与 ConfigMap/projected 更新均可见，没有复现旧版本问题，见根因记录第 8 节。原生文件通过仍不能替代本实现数据面与 RRSA 轮换验收；CSI 不重做 runtime 文件同步。
 
 ## 启动、失败与探针
 
@@ -138,4 +138,4 @@ Fluid internal 的 RunD 注入将数据 PVC 改成共享 emptyDir；具体镜像
 7. `filevolume/retire.go`、`pkg/oss/file_gc.go`、`main.go`：控制文件退休、孤儿 GC、进程生命周期；重点检查无递归数据删除、并发/损坏状态及活跃 UID 保留。
 8. 对应测试及根因/验证记录：区分我们已修复的实现问题与已独立重现的运行时文件接口限制。
 
-没有 webhook、RBAC 扩权或依赖版本变更。绑定、NodeUnpublish 和 GC 不再作为“外部问题”；当前保留标准文件 API、投射卷和 CRI 生命周期，运行时共享文件更新/真实 RRSA 轮转仍需在目标 rund 验收。未扩大到 webhook/runc，也不将单节点测试等同生产规模验收。
+没有 webhook、RBAC 扩权或依赖版本变更。绑定、NodeUnpublish 和 GC 不再作为“外部问题”；当前保留标准文件 API、投射卷和 CRI 生命周期。实际 rund 的原生文件更新已验证，完整 FUSE 链路及真实 RRSA 轮转仍需验收。未扩大到 webhook/runc，也不将单节点测试等同生产规模验收。

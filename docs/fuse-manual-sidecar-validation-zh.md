@@ -31,6 +31,12 @@
 
 成本：1/10/100 卷冷缓存每 Pod/claim 一次 PVC GET，热缓存无新增 PVC 查询；RuntimeClass 分类复用原 Pod GET。Linux arm64 缓存命中函数约 0.29 微秒，不能代表完整 RPC。真实双卷 readiness exec 47 个样本均值约 27.6 ms，累计 p50/p95/p99 桶上界 50 ms；不是生产规模 SLO。未进行大规模并发或完整 IOPS 压测，不将它们归咎于封闭实现。
 
+## 实际 rund 环境补充验证
+
+2026-11-18 权限放行后，已在实际 rund 环境独立 namespace 运行三个无 CSI/FUSE 的小 Pod。HostPath 直接目录与目录 subPath 的原子替换、删除、新文件均可见；ConfigMap/projected 在默认 runtime 首次观察约 10 秒更新，在 rund 首次观察约 48 秒均更新。guest 文件系统为 virtiofs。没有复现自建 runv 2.2.4 的旧内容问题，不能再把它视为实际 rund 的已知阻塞。
+
+这里只证明原生文件接口前提：实际环境完整 CSI/sidecar/FUSE 和 RRSA 轮换仍未验收。现有 OSS PV 均使用 Secret，未读取或复用凭据。仅创建并删除隔离测试资源和自有 HostPath 文件/空目录；共享 CSI、现有 Pod 与节点配置未修改。详细对照见[根因记录第 8 节](fuse-manual-sidecar-rootcause-zh.md#8-实际-rund-环境的补充小实验)。下文“参考环境只读”描述的是此前阶段，不包括本次已授权的小实验。
+
 ## 环境
 
 自建 ACK v1.33.3，单独创建测试节点及子网；复用一个无 vSwitch 的现有 VPC，因为账号 VPC 配额已满。非托管 CSI 使用仓库 Helm chart，无 webhook。RuntimeClass 名为 rund，handler 为 runv，实际 runtime type 为 io.containerd.rund.v2。host kernel 为 5.10.134-19.8.al8.x86_64，guest kernel 为 4.19.91-685c634.al7.x86_64。业务与 FUSE 运行在 guest 内。

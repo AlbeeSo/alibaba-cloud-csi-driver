@@ -1,6 +1,6 @@
 # 手动 FUSE sidecar：配置与排障
 
-本说明对应 `codex/fuse-coco-runtime-split` 分支，使用集群 CSI DaemonSet、RunD、手动原生 sidecar、双卷 OSSFS2 与 RRSA。绑定验证、标准卸载和控制 GC 已补齐；测试运行时的共享文件更新及 RRSA 投射轮转仍需运行时维护方确认。先阅读 [设计](fuse-manual-sidecar-design-zh.md)、[根因记录](fuse-manual-sidecar-rootcause-zh.md) 和 [验证记录](fuse-manual-sidecar-validation-zh.md)，不能直接当作任意 RunD 的生产安装方案。
+本说明对应 `codex/fuse-coco-runtime-split` 分支，使用集群 CSI DaemonSet、RunD、手动原生 sidecar、双卷 OSSFS2 与 RRSA。绑定验证、标准卸载和控制 GC 已补齐；自建旧运行时的共享文件问题没有在实际 rund 原生文件小实验中复现，但完整 FUSE/RRSA 链路仍待实际环境验收。先阅读 [设计](fuse-manual-sidecar-design-zh.md)、[根因记录](fuse-manual-sidecar-rootcause-zh.md) 和 [验证记录](fuse-manual-sidecar-validation-zh.md)，不能直接当作任意 RunD 的生产安装方案。
 
 ## 前提
 
