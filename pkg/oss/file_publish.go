@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/cloud/metadata"
@@ -97,7 +98,8 @@ func (ns *nodeServer) publishFileVolume(ctx context.Context, req *csi.NodePublis
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "sidecar RRSA options: %v", err)
 	}
-	if err := filevolume.PublishPodManifest(pod, req, filevolume.Root(ossFileRoot)); err != nil {
+	// Reuse the validated inventory instead of scanning/logging the Pod twice.
+	if err := filevolume.WriteJSON(filepath.Join(filevolume.Root(ossFileRoot), manifest.PodUID, "manifest.json"), manifest); err != nil {
 		return nil, status.Errorf(codes.FailedPrecondition, "publish Pod volume manifest: %v", err)
 	}
 	err = filevolume.Publish(filevolume.Root(ossFileRoot), req.VolumeContext["csi.storage.k8s.io/pod.uid"], req.VolumeId, req.TargetPath, proxy.MountRequest{

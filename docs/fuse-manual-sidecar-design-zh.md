@@ -35,7 +35,7 @@ NodePublish(req):
 
 COCO 候选条件为内部 `directAssigned=true, socket为空, skipGlobalMount=false`。实验 PV 使用 `runtimeclass: rund`，Pod 使用 `runtimeClassName: rund`，DS 使用 `RundCSIProtocol3=false`。没有新增全局 sidecar feature gate，也没有把其他旧分支改成这套协议。缺少手动 sidecar 时明确 FailedPrecondition，不默认猜测 virtiofs 回退。
 
-公共 NodePublish 包装层原本就 GET Pod；runtime 分类复用 context，包括失败结果，不 GET RuntimeClass/PV/Node。可信绑定验证会在冷缓存时增加每个 Pod/claim 一次 PVC GET，成功结果进入 4096 项 LRU；重复发布不再 GET PVC，重启/淘汰后重新验证。没有全集群 informer/list/watch。1/10/100 卷分别测量冷/热请求计数；不能再宣称所有新逻辑零 API 成本。探针、卷 worker 和控制 GC 不调用 Kubernetes API。
+公共 NodePublish 包装层原本就 GET Pod；runtime 分类复用 context，包括失败结果，不 GET RuntimeClass/PV/Node。绑定校验优先使用 VolumeContext 的 `csi.storage.k8s.io/pv/name`、`csi.storage.k8s.io/pvc/namespace` 和 `csi.storage.k8s.io/pvc/name`：三个字段完整且与请求目标、Pod 和 sidecar 的 claim 声明一致时，冷启动也不 GET PVC、不初始化绑定缓存。任何已提供字段冲突都明确拒绝，不用 API 或旧缓存掩盖；一致但不完整时才走兼容兜底，缓存命中则不查询，否则每个 Pod/claim 冷查一次 Bound PVC，成功结果进 4096 项 LRU。没有新增 list/watch。1/10/100 卷分别测量元数据快速路径及兜底的冷/热计数；不能把元数据缺失时的网络成本说成零。探针、卷 worker 和控制 GC 不调用 Kubernetes API。
 
 ## 数据面与控制面
 
@@ -45,7 +45,11 @@ HostPath 只存控制文件：host 的 `/var/run/ossfs/file-volumes/<PodUID>` �
 
 固定命令为 `csi-mount-proxy-server --file-mode`，不配置 driver 和 expected-volumes。所有已链接的 file-capable driver 自动注册，请求的 fstype 选择具体实现。增加卷只增加 volumes/volumeMounts，不改 sidecar args/probe。inventory 从已有 Pod 挂载声明生成，等待全部卷，不以“目前已经到达的文件”作为完整集合。
 
-mountPath 中的 PV 名必须对应该 PVC 的真实绑定。当前逐目标验证标准 PVC.spec.volumeName，真实交换两个不同 PVC 的错误会在发布任何可执行配置前被拒绝；重复 PVC 目标也拒绝。mountproxy 必须位于消费这些 PVC 的其他 init container 之前，防止 init 在 FUSE 挂载前读取空目录或写入本地回退数据。不使用这些卷的配置准备 init 可以在它之前。
+mountPath 中的 PV 名必须对应该 PVC 的绑定。快速路径使用一致的 PV/PVC 元数据声明，缺失时才通过标准 PVC.spec.volumeName 兜底；交换两个不同 PVC 的路径会被元数据冲突或 Bound 检查拒绝，重复 PVC 目标也拒绝。元数据是配置契约，不是实时绑定证明：静态填写及 Retain 后重新绑定必须同步维护，无法防御所有声明同时填写错误的情况。挂载路径和 mountproxy 请求语义保持不变。
+
+mountproxy 必须位于消费这些 PVC 的其他 init container 之前。不在首位时先输出 INFO，说明正在检查前置 PVC 引用；若前置 init 使用任何 PVC，输出 WARNING，列出去重的 PVC 总数、名称、容器及与 sidecar 管理集合的交集数。与本 sidecar 无关的 PVC 仅告警、仍允许；有交集则保持现有明确拒绝，防止前置 init 返回 0 后静默放行业务。完全不使用 PVC 的准备 init 只有 INFO。该扫描仅使用已有 Pod 对象，不查询 API。这里没有把日志改成排序保证，也没有默认启用尚未确认生效的 ASI 优先级 env。
+
+生产路径复用第一次得到的已验证 manifest 写文件，不再在落盘前重复扫描 Pod 或重复输出顺序日志。动态供给可开启 external-provisioner 的 `--extra-create-metadata=true`，驱动 CreateVolume 会保留这些字段；静态卷可按示例显式填写。当前 chart 未默认开启 OSS 的该参数，未修改 webhook 或 provisioner 行为。
 
 ## 文件协议
 

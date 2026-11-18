@@ -92,7 +92,7 @@ spec:
 
 固定的是 command、args、probe 和默认目录；增减卷仍需修改 Pod 的 volumes/volumeMounts。CSI 从已有 Pod 中的 sidecar 挂载声明生成完整 inventory，不额外查询 PVC/PV，不要求用户维护 expected-volumes 参数。inventory 的 key 是 kubelet CSI 目标目录名；MountRequest.VolumeID 保持真实 volumeHandle。
 
-手动声明的 PVC 名和 mountPath 中 PV 名必须对应。单凭 Pod 对象不能验证 PVC→PV 绑定；实现会查询标准 Bound PVC 的 spec.volumeName，成功绑定按 PodUID/namespace/claim 缓存，冷/热 API 成本分别测试。两个不同 PVC 映射交换已在真实集群明确拒绝。
+手动声明的 PVC 名和 mountPath 中 PV 名必须对应。单凭 Pod 对象不能验证 PVC→PV 绑定；完整且一致的 PV/PVC/namespace VolumeContext 元数据可按配置契约免查，缺失时才查询标准 Bound PVC 的 spec.volumeName，成功绑定按 PodUID/namespace/claim 缓存。任何已给字段冲突不使用缓存或 GET 掩盖。分别测试元数据快速路径与兜底的冷/热 API 成本；静态填写及 Retain 重绑定需同步维护元数据，不声称它是实时绑定证明。
 
 ## 3. probe 与 hook 的具体职责
 
@@ -190,6 +190,7 @@ CSI 启动及每 5 分钟执行本地元数据 GC：仅 kubelet 本地 Pod 目�
 | C09 | JSON 写一半、rename/fsync 失败、磁盘满、只读 state、sidecar 无写权限 | 不执行半请求；CSI/sidecar 给出持久化失败；旧状态不能冒充新成功 | U/I |
 | C10 | 畸形 JSON、未知必需字段、generation/UID 错、越界/符号链接路径 | 不执行；状态错误可见；未知可选 MountRequest 字段可保留 | U/I |
 | C11 | 持续 I/O 时误删 desired/整个状态目录，再恢复请求 | 不自动卸载；明确告警，不丢 daemon 监督；正常终止仍可清理；新旧指令不串代 | U/I/R |
+| C12 | 完整/部分/冲突绑定元数据；前置 init 的重复或不相关 PVC | 完整且匹配时冷/热零 PVC 查询；缺失才兜底，冲突直接拒绝；非首位 INFO，前置 PVC WARNING 数量去重，列出 managed 交集并保持同 PVC 的明确错误 | U/I/R |
 | M01 | 错 AK、无权限、错误 endpoint、DNS/网络失败 | 挂载阶段失败时阻止业务启动，原因脱敏可见且进程回收；延迟到首次 I/O 的失败单独记录，不能伪称 mount 探测已覆盖 | I/R |
 | M02 | mount 卡住到超时、启动进程后未出现 mount、mount 后立刻退出 | 状态不能误报 Mounted；取消有界，daemon 不遗留 | I/R |
 | M03 | 一卷失败、一卷成功、一卷卡住 | 各卷结果独立；Pod 不 Ready；重启/退出时所有已成功卷也处理清理 | I/R |
@@ -215,7 +216,7 @@ CSI 启动及每 5 分钟执行本地元数据 GC：仅 kubelet 本地 Pod 目�
 | S01 | host、guest、业务、sidecar 的全部数据挂载视图 | 记录 mount ID、父子关系、传播属性、进程/namespace/沙箱身份 | R |
 | S02 | 故障后宿主机清理脚本访问数据目录 | 隔离测试 prefix 的哨兵对象不被删；若能遍历远端，判安全阻塞 | R |
 | S03 | 状态目录残留、清理失败、其他 Pod 同 handle | 状态可诊断可控增长；隔离清理不触及其他 Pod/远端对象 | U/I/R |
-| F01 | 默认和新路径 API 调用计数，1/10/100 卷 | 分类复用 Pod GET；每 Pod/claim 冷校验一次 PVC GET，热缓存无新增查询；无 PV/Node/RuntimeClass 查询 | U/I |
+| F01 | 默认和新路径 API 调用计数，1/10/100 卷 | 分类复用 Pod GET；完整元数据冷/热无 PVC API；缺失元数据每 Pod/claim 冷兜底一次 GET，热缓存无新增查询；无 PV/Node/RuntimeClass 查询；用节点 SA 撤销 PVC 权限验证零查询 | U/I/R |
 | F02 | 并发 Pod 启动、DS CPU/内存、state IOPS、probe 开销 | 报告 p50/p95/p99；区分 API、落盘、guest 启动、mount、放行时间 | I/R |
 | A01 | RRSA OIDC token 投射、STS 换证、token 轮换和 sidecar 重启 | OSSFS2 自身使用业务 Pod SA 的 RRSA；JSON 不存 token/AK/SK；轮换后持续读写 | U/I/R |
 | A02 | RRSA issuer/audience/sub/role 错误、越权 prefix、STS 故障、过期 token | 无节点角色或固定凭据回退；脱敏原因可定位，其他身份/卷不受影响 | U/I/R |

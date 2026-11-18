@@ -24,6 +24,10 @@ spec:
     volumeHandle: ossfs2-file-a
     volumeAttributes:
       runtimeClass: rund
+    # Set this binding contract at PV creation; it avoids a cold PVC GET.
+      csi.storage.k8s.io/pv/name: ossfs2-file-a
+      csi.storage.k8s.io/pvc/name: oss-first
+      csi.storage.k8s.io/pvc/namespace: fuse-file-demo
       fuseType: ossfs2
       bucket: OSS_BUCKET
       url: oss-cn-beijing-internal.aliyuncs.com
@@ -48,6 +52,9 @@ spec:
     volumeHandle: ossfs2-file-b
     volumeAttributes:
       runtimeClass: rund
+      csi.storage.k8s.io/pv/name: ossfs2-file-b
+      csi.storage.k8s.io/pvc/name: oss-second
+      csi.storage.k8s.io/pvc/namespace: fuse-file-demo
       fuseType: ossfs2
       bucket: OSS_BUCKET
       url: oss-cn-beijing-internal.aliyuncs.com

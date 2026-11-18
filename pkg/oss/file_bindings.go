@@ -7,12 +7,14 @@ import (
 	"sync"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/common"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/filevolume"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	core "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/klog/v2"
 	"k8s.io/utils/lru"
 )
 
@@ -34,6 +36,29 @@ func (ns *nodeServer) validateFileBinding(ctx context.Context, pod *core.Pod, re
 	if claim == "" {
 		return status.Error(codes.FailedPrecondition, "mountproxy target has no PVC")
 	}
+	// external-provisioner's extra-create-metadata is retained by CreateVolume
+	// in VolumeContext. Static PVs may declare the same contract explicitly.
+	// Check every supplied value, including partial metadata, before considering
+	// the fallback. Conflicting declarations must not be hidden by a cached GET.
+	complete := true
+	for _, field := range []struct{ name, expected string }{
+		{common.PVNameKey, key},
+		{common.PVCNamespaceKey, pod.Namespace},
+		{common.PVCNameKey, claim},
+	} {
+		value := req.VolumeContext[field.name]
+		if value == "" {
+			complete = false
+		} else if value != field.expected {
+			return status.Errorf(codes.FailedPrecondition, "mountproxy binding metadata %s=%q conflicts with expected %q; fix the PV metadata or sidecar volumeMount mapping", field.name, value, field.expected)
+		}
+	}
+	if complete {
+		if v := klog.V(4); v.Enabled() {
+			v.InfoS("Validated mountproxy binding using volume metadata without PVC lookup", "pod", klog.KObj(pod), "pv", key, "pvc", claim)
+		}
+		return nil
+	}
 	if ns.clientset == nil {
 		return status.Error(codes.Unavailable, "PVC binding validation requires the Kubernetes client")
 	}
@@ -44,6 +69,7 @@ func (ns *nodeServer) validateFileBinding(ctx context.Context, pod *core.Pod, re
 		if value, ok := ns.fileBindings.values.Get(cacheKey); ok {
 			return value.(string), nil
 		}
+		klog.InfoS("Mountproxy binding metadata incomplete; falling back to PVC lookup", "pod", klog.KObj(pod), "pv", key, "pvc", claim)
 		pvc, err := ns.clientset.CoreV1().PersistentVolumeClaims(pod.Namespace).Get(ctx, claim, metav1.GetOptions{})
 		if err != nil {
 			code := codes.Unavailable

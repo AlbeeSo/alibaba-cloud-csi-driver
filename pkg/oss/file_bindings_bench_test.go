@@ -38,3 +38,27 @@ func BenchmarkFileBindingWarm(b *testing.B) {
 		b.Fatal("warm validation unexpectedly contacted the API")
 	}
 }
+
+// Complete metadata works without a client or cache, including the cold path.
+func BenchmarkFileBindingMetadata(b *testing.B) {
+	pod := manualFilePod("rund", 1)
+	ns := &nodeServer{}
+	req := &csi.NodePublishVolumeRequest{TargetPath: "/var/lib/kubelet/pods/pod-a/volumes/kubernetes.io~csi/pv-0/mount", VolumeContext: map[string]string{"csi.storage.k8s.io/pod.uid": "pod-a"}}
+	setFileBindingMetadata(req, pod.Namespace, "pv-0", "claim-0")
+	manifest, err := filevolume.ManifestForPod(pod, req)
+	if err != nil {
+		b.Fatal(err)
+	}
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if err := ns.validateFileBinding(ctx, pod, req, manifest); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	if ns.fileBindings.values != nil {
+		b.Fatal("metadata validation unexpectedly initialized the fallback cache")
+	}
+}

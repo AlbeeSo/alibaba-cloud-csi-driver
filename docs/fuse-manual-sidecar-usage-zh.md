@@ -45,9 +45,25 @@ readinessProbe:
 
 默认 state=/volume-state、target=/pod-volumes，不必传目录参数，不用 `--driver` 或 `--file-expected-volumes`。PodUID 既供命令默认读取，也供 state 的 subPathExpr 展开。
 
-增加卷时只增减 Pod 的 volumes/volumeMounts 及对应 PV/PVC，不改 args/probe。sidecar 数据 mountPath 必须是 `/pod-volumes/<PV-name>/mount`，其中是 PV 名，不是 PVC 名或任意 volumeHandle；CSI 写完整 manifest，并通过标准 PVC Bound 关系验证路径映射。冷缓存增加每个 Pod/claim 一次 PVC GET，成功结果进入有界缓存；不额外 GET RuntimeClass/PV/Node。
+增加卷时只增减 Pod 的 volumes/volumeMounts 及对应 PV/PVC，不改 args/probe。sidecar 数据 mountPath 必须是 `/pod-volumes/<PV-name>/mount`，其中是 PV 名，不是 PVC 名或任意 volumeHandle。挂载路径和 MountRequest.Target 语义不变；CSI 写完整 manifest。
+
+为避免冷启动的 PVC GET，可在静态 PV 的 `spec.csi.volumeAttributes` 提供三个一致字段（完整示例已包含）：
+
+```yaml
+csi.storage.k8s.io/pv/name: ossfs2-file-a
+csi.storage.k8s.io/pvc/namespace: fuse-file-demo
+csi.storage.k8s.io/pvc/name: oss-first
+```
+
+三者分别匹配当前请求的 PV 目标、Pod namespace 和 sidecar 对应挂载的 PVC 名时，不发起 PVC API 请求，也不依赖兜底缓存。动态供给可以在 external-oss-provisioner 增加 `--extra-create-metadata=true`，这些参数会由 CreateVolume 保留并随 PV 回传到 NodePublish；仓库 chart 目前未默认启用。静态声明及 Retain 后重绑定要同步更新，不是实时绑定证明。
+
+上述字段应在 PV 创建时提供；开启 provisioner 参数不补写存量 PV。`spec.csi.volumeAttributes` 属于 PV 的不可变 volume source，不能把补字段或重绑定后的更正当成普通热更新。存量卷继续使用兜底；如需迁移，应遵循保留数据和 PV source 不可变的规则规划新的 PV 声明，本文不提供自动重建动作。依据见 [Kubernetes 校验](https://github.com/kubernetes/kubernetes/blob/v1.33.3/pkg/apis/core/validation/validation.go#L1995)。
+
+任何已提供字段冲突都明确失败；一致但缺少字段才走兼容兜底：缓存未命中时 GET 一次 PVC 验证 Bound 关系，之后复用成功缓存。查询失败/未绑定不缓存，CSI 重启或淘汰后可能重新查询。不额外 GET RuntimeClass/PV/Node，不增加 list/watch。
 
 mountproxy 必须放在使用这些 PVC 的其他 init container 之前。它的 startupProbe 只会阻塞后续 init 和应用；把数据准备 init 放在它前面，会读到空投影或写本地回退数据，因此当前明确拒绝这种配置。与数据卷无关的配置准备 init 可放前面。
+
+不在首位会记录 INFO；前置 init 只要挂载 PVC，还会记录 WARNING，包含去重 `pvcCount/pvcs`、容器名及 `managedPVCCount/managedPVCs`。交集为零允许继续，有交集仍明确失败。告警来自已有 Pod 数据的本地扫描，与绑定查询是两件事，不会仅因非首位而 GET PVC。
 
 state 是 host 控制目录 `/var/run/ossfs/file-volumes` 的 UID 子目录，不是远端数据卷。RRSA 是只读 projected 目录，不用 subPath；不把该 token 挂给业务容器也不影响业务身份用于挂载。
 
@@ -72,6 +88,9 @@ kubectl -n fuse-file-demo exec <pod> -c mountproxy -- csi-mount-proxy-server --f
 | FailedMount: startup/readiness exec probes | 补齐固定探针；不能用恒成功命令放行业务 |
 | FailedMount: state/target contract | 核对 UID env、subPathExpr、PV 路径及传播模式 |
 | FailedMount: PVC bound to PV / fix mapping | sidecar 的 volumeMount.name 与 mountPath 中 PV 对不上，修 Pod 模板；不要仅交换路径名称 |
+| FailedMount: binding metadata ... conflicts | PV/PVC/namespace 声明与请求或 sidecar 挂载不一致；检查静态配置或 Retain 后的旧元数据；不会悄悄退回查询 |
+| binding metadata incomplete; falling back to PVC lookup | 至少一个绑定字段缺失且缓存未命中，触发真实兜底 GET；若要零查询，补全一致字段 |
+| not the first init container / Preceding init containers mount PVCs | 核对前置 init 的 PVC 数量及 managed 交集；不是所有 PVC 都属于本 sidecar；与本 sidecar 重叠时仍拒绝 |
 | FailedMount: explicit non-runc RuntimeClass | PV 声明不代替实际 Pod runtime，补齐正确的 guest RuntimeClass |
 | FailedMount: must precede init container | 把 mountproxy 放到消费这些 PVC 的 init container 前面 |
 | RRSA projection / serviceAccountName 错误 | 核对只读 projected volume、audience、SA 一致性 |

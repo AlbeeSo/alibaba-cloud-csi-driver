@@ -1,10 +1,38 @@
 # RunD 手动 sidecar 验证记录
 
-状态更新：2026-11-18 已完成 v9–v12 根因修复与隔离 ACK 复测；此前绑定错配、无 ACK 清理、控制文件 GC 的实现缺口均已修复。剩余已定位的外部问题是测试运行时的文件更新/投射一致性，影响 RRSA 轮换和控制文件更新，**不是生产验收完成**。设计与矩阵见 [测试计划](fuse-manual-sidecar-test-plan-zh.md)，逐项根因见[根因记录](fuse-manual-sidecar-rootcause-zh.md)。原始资源和日志仅在忽略的 `.local/` 下保存，本文不记录环境标识或凭据。
+状态更新：2026-11-19 已完成元数据免查询路径、兼容兜底和 init 诊断日志的单测、集成测试与独立 runv E2E；此前 v9–v12 修复的错卷校验、无 ACK 清理和控制 GC 保持。旧自建运行时的文件更新问题不代表实际 rund 必然相同；实际 rund 原生文件实验已通过，完整 FUSE/RRSA 仍待其环境验收，**不是生产验收完成**。设计与矩阵见 [测试计划](fuse-manual-sidecar-test-plan-zh.md)，逐项根因见[根因记录](fuse-manual-sidecar-rootcause-zh.md)。原始资源和日志仅在忽略的 `.local/` 下保存，本文不记录环境标识或凭据。
 
 实现和责任边界见 [设计文档](fuse-manual-sidecar-design-zh.md)，配置和排障见 [使用说明](fuse-manual-sidecar-usage-zh.md)。下表按实际镜像版本记录；后续版本的本地测试不能倒推旧 E2E 已经通过。
 
 鉴权继续使用 24 小时 projected OIDC token 的已授权测试窗口；STS 换证在 guest 内执行。自动轮换未通过。本轮用不含 token 的原生文件复现隔离到运行时接口，没有重新引入 token mirror、进程识别或 CRI 专用补偿。
+
+## 2026-11-19 元数据快速路径与日志验收
+
+源码没有改变 mountproxy 挂载路径或请求协议，没有开启 webhook/runc 新模式，也没有默认启用未确认生效的优先级 env。保留前置 init 使用本 sidecar 管理 PVC 时的明确错误；告警不代替顺序保证。
+
+本地 Linux Go 测试通过：完整 OSS、filevolume，以及 mountproxy 主程序、proxy、三类 driver 子进程和真实 syscall 回归。新增覆盖完整元数据 1/10/100 卷的首次/重复发布零 PVC API、无 Kubernetes client 可用、所有不完整字段组合的缓存兜底、完整/部分冲突不查询、不用声明污染 live 缓存、INFO/WARNING 级别和去重数量、不输出容器 env。集成测试贯通 CreateVolume 参数保留→NodePublish→真实 JSON 文件→双 worker/probe→drain，仅最终 FUSE backend 模拟，非真实挂载证据。
+
+新建独立 ACK v1.33.3 单节点，底层 Sandboxed-Container.runv 2.2.4，产品 RuntimeClass 别名仍为 rund；非托管 chart、OSSFS2、业务 SA RRSA 和长 token 测试窗口。以下均为本轮新镜像实测，不由历史结果倒推：
+
+| 场景 | 结果 |
+|---|---|
+| 节点 CSI 撤销 PVC get/list/watch | impersonation 检查三者均拒绝；controller 身份独立，未撤销其供给权限 |
+| 完整静态 PV 元数据 | 权限仍拒绝时，双卷 Ready、真实读取/写回与 RO 检查通过，固定 sidecar args 不变 |
+| 已给元数据冲突 | 明确 FailedMount，consumer 未启动，正常删除后 UID 控制状态回收 |
+| 交换两个 PVC 的 sidecar 引用 | 元数据直接发现冲突，无需 PVC API；拒绝并正常回收 |
+| 无元数据且节点无 PVC 权限 | 确认真实进入 GET 兜底；明确 forbidden，不静默接受 |
+| 前置 emptyDir init | INFO 存在，没有 PVC WARNING；双卷读取通过 |
+| 前置不相关 PVC、多次挂载同一 claim | WARNING 去重后 pvcCount=1、managedPVCCount=0，允许继续并双卷读取成功 |
+| 前置 init 使用两个 managed PVC，其中一个重复挂载 | WARNING 去重后 pvcCount=2、managedPVCCount=2；维持明确 FailedMount，无 init 被放行 |
+| 开启 provisioner extra-create-metadata 的新动态卷 | 两个新 PV 自动带齐三字段；节点仍无 PVC 权限时双卷读取通过；未修改产品 chart 默认参数 |
+| 恢复节点权限后的完全/部分缺失元数据 | 两组均记录真实查询兜底，双卷挂载读取通过，正常删除后 UID 回收 |
+| 销毁集群前的收尾 | 独立 OSS API 验证写回，正常缩到零，所有 UID 控制目录均已消失；不靠销毁节点证明 GC |
+
+节点第一次初始化超过测试脚本的 5 分钟窗口；只读云助手日志确认 kubelet、系统 Pod 已正常启动，延长等待后节点 Ready，没有修改 bootstrap/运行时配置。这是夹具等待窗口调整，不计作产品修复。
+
+本轮自有集群、节点、镜像 namespace/仓库、bucket、RRSA role/policy、key pair 和 vSwitch 已回收；独立核查节点角色、EIP、安全组、SLB、OIDC provider 与集群磁盘均不存在。复用的原有 VPC/ACR 保留，参考 rund 环境未改动。
+
+快速路径使用的是配置声明/供给快照，不宣称实时绑定证明；静态配置和重绑定需遵守 PV source 不可变限制，参数开启不补写旧 PV。未做生产规模压测、runv 自动轮换或实际 rund 的完整 FUSE/RRSA 验收。真实资源和原始日志不提交。
 
 ## 2026-11-18 根因修复复测（当前结论）
 
@@ -135,7 +163,7 @@ Linux 一次性 Podman 容器，Go 1.26.1，GOMAXPROCS=2，`-p 1`，2026-11-17 �
 | T11–T12 | 标准节点重启同 UID 恢复、CSI 启动孤儿元数据 GC 通过；不增加 guest reaper，其他失联/崩溃窗口未穷举 |
 | S01–S02 | 部分 R：host/guest/业务视图、进程 mount 表观察、限范围递归删除哨兵保留；不是任意 runtime 证明 |
 | S03 | 逐卷退休、孤儿 GC、多 UID 隔离真实复测；本地覆盖多卷并发、desired 缺失但其他卷结果仍须保留、未知文件和符号链接 |
-| F01 | U 1/10/100 卷计数：一次 Pod GET/NodePublish，冷缓存一次 PVC GET/Pod/claim，热缓存无额外 PVC 查询；无 PV/Node/RuntimeClass GET |
+| F01 | U 1/10/100 卷计数：复用一次 Pod GET/NodePublish；完整元数据冷/热零 PVC API，缺失时冷兜底一次 GET/Pod/claim，热缓存无新增查询；R 撤销节点 PVC get/list/watch 后静态/动态双卷仍成功；无新 PV/Node/RuntimeClass GET |
 | F02 | 单节点双卷 exec probe 小样本与缓存函数基准已有；完整规模/IOPS 未运行 |
 | A01–A02 | RRSA 初次换证、读写、拒绝权限、投射/SA 校验已覆盖；轮转**失败**，长 token 仅测试窗口 |
 

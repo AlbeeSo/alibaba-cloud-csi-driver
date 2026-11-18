@@ -11,6 +11,7 @@ import (
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	core "k8s.io/api/core/v1"
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -162,16 +163,8 @@ func podManifest(pod *core.Pod, req *csi.NodePublishVolumeRequest, accept func(M
 	if !keys[strings.TrimSuffix(relative, "/mount")] {
 		return fmt.Errorf("publish target is absent from mountproxy sidecar volume mounts")
 	}
-	// A native sidecar gates only subsequent init/app containers. An earlier
-	// init consumer would see the underlying empty projection before FUSE and
-	// could write local fallback data or block initialization forever.
-	for _, init := range pod.Spec.InitContainers[:consumerIndex] {
-		for _, vm := range init.VolumeMounts {
-			v := volumes[vm.Name]
-			if v.PersistentVolumeClaim != nil && claims[v.PersistentVolumeClaim.ClaimName] {
-				return fmt.Errorf("mountproxy must precede init container %s which consumes its PVC", init.Name)
-			}
-		}
+	if err := checkPrecedingInitPVCs(pod, consumerIndex, volumes, claims); err != nil {
+		return err
 	}
 	m := Manifest{APIVersion: Version, PodUID: uid, VolumeClaims: map[string]string{}}
 	for key := range keys {
@@ -185,4 +178,54 @@ func podManifest(pod *core.Pod, req *csi.NodePublishVolumeRequest, accept func(M
 	}
 	sort.Strings(m.VolumeKeys)
 	return accept(m)
+}
+
+func checkPrecedingInitPVCs(pod *core.Pod, index int, volumes map[string]core.Volume, managed map[string]bool) error {
+	if index == 0 {
+		return nil
+	}
+	consumer := pod.Spec.InitContainers[index].Name
+	klog.InfoS("Mountproxy sidecar is not the first init container; checking preceding PVC references", "pod", klog.KObj(pod), "container", consumer, "initIndex", index)
+	claims, conflicts := map[string]bool{}, map[string]bool{}
+	var containers []string
+	firstConflict := ""
+	for _, init := range pod.Spec.InitContainers[:index] {
+		hasPVC := false
+		for _, vm := range init.VolumeMounts {
+			v := volumes[vm.Name]
+			if v.PersistentVolumeClaim == nil {
+				continue
+			}
+			hasPVC = true
+			claim := v.PersistentVolumeClaim.ClaimName
+			claims[claim] = true
+			if managed[claim] {
+				conflicts[claim] = true
+				if firstConflict == "" {
+					firstConflict = init.Name
+				}
+			}
+		}
+		if hasPVC {
+			containers = append(containers, init.Name)
+		}
+	}
+	if len(claims) > 0 {
+		names := func(set map[string]bool) []string {
+			result := make([]string, 0, len(set))
+			for name := range set {
+				result = append(result, name)
+			}
+			sort.Strings(result)
+			return result
+		}
+		klog.Warningf("Preceding init containers mount PVCs; review mountproxy startup order: pod=%s/%s container=%s pvcCount=%d pvcs=%v initContainers=%v managedPVCCount=%d managedPVCs=%v", pod.Namespace, pod.Name, consumer, len(claims), names(claims), containers, len(conflicts), names(conflicts))
+	}
+	// A warning is not a startup-order guarantee. Keep the existing rejection
+	// when an earlier init consumes our PVC; it could otherwise succeed against
+	// the empty projection before FUSE and leave the Pod falsely Ready.
+	if firstConflict != "" {
+		return fmt.Errorf("mountproxy must precede init container %s which consumes its PVC", firstConflict)
+	}
+	return nil
 }

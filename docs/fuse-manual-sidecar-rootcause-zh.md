@@ -12,6 +12,8 @@
 
 成功绑定按 PodUID/namespace/claim 缓存在 4096 项 LRU 中。依据是标准 [PVC 使用保护与绑定关系](https://kubernetes.io/docs/concepts/storage/persistent-volumes/#storage-object-in-use-protection)：正常 Kubernetes 生命周期中，正在使用的 claim 不会被删除重建，Pod 的 volume source 也不能随意更换。管理员强制移除保护并破坏绑定不属于缓存的正确性前提。
 
+2026-11-19 更新：上述 live GET 已降为元数据缺失时的兼容兜底。优先核对 PV/PVC/namespace 三个 VolumeContext 字段，完整且一致时零 PVC API 请求，不将声明写入 live 绑定缓存；任何已给字段冲突直接报错。静态 PV 可按契约填写，动态供给可通过 provisioner 的 extra-create-metadata 传入。它们是声明/供给时快照，Retain 后须更新，不能承诺检测所有与真实绑定同时矛盾的人工配置。挂载路径及协议不变。
+
 成本不能再写成“所有新逻辑零 API”：
 
 - RuntimeClass 分类：仍复用原来的一次 Pod GET，没有新增查询。
