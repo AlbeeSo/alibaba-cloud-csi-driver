@@ -18,6 +18,32 @@ nil RuntimeClass 不是运行时能力证据；覆盖默认确为 runc、默认�
 
 测试层级：U 为单测（fake client、API 计数、状态/字段校验）；I 为 Linux 集测（真实 JSON/socket/SCM_RIGHTS/子进程，必要时隔离 mount namespace 和真实 syscall）；E 为隔离集群真实 E2E。大量错误组合优先 U/I，E 选择关键能力和生命周期链路，避免机械全排列。每个环境至少有手动多卷正例；webhook 必须在 D/C 两条真实支持路径验收，不能仅验证生成 YAML。
 
+### 集测优先，限制 E2E 重复
+
+86 组是验收关注点，不是 86 个 E2E 场景。下表标 E 的组只要求关键行为有真实环境证据，不要求该组每个变体、gate组合或错误码都在集群重演。相同真实用例可以提供多个组的证据，但应逐项关联断言，不能把一个 Ready 截图当成整组通过。
+
+| 优先用集成测试闭环的范围 | 真实组件与故障注入方式 |
+|---|---|
+| controller/node分流、SC参数保留、API次数、镜像及权限模板 | 经CSI包装层调用真实server，fake client精确计数；参数化四组合/driver/gate/元数据和错误；不部署集群穷举 |
+| file配置→worker→driver→probe→drain | 临时目录真实原子写/删除/损坏，真实runner和子进程；可控backend注入超时/EBUSY/取消/状态故障；同时断言进程、状态、清理副作用 |
+| fd交接、持有/关闭、重复投递和recovery状态 | 真实Unix socket/SCM_RIGHTS与进程边界；fd计数、接管/断开/重试；driver假进程可控退出，复用现有supervise测试，不用mock代替所有fd收发 |
+| syscall安全与未服务FUSE清理 | Linux隔离mount namespace中真实mount/unmount与EBUSY；有/dev/fuse和权限的CI夹具才运行，未具备条件显式skip，不伪造通过 |
+| webhook协议、幂等、重入、PVC绑定状态与失败策略 | 经AdmissionReview HTTP/TLS入口调用真实handler、客户端反应器注入API状态；必要时轻量本地apiserver验证patch/schema/validation，不为每个拒绝场景建云集群 |
+| customfuse入口、参数、fork/退出与回收 | 真实配置脚本/进程组/管道与runner，覆盖错误组合；另以少量真实自定义文件系统E2E证明数据面 |
+| 监控与统计链路 | 真实interceptor/monitor写入、collector读取并抓取实际metrics输出；fake时钟/可控进程模拟故障和恢复，核对计数、标签和清理，不只验证某个写文件函数 |
+| capability/版本/架构检测与降级 | 注入探测输入测试全部边界，使用真实支持/不支持节点各一条代表性E2E核验，避免每种内核版本重复跑 |
+
+E2E 收敛为可复用的少量端到端场景族：
+
+1. RunD真实双卷RRSA、业务读写/RO、probe与监控、正常及强删清理；旧runv与实际rund分别记证据。实际身份轮转需真实环境，不用fake STS冒充。
+2. RunC真实OSS2 failover镜像、fd接管和非特权、daemon故障恢复、业务旧引用保持、监控与清理；与CSI重启/接管边界故障组合在同一隔离部署内验证。
+3. recovery不支持的真实节点：一次完整降级/非特权/读写/指标链路，能力读取失败等其余变体由U/I覆盖。
+4. customfuse在RunD/RunC各一条真实双卷及关键退出/清理链路，不重复枚举所有脚本失败形式。
+5. webhook在D/C各一条实际注入→挂载→失败可见→清理链路；可与上述场景复用部署，四组合的完整断言以U/I为主。绑定/调度时序须至少验证声明支持的真实流程。
+6. 既有独立FUSE Pod、csi-agent/COCO等选择代表性回归，已有相同代码/环境证据可引用；共享卷存活副本、远端哨兵和关键节点重启不能完全由fake替代。
+
+先 U/I 通过再进入 E；失败优先增加稳定的回归集测并修复，再重跑受影响E2E，不因小改动重复全部环境矩阵。只有新变更触及共用协议/清理或出现未解释风险时扩大E2E范围。纯文档、参数错误或已被等价集测证明的分支不触发全量云回归。最终报告单列U/I/E证据与缺口，不能为了减少E2E把真实运行时保证降成mock保证。
+
 测试只使用授权隔离节点/namespace、独立存储 prefix 和可丢弃哨兵。共享目标环境不进行节点重启、runtime 故障、权限变更等破坏性注入。资源不足的项保持 NOT RUN/阻塞，不能用 mock PASS 覆盖。
 
 ## 2. driver、鉴权、权限与镜像基线
