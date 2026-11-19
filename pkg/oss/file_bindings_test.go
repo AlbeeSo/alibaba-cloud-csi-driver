@@ -77,9 +77,10 @@ func TestDirectPublishConcurrentBindingLookupIsCoalesced(t *testing.T) {
 	server := common.WrapNodeServerWithMetricRecorder(ns, "oss", client)
 	var wg sync.WaitGroup
 	errs := make(chan error, 32)
+	req := fileRequest(t, 0, "ossfs2")
 	for range 32 {
 		wg.Go(func() {
-			_, err := server.NodePublishVolume(context.Background(), fileRequest(t, 0, "ossfs2"))
+			_, err := server.NodePublishVolume(context.Background(), req)
 			errs <- err
 		})
 	}

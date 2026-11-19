@@ -23,8 +23,8 @@ import (
 const ossFileRoot = "/host/var/run/ossfs/file-volumes"
 
 func validateFileOptions(opts *ossfpm.Options) error {
-	if opts.AuthType != "" && opts.AuthType != ossfpm.AuthTypeRRSA {
-		return fmt.Errorf("file transport supports Secret credentials or RRSA, got authType %q", opts.AuthType)
+	if opts.AuthType != ossfpm.AuthTypeRRSA {
+		return fmt.Errorf("guest sidecar requires authType=rrsa; CSI Secret credentials are not delivered to business sidecars (got authType %q)", opts.AuthType)
 	}
 	return filevolume.ValidateMount(proxy.MountRequest{VolumeID: "validation", Fstype: opts.FuseType, Overlay: opts.Overlay, FdPassing: opts.FdPassing, Recovery: opts.Recovery})
 }
@@ -103,7 +103,8 @@ func (ns *nodeServer) publishFileVolume(ctx context.Context, req *csi.NodePublis
 		return nil, status.Errorf(codes.FailedPrecondition, "publish Pod volume manifest: %v", err)
 	}
 	err = filevolume.Publish(filevolume.Root(ossFileRoot), req.VolumeContext["csi.storage.k8s.io/pod.uid"], req.VolumeId, req.TargetPath, proxy.MountRequest{
-		Fstype: opts.FuseType, Source: fmt.Sprintf("%s:%s", opts.MountBucket(), opts.Path), Options: options, MountFlags: flags, Secrets: auth.Secrets,
+		// Guest consumers use their own projected identity, never CSI credentials.
+		Fstype: opts.FuseType, Source: fmt.Sprintf("%s:%s", opts.MountBucket(), opts.Path), Options: options, MountFlags: flags,
 	})
 	if err != nil {
 		code := codes.InvalidArgument

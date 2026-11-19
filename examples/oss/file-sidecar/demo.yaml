@@ -98,7 +98,7 @@ spec:
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 90
       initContainers:
-        - name: mountproxy
+        - name: alibabacloud-csi-mountproxy
           image: OSSFS2_FILE_IMAGE
           command: [csi-mount-proxy-server]
           restartPolicy: Always

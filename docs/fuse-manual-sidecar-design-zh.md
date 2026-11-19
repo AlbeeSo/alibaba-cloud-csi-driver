@@ -43,7 +43,7 @@ HostPath 只存控制文件：host 的 `/var/run/ossfs/file-volumes/<PodUID>` �
 
 数据仍使用 Pod 声明的 PVC：sidecar 在 `/pod-volumes/<PV-name>/mount` 挂载，Bidirectional；业务容器使用相同 volume，HostToContainer。guest 的 FUSE 覆盖在底层 PVC/virtiofs 投影上，只卸载自有 FUSE 层，不卸载底层投影、不删除目录内容。
 
-固定命令为 `csi-mount-proxy-server --file-mode`，不配置 driver 和 expected-volumes。所有已链接的 file-capable driver 自动注册，请求的 fstype 选择具体实现。增加卷只增加 volumes/volumeMounts，不改 sidecar args/probe。inventory 从已有 Pod 挂载声明生成，等待全部卷，不以“目前已经到达的文件”作为完整集合。
+约定 init container 名称为 `alibabacloud-csi-mountproxy`，按名称识别，不解析启动 command/args；名称不是可信身份凭证。推荐命令为 `csi-mount-proxy-server --file-mode`，不配置 driver 和 expected-volumes。自定义入口须实际运行兼容服务；仍校验 Always、probe 和挂载结构。所有已链接的 file-capable driver 自动注册，请求的 fstype 选择具体实现。增加卷只增加 volumes/volumeMounts，不改 sidecar args/probe。inventory 从已有 Pod 挂载声明生成，等待全部卷，不以“目前已经到达的文件”作为完整集合。
 
 mountPath 中的 PV 名必须对应该 PVC 的绑定。快速路径使用一致的 PV/PVC 元数据声明，缺失时才通过标准 PVC.spec.volumeName 兜底；交换两个不同 PVC 的路径会被元数据冲突或 Bound 检查拒绝，重复 PVC 目标也拒绝。元数据是配置契约，不是实时绑定证明：静态填写及 Retain 后重新绑定必须同步维护，无法防御所有声明同时填写错误的情况。挂载路径和 mountproxy 请求语义保持不变。
 
@@ -69,7 +69,9 @@ MountInfo 复用已有公共结构；FUSE 参数保留在 MountProxy 中，包�
 
 MountRequest JSON 保留未知扩展字段；新增必须支持的语义需通过 RequiredFeatures 协商，旧消费者明确拒绝。保留未知字段不等于旧 driver 已具备新能力。overlay、fd-passing、recovery、host metrics path 目前明确拒绝。
 
-generation 是请求内容摘要。同一 UID/key 的重复交付幂等，参数变化要求重建 Pod。desired 与撤销指令在合法生命周期内不靠修改旧内容更新。写入采用临时文件、fsync、rename，文件 0600、UID 目录 0700。RRSA 不将 JWT 或 STS AK 写入 desired；Secret 鉴权路径仍可能含凭据，不能将完整 JSON 作为诊断日志输出。
+generation 是请求内容摘要。同一 UID/key 的重复交付幂等，参数变化要求重建 Pod。desired 与撤销指令在合法生命周期内不靠修改旧内容更新。写入采用临时文件、fsync、rename，文件 0600、UID 目录 0700。guest sidecar 仅允许 authType=rrsa，不将 JWT、STS AK 或 CSI Secret 写入 desired；不将完整 JSON 作为诊断日志输出。
+
+runc 同 Pod sidecar 尚未实现。其后续 Secret 引用必须通过 Pod 声明 Secret volume 交付，不因保留名称而向用户容器发送 CSI 持有的凭据；RRSA 继续使用业务 Pod token。现有 runc 独立 FUSE Pod、csi-agent 与 kata-remote 不受本次 guest file 路径鉴权限制影响。
 
 **按运行时分别验收一致性：**自建 runv 2.2.4 中，host 替换/删除已有文件会出现 guest 旧内容，长 token 无法修复。后续实际 rund 的无 CSI/FUSE 对照中，替换/删除与 ConfigMap/projected 更新均可见，没有复现旧版本问题，见根因记录第 8 节。原生文件通过仍不能替代本实现数据面与 RRSA 轮换验收；CSI 不重做 runtime 文件同步。
 

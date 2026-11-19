@@ -13,7 +13,6 @@ import (
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/common"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/features"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/filevolume"
-	mounterutils "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils"
 	kata "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils/kata/directvolume"
 	"github.com/stretchr/testify/require"
@@ -32,7 +31,7 @@ import (
 
 func manualFilePod(class string, count int) *core.Pod {
 	p := &core.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-a", Namespace: "test", UID: "pod-a"}, Spec: core.PodSpec{NodeName: "test-node", RuntimeClassName: ptr.To(class)}}
-	c := core.Container{Name: "mountproxy", Command: []string{"csi-mount-proxy-server"}, Args: []string{"--file-mode"}, RestartPolicy: ptr.To(core.ContainerRestartPolicyAlways),
+	c := core.Container{Name: filevolume.SidecarName, Command: []string{"csi-mount-proxy-server"}, Args: []string{"--file-mode"}, RestartPolicy: ptr.To(core.ContainerRestartPolicyAlways),
 		SecurityContext: &core.SecurityContext{Privileged: ptr.To(true)},
 		StartupProbe:    &core.Probe{ProbeHandler: core.ProbeHandler{Exec: &core.ExecAction{Command: []string{"csi-mount-proxy-server", "--file-check-ready"}}}},
 		ReadinessProbe:  &core.Probe{ProbeHandler: core.ProbeHandler{Exec: &core.ExecAction{Command: []string{"csi-mount-proxy-server", "--file-check-ready"}}}},
@@ -45,13 +44,15 @@ func manualFilePod(class string, count int) *core.Pod {
 		c.VolumeMounts = append(c.VolumeMounts, core.VolumeMount{Name: key, MountPath: "/pod-volumes/" + key + "/mount", MountPropagation: ptr.To(core.MountPropagationBidirectional)})
 	}
 	p.Spec.InitContainers = []core.Container{c}
+	p.Spec.Volumes = append(p.Spec.Volumes, core.Volume{Name: "rrsa", VolumeSource: core.VolumeSource{Projected: &core.ProjectedVolumeSource{Sources: []core.VolumeProjection{{ServiceAccountToken: &core.ServiceAccountTokenProjection{Audience: "sts.aliyuncs.com", Path: "token"}}}}}})
+	p.Spec.InitContainers[0].VolumeMounts = append(p.Spec.InitContainers[0].VolumeMounts, core.VolumeMount{Name: "rrsa", MountPath: filevolume.RRSATokenDir, ReadOnly: true})
 	return p
 }
 
 func fileRequest(t *testing.T, i int, fuseType string) *csi.NodePublishVolumeRequest {
 	t.Helper()
 	return &csi.NodePublishVolumeRequest{VolumeId: fmt.Sprintf("handle-%d", i), TargetPath: filepath.Join(t.TempDir(), "pods", "pod-a", "volumes", "kubernetes.io~csi", fmt.Sprintf("pv-%d", i), "mount"),
-		VolumeContext:    map[string]string{utils.PodNameKey: "pod-a", utils.PodNamespaceKey: "test", "csi.storage.k8s.io/pod.uid": "pod-a", "runtimeclass": "rund", "fuseType": fuseType, "bucket": "test-bucket", "url": "oss-cn-beijing.aliyuncs.com"},
+		VolumeContext:    map[string]string{utils.PodNameKey: "pod-a", utils.PodNamespaceKey: "test", "csi.storage.k8s.io/pod.uid": "pod-a", "runtimeclass": "rund", "fuseType": fuseType, "bucket": "test-bucket", "url": "oss-cn-beijing.aliyuncs.com", "authType": "rrsa", "roleArn": "acs:ram::1234567890123456:role/test", "oidcProviderArn": "acs:ram::1234567890123456:oidc-provider/test"},
 		Secrets:          map[string]string{"AccessKeyId": "test-ak", "AccessKeySecret": "test-sk"},
 		VolumeCapability: &csi.VolumeCapability{AccessType: &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{}}, AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER}}}
 }
@@ -87,7 +88,7 @@ func TestDirectPublishCachedPodRouting(t *testing.T) {
 					require.NoError(t, d.Validate("pod-a"))
 					require.Equal(t, req.VolumeId, d.Mount.VolumeID)
 					require.Equal(t, fuse, d.Mount.Fstype)
-					require.Contains(t, d.Mount.Secrets[mounterutils.GetPasswdFileName(fuse)], "test-sk")
+					require.Empty(t, d.Mount.Secrets, "RRSA must not forward CSI credentials")
 					keys, err := filevolume.ReadExpected(filepath.Join(root, "pod-a"), "pod-a")
 					require.NoError(t, err)
 					require.Equal(t, []string{"pv-0", "pv-1"}, keys)
@@ -176,20 +177,25 @@ func TestDirectPublishAPICallsScaleWithRequestsOnly(t *testing.T) {
 	gatetesting.SetFeatureGateDuringTest(t, features.FunctionalMutableFeatureGate, features.RundCSIProtocol3, false)
 	for _, count := range []int{1, 10, 100} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
-			t.Setenv("CSI_FUSE_FILE_ROOT", t.TempDir())
+			root := t.TempDir()
+			t.Setenv("CSI_FUSE_FILE_ROOT", root)
 			client := fileTestClient(manualFilePod("rund", count))
 			ns := setupTestNodeServer(t, mount.NewFakeMounter(nil), false)
 			ns.clientset = client
 			srv := common.WrapNodeServerWithMetricRecorder(ns, "oss", client)
 			for i := range count {
-				_, err := srv.NodePublishVolume(context.Background(), fileRequest(t, i, "ossfs2"))
+				req := fileRequest(t, i, "ossfs2")
+				req.TargetPath = filepath.Join(root, "pods", "pod-a", "volumes", "kubernetes.io~csi", fmt.Sprintf("pv-%d", i), "mount")
+				_, err := srv.NodePublishVolume(context.Background(), req)
 				require.NoError(t, err)
 			}
 			podGets, pvcGets := fileQueryCounts(t, client)
 			require.Equal(t, count, podGets)
 			require.Equal(t, count, pvcGets)
 			for i := range count {
-				_, err := srv.NodePublishVolume(context.Background(), fileRequest(t, i, "ossfs2"))
+				req := fileRequest(t, i, "ossfs2")
+				req.TargetPath = filepath.Join(root, "pods", "pod-a", "volumes", "kubernetes.io~csi", fmt.Sprintf("pv-%d", i), "mount")
+				_, err := srv.NodePublishVolume(context.Background(), req)
 				require.NoError(t, err)
 			}
 			podGets, pvcGets = fileQueryCounts(t, client)
@@ -224,8 +230,6 @@ func TestDirectPublishRRSAUsesPodTokenWithoutCredentials(t *testing.T) {
 			t.Setenv("CSI_FUSE_FILE_ROOT", root)
 			pod := manualFilePod("rund", 1)
 			pod.Spec.ServiceAccountName = "business"
-			pod.Spec.Volumes = append(pod.Spec.Volumes, core.Volume{Name: "rrsa", VolumeSource: core.VolumeSource{Projected: &core.ProjectedVolumeSource{Sources: []core.VolumeProjection{{ServiceAccountToken: &core.ServiceAccountTokenProjection{Audience: "sts.aliyuncs.com", Path: "token", ExpirationSeconds: ptr.To(int64(600))}}}}}})
-			pod.Spec.InitContainers[0].VolumeMounts = append(pod.Spec.InitContainers[0].VolumeMounts, core.VolumeMount{Name: "rrsa", MountPath: filevolume.RRSATokenDir, ReadOnly: true})
 			req := fileRequest(t, 0, "ossfs2")
 			req.Secrets = nil
 			req.VolumeContext["authType"] = "rrsa"
@@ -259,6 +263,44 @@ func TestDirectPublishRRSAUsesPodTokenWithoutCredentials(t *testing.T) {
 			require.Len(t, client.Actions(), 2)
 		})
 	}
+}
+
+func TestGuestSidecarRejectsNonRRSAWithoutPublishingCredentials(t *testing.T) {
+	gatetesting.SetFeatureGateDuringTest(t, features.FunctionalMutableFeatureGate, features.RundCSIProtocol3, false)
+	for _, auth := range []string{"", "sts", "ram", "agent-identity"} {
+		t.Run("auth="+auth, func(t *testing.T) {
+			root := t.TempDir()
+			t.Setenv("CSI_FUSE_FILE_ROOT", root)
+			pod := manualFilePod("rund", 1)
+			client := fileTestClient(pod)
+			ns := setupTestNodeServer(t, mount.NewFakeMounter(nil), false)
+			ns.clientset = client
+			req := fileRequest(t, 0, "ossfs2")
+			req.VolumeContext["authType"] = auth
+			_, err := common.WrapNodeServerWithMetricRecorder(ns, "oss", client).NodePublishVolume(context.Background(), req)
+			require.Error(t, err)
+			require.NotContains(t, err.Error(), "test-sk")
+			require.NoFileExists(t, filepath.Join(root, "pod-a", "manifest.json"))
+			require.NoFileExists(t, filevolume.RequestPath(filepath.Join(root, "pod-a"), "pv-0"))
+		})
+	}
+}
+
+func TestGuestSidecarIdentifiedByReservedName(t *testing.T) {
+	pod := manualFilePod("rund", 1)
+	req := fileRequest(t, 0, "ossfs2")
+	pod.Spec.InitContainers[0].Name = "mountproxy"
+	_, err := filevolume.ManifestForPod(pod, req)
+	require.ErrorContains(t, err, filevolume.SidecarName)
+	pod.Spec.InitContainers[0].Name = filevolume.SidecarName
+	pod.Spec.InitContainers[0].Command = []string{"/custom-entrypoint"}
+	pod.Spec.InitContainers[0].Args = []string{"custom", "arguments"}
+	_, err = filevolume.ManifestForPod(pod, req)
+	require.NoError(t, err, "entrypoint and arguments are not identity checks")
+	require.NoError(t, filevolume.ValidateRRSAToken(pod))
+	pod.Spec.InitContainers[0].RestartPolicy = nil
+	_, err = filevolume.ManifestForPod(pod, req)
+	require.ErrorContains(t, err, "restartable init sidecar")
 }
 
 func fileTestClient(pod *core.Pod) *fake.Clientset {

@@ -8,6 +8,10 @@ Kubernetes v1.33 及以上，目标节点与 RuntimeClass 能创建实际 RunD g
 
 CSI 使用本分支构建的非托管组件。启用 oss driver，保留集群 DS 的正常配置，`SKIP_GLOBAL_MOUNT` 使用默认 false；不能配全局 mountproxy socket 把本例导向已有 socket 分支。`RundCSIProtocol3=false`，否则旧逻辑可能提前 skip，不会落这套文件。
 
+guest sidecar 仅接受 `authType: rrsa`，不接受默认 Secret 鉴权或其他 authType，也不向业务 sidecar 交付 CSI Secret。init container 名称必须为 `alibabacloud-csi-mountproxy`；按名称识别，不解析其启动 command/args。仍校验 Always、probe、权限和挂载结构；名称不是身份认证。自定义入口必须实际启动兼容的 file-mode 服务。
+
+runc sidecar 尚未实现：后续允许 Secret 引用时，凭据须由 Pod 显式声明 Secret volume 并挂给 sidecar，不从 CSI 请求交付。当前 runc 独立 FUSE Pod 的 Secret 鉴权保持原有行为。
+
 sidecar 镜像包含本分支的 `csi-mount-proxy-server`、ossfs2 及所需动态库。需要混合 ossfs1 时镜像还需包含 ossfs；file-mode 自动注册链接的 driver 不等于镜像自动包含所有外部可执行文件。customfuse 的可执行入口及环境仍由其镜像提供，本轮未做真实 customfuse 集群验收。
 
 集群已启用 RRSA。业务 ServiceAccount 的 OIDC 身份拥有指定 bucket/prefix 的最小权限，角色信任限制 issuer、audience 与 `system:serviceaccount:<namespace>:<serviceaccount>`。这里不提供账号相关角色 ARN、OIDC provider 或真实凭据。
@@ -74,17 +78,17 @@ state 是 host 控制目录 `/var/run/ossfs/file-volumes` 的 UID 子目录，�
 ```sh
 kubectl -n fuse-file-demo get pods
 kubectl -n fuse-file-demo describe pod <pod>
-kubectl -n fuse-file-demo logs <pod> -c mountproxy
-kubectl -n fuse-file-demo exec <pod> -c mountproxy -- csi-mount-proxy-server --file-check-ready
+kubectl -n fuse-file-demo logs <pod> -c alibabacloud-csi-mountproxy
+kubectl -n fuse-file-demo exec <pod> -c alibabacloud-csi-mountproxy -- csi-mount-proxy-server --file-check-ready
 ```
 
 最后一条在全部期望卷成功且状态新鲜时返回 0，首次成功会写放行屏障；失败输出卷 key、phase 和脱敏原因。它不挂载、不发 Kubernetes 请求，也不读远端数据。startupProbe 成功前业务等待；挂载失败时 NodePublish 可能已经成功交付文件，不能据此判断卷已挂好。
 
-不要直接输出完整 desired：Secret 鉴权可含凭据。需要状态时只读取 `/volume-state/status/*.json` 的 phase、error、updatedAt 和 generation/session；对外分享前仍应检查客户端 stderr 是否包含敏感内容。
+不要直接输出完整 desired 或 projected token。当前 guest 路径仅允许 RRSA；需要状态时只读取 `/volume-state/status/*.json` 的 phase、error、updatedAt 和 generation/session；对外分享前仍应检查客户端 stderr 是否包含敏感内容。
 
 | 现象 | 处理 |
 |---|---|
-| FailedMount: native mountproxy sidecar | 手动 sidecar 缺失/command/args 不符合契约，先修 Pod 模板 |
+| FailedMount: native mountproxy sidecar | 保留名称的 init sidecar 缺失，先修 Pod 模板 |
 | FailedMount: startup/readiness exec probes | 补齐固定探针；不能用恒成功命令放行业务 |
 | FailedMount: state/target contract | 核对 UID env、subPathExpr、PV 路径及传播模式 |
 | FailedMount: PVC bound to PV / fix mapping | sidecar 的 volumeMount.name 与 mountPath 中 PV 对不上，修 Pod 模板；不要仅交换路径名称 |

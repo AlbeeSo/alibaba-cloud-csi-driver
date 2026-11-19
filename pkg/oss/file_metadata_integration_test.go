@@ -71,6 +71,8 @@ func TestDirectPublishMetadataFileConsumerIntegration(t *testing.T) {
 			require.Equal(t, "ossfs", first.Fstype)
 			require.Equal(t, "handle-1", second.VolumeID)
 			require.Equal(t, "ossfs2", second.Fstype)
+			require.Empty(t, first.Secrets)
+			require.Empty(t, second.Secrets)
 			require.Contains(t, second.Options, "ro=true")
 			cancel()
 			select {

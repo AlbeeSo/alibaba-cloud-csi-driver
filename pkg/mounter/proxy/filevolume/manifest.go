@@ -15,6 +15,7 @@ import (
 )
 
 const (
+	SidecarName      = "alibabacloud-csi-mountproxy"
 	DefaultStateDir  = "/volume-state"
 	DefaultTargetDir = "/pod-volumes"
 	HostStateDir     = "/var/run/ossfs/file-volumes"
@@ -69,15 +70,15 @@ func waitExpected(ctx context.Context, root, uid string) ([]string, error) {
 }
 
 func fileContainer(c core.Container) bool {
-	return len(c.Command) == 1 && filepath.Base(c.Command[0]) == "csi-mount-proxy-server" && len(c.Args) == 1 && c.Args[0] == "--file-mode"
+	return c.Name == SidecarName
 }
 
 func fileProbe(p *core.Probe) bool {
 	return p != nil && p.Exec != nil && len(p.Exec.Command) == 2 && filepath.Base(p.Exec.Command[0]) == "csi-mount-proxy-server" && p.Exec.Command[1] == "--file-check-ready"
 }
 
-// Manual consumers use fixed arguments/probes. The Pod declares each volume
-// once; neither the sidecar command nor the startup probe has a volume list.
+// Manual consumers use a reserved name and fixed probes. The Pod declares each
+// volume once; neither the sidecar command nor the startup probe needs a list.
 func PublishPodManifest(pod *core.Pod, req *csi.NodePublishVolumeRequest, root string) error {
 	return podManifest(pod, req, func(m Manifest) error {
 		return WriteJSON(filepath.Join(root, m.PodUID, "manifest.json"), m)
@@ -111,7 +112,7 @@ func podManifest(pod *core.Pod, req *csi.NodePublishVolumeRequest, accept func(M
 		}
 	}
 	if consumer == nil {
-		return fmt.Errorf("direct mount requires a native mountproxy sidecar with args [--file-mode]")
+		return fmt.Errorf("direct mount requires a native mountproxy sidecar named %s", SidecarName)
 	}
 	if consumer.RestartPolicy == nil || *consumer.RestartPolicy != core.ContainerRestartPolicyAlways || !fileProbe(consumer.StartupProbe) || !fileProbe(consumer.ReadinessProbe) {
 		return fmt.Errorf("mountproxy must be a restartable init sidecar with startup/readiness exec probes [csi-mount-proxy-server, --file-check-ready]")

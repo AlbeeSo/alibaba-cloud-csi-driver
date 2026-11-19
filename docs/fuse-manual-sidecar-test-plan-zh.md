@@ -26,7 +26,7 @@ spec:
   runtimeClassName: rund
   terminationGracePeriodSeconds: 90
   initContainers:
-    - name: mountproxy
+    - name: alibabacloud-csi-mountproxy
       image: <aio-mountproxy-image>
       command: [csi-mount-proxy-server]
       args: [--file-mode]
@@ -90,7 +90,7 @@ spec:
 
 双卷验收至少包括：两卷成功；A 成功/B 迟到；A 成功/B 永不到达；A 成功/B 挂载失败；运行后单卷 daemon 退出；删除 Pod 时一卷卸载正常/另一卷 EBUSY。每种情况分别记录两个卷的状态与清理结果。后续再验证更多卷及 ossfs1/ossfs2 混合，不以单卷成功作为本实验通过标准。
 
-固定的是 command、args、probe 和默认目录；增减卷仍需修改 Pod 的 volumes/volumeMounts。CSI 从已有 Pod 中的 sidecar 挂载声明生成完整 inventory，不额外查询 PVC/PV，不要求用户维护 expected-volumes 参数。inventory 的 key 是 kubelet CSI 目标目录名；MountRequest.VolumeID 保持真实 volumeHandle。
+固定识别名称为 `alibabacloud-csi-mountproxy`，启动 command/args 是推荐配置而非识别条件；probe 和默认目录保持约定。guest 仅允许 RRSA，不交付 CSI Secrets。增减卷仍需修改 Pod 的 volumes/volumeMounts。CSI 从已有 Pod 中的 sidecar 挂载声明生成完整 inventory，不额外查询 PVC/PV，不要求用户维护 expected-volumes 参数。inventory 的 key 是 kubelet CSI 目标目录名；MountRequest.VolumeID 保持真实 volumeHandle。
 
 手动声明的 PVC 名和 mountPath 中 PV 名必须对应。单凭 Pod 对象不能验证 PVC→PV 绑定；完整且一致的 PV/PVC/namespace VolumeContext 元数据可按配置契约免查，缺失时才查询标准 Bound PVC 的 spec.volumeName，成功绑定按 PodUID/namespace/claim 缓存。任何已给字段冲突不使用缓存或 GET 掩盖。分别测试元数据快速路径与兜底的冷/热 API 成本；静态填写及 Retain 重绑定需同步维护元数据，不声称它是实时绑定证明。
 
