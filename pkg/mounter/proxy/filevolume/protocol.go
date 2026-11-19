@@ -17,6 +17,7 @@ import (
 )
 
 const Version = "fuse.csi.alibabacloud.com/v1alpha1"
+const FeatureFuseFD = "fuse-fd-v1"
 
 type Desired struct {
 	directvolume.MountInfo
@@ -52,7 +53,8 @@ func ValidComponent(s string) bool {
 }
 
 func (d Desired) Validate(uid string) error {
-	if len(d.RequiredFeatures) > 0 {
+	fdMode := len(d.RequiredFeatures) == 1 && d.RequiredFeatures[0] == FeatureFuseFD && d.Mount.FdPassing && d.Mount.Fstype == "ossfs2"
+	if len(d.RequiredFeatures) > 0 && !fdMode {
 		return fmt.Errorf("unsupported required file-protocol features: %v", d.RequiredFeatures)
 	}
 	if d.APIVersion != Version || !ValidComponent(uid) || d.PodUID != uid {
@@ -62,7 +64,11 @@ func (d Desired) Validate(uid string) error {
 	if len(parts) != 2 || !ValidComponent(parts[0]) || parts[1] != "mount" {
 		return fmt.Errorf("target must be <CSI-volume-directory>/mount")
 	}
-	if err := ValidateMount(d.Mount); err != nil {
+	validation := d.Mount
+	if fdMode {
+		validation.FdPassing, validation.Recovery = false, false
+	}
+	if err := ValidateMount(validation); err != nil {
 		return err
 	}
 	if d.Generation == "" || d.Generation != d.Digest() {
@@ -87,7 +93,10 @@ func ValidateMount(m proxy.MountRequest) error {
 		return fmt.Errorf("file transport does not manage overlay mounts")
 	}
 	if m.MetricsPath != "" {
-		return fmt.Errorf("file transport does not expose host metrics paths")
+		parts := strings.Split(m.MetricsPath, "/")
+		if len(parts) != 2 || parts[0] != "metrics" || !ValidComponent(parts[1]) {
+			return fmt.Errorf("file transport metrics must be a Pod-relative metrics/<volume> path")
+		}
 	}
 	return nil
 }

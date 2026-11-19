@@ -53,7 +53,7 @@ mountPath 中的 PV 名必须对应该 PVC 的绑定。快速路径使用一致�
 
 mountproxy 必须位于消费这些 PVC 的其他 init container 之前。不在首位时先输出 INFO，说明正在检查前置 PVC 引用；若前置 init 使用任何 PVC，输出 WARNING，列出去重的 PVC 总数、名称、容器及与 sidecar 管理集合的交集数。与本 sidecar 无关的 PVC 仅告警、仍允许；有交集则保持现有明确拒绝，防止前置 init 返回 0 后静默放行业务。完全不使用 PVC 的准备 init 只有 INFO。该扫描仅使用已有 Pod 对象，不查询 API。这里没有把日志改成排序保证，也没有默认启用尚未确认生效的 ASI 优先级 env。
 
-生产路径复用第一次得到的已验证 manifest 写文件，不再在落盘前重复扫描 Pod 或重复输出顺序日志。动态供给可开启 external-provisioner 的 `--extra-create-metadata=true`，驱动 CreateVolume 会保留这些字段；静态卷可按示例显式填写。当前 chart 未默认开启 OSS 的该参数，未修改 webhook 或 provisioner 行为。
+生产路径复用第一次得到的已验证 manifest 写文件，不再在落盘前重复扫描 Pod 或重复输出顺序日志。chart 默认给 OSS 和 customfuse 的 external-provisioner 开启 `--extra-create-metadata=true`，CreateVolume 保留字段供新动态卷使用；不补写存量 PV，不改变 driver 启用开关，也不增加一次 API 查询。静态卷可显式填写，但正常首位 sidecar 的免查询路径不要求这些字段。
 
 ## 文件协议
 

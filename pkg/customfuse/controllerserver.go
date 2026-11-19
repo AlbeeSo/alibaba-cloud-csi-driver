@@ -5,10 +5,12 @@ package customfuse
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/common"
 	fpm "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/fuse_pod_manager"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/filevolume"
 	mounterutils "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -44,6 +46,14 @@ func (cs *controllerServer) ControllerPublishVolume(ctx context.Context, req *cs
 		return nil, status.Errorf(codes.InvalidArgument, "failed to parse options: %v", err)
 	}
 	klog.V(4).Infof("ControllerPublishVolume: parsed options: fuseType=%s", opts.FuseType)
+	required, err := filevolume.RequireSidecar(req.VolumeContext)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	runtimeClass, _ := filevolume.Attribute(req.VolumeContext, "runtimeclass")
+	if required || strings.EqualFold(runtimeClass, "rund") {
+		return &csi.ControllerPublishVolumeResponse{}, nil
+	}
 
 	if err := precheckAuthConfig(opts); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "auth config error: %v", err)

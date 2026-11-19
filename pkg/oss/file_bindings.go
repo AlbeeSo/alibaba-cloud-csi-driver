@@ -59,6 +59,12 @@ func (ns *nodeServer) validateFileBinding(ctx context.Context, pod *core.Pod, re
 		}
 		return nil
 	}
+	// A first consumer (or preceding init containers with no PVCs) already
+	// guarantees startup order. Do not demand binding metadata or a cold GET
+	// merely to validate an independent hand-written PV/PVC mapping.
+	if !manifest.BindingLookupRequired {
+		return nil
+	}
 	if ns.clientset == nil {
 		return status.Error(codes.Unavailable, "PVC binding validation requires the Kubernetes client")
 	}

@@ -38,6 +38,12 @@ func (m *extendedMounter) superviseProcess(
 	defer close(trulyExited)
 	defer m.driver.activeTargets.Delete(op.Target)
 	defer func() {
+		m.driver.targetProcesses.Delete(op.Target)
+		if value, ok := m.driver.fileStops.Load(op.Target); ok {
+			close(value.(*fileFDStop).done)
+		}
+	}()
+	defer func() {
 		if op.FuseFd > 0 {
 			_ = unix.Close(op.FuseFd)
 		}
@@ -67,7 +73,7 @@ func (m *extendedMounter) superviseProcess(
 			}
 		}
 
-		if m.driver.terminating.Load() {
+		if m.driver.shouldStop(target) {
 			logger.Info("Server terminating, not recovering", "pid", currentPid)
 			break
 		}
@@ -95,7 +101,7 @@ func (m *extendedMounter) superviseProcess(
 		// If termination was requested during recovery, kill the newly started process
 		// so the loop doesn't block on <-proc.exited for a healthy process that
 		// Terminate()'s pids.Range already missed.
-		if m.driver.terminating.Load() {
+		if m.driver.shouldStop(target) {
 			_ = proc.cmd.Process.Signal(syscall.SIGTERM)
 		}
 	}
@@ -128,7 +134,7 @@ func (m *extendedMounter) recoveryRestart(
 
 	var lastErr error
 	for attempt := 0; attempt < recoveryMaxAttempts; attempt++ {
-		if m.driver.terminating.Load() {
+		if m.driver.shouldStop(target) {
 			return nil, attempt, fmt.Errorf("server terminating during recovery")
 		}
 
@@ -136,7 +142,7 @@ func (m *extendedMounter) recoveryRestart(
 			delay := backoff.Step()
 			logger.Info("Recovery attempt backing off", "attempt", attempt, "delay", delay, "target", target)
 			time.Sleep(delay)
-			if m.driver.terminating.Load() {
+			if m.driver.shouldStop(target) {
 				return nil, attempt, fmt.Errorf("server terminating during recovery backoff")
 			}
 		}
@@ -160,6 +166,7 @@ func (m *extendedMounter) recoveryRestart(
 		}
 
 		m.driver.pids.Store(proc.cmd.Process.Pid, proc.cmd)
+		m.driver.targetProcesses.Store(target, proc.cmd)
 		return proc, attempt + 1, nil
 	}
 

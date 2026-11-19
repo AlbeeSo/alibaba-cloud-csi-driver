@@ -172,6 +172,31 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	if err := resolveAgenticBucketOptions(opts, ns.metadata); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	requireSidecar, err := filevolume.RequireSidecar(req.VolumeContext)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	// Select a Pod consumer before the legacy RunC branch demands a controller
+	// socket. Explicit csi-agent/direct/COCO paths retain their old selection.
+	if !opts.DirectAssigned && !ns.skipGlobalMount && (requireSidecar || req.VolumeContext[utils.PodNameKey] != "") {
+		pod, podErr := utils.GetPodFromContextOrK8s(ctx, ns.clientset, req)
+		if podErr != nil {
+			return nil, status.Errorf(codes.Unavailable, "resolve sidecar Pod: %v", podErr)
+		}
+		consumer, _, consumerErr := filevolume.Consumer(pod)
+		if consumerErr != nil {
+			return nil, status.Error(codes.FailedPrecondition, consumerErr.Error())
+		}
+		if consumer != nil {
+			if err := filevolume.ValidatePublishPod(pod, req, ns.nodeName); err != nil {
+				return nil, status.Error(codes.FailedPrecondition, err.Error())
+			}
+			return ns.publishFileVolume(ctx, req, opts, pod)
+		}
+		if requireSidecar {
+			return nil, status.Error(codes.FailedPrecondition, "required mountproxy sidecar is missing")
+		}
+	}
 
 	// Resolve mount-proxy socket path. ns.mountProxySock is set by csi-plugin
 	// (--mount-proxy-sock flag) or csi-agent (NewCSIAgent), overriding PublishContext.
@@ -456,6 +481,16 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 	if isDirectVolumePath(targetPath) {
 		return ns.unPublishDirectVolume(ctx, req)
 	}
+	fdOwned := filevolume.NativeFDs.Close(targetPath)
+	if !fdOwned {
+		uid, rel, e := filevolume.Target(targetPath)
+		if e == nil {
+			var desired filevolume.Desired
+			if filevolume.ReadJSON(filevolume.RequestPath(filepath.Join(filevolume.Root(ossFileRoot), uid), filepath.Dir(rel)), &desired) == nil {
+				fdOwned = desired.Mount.FdPassing
+			}
+		}
+	}
 	if err := filevolume.Unpublish(filevolume.Root(ossFileRoot), req.VolumeId, targetPath); err != nil {
 		// Kubelet only unpublishes after stopping Pod containers/sandboxes.
 		// A stopped sidecar cannot ACK. Retain the diagnostic distinction, but
@@ -470,7 +505,7 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 	// Note: this delegates to CleanupMountPoint with extensiveMountPointCheck=false,
 	// whereas the original code used true. The difference is immaterial for FUSE mounts
 	// (FUSE has an independent st_dev, so stat-only check works correctly).
-	err = mounterutils.SafeCleanupFuseMount(targetPath, ns.rawMounter, false)
+	err = mounterutils.SafeCleanupFuseMount(targetPath, ns.rawMounter, fdOwned)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to unmount target %q: %v", targetPath, err)
 	}

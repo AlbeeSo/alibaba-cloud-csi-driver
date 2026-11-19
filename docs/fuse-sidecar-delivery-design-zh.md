@@ -4,11 +4,11 @@
 
 统一在一个功能 PR 内完成公共基础、RunD、RunC、customfuse 和可选 webhook，按独立 commit review，不再使用独立 RunC MR/三 PR 依赖计划。完整待执行测试见[单 PR 验收计划](fuse-sidecar-unified-acceptance-zh.md)，不是现有全部通过的声明。
 
-最终能力边界：**RunD sidecar 不支持 fd-passing 和 recovery**，保持 guest 内直接挂载、RRSA 和当前 privileged 要求，不规划借 HostPath 传 host fd。**RunC fd-capable sidecar 复用已有 fd-passing 和对应 driver 的 daemon recovery，实现非特权**；配置与状态走 file，fd 经同内核 Unix socket 交付。该能力尚未实现。customfuse 两种环境均使用直接挂载且不支持 fd-passing/recovery，权限独立说明。既有独立 FUSE Pod 的能力和默认行为保持。
+最终能力边界：**RunD sidecar 不支持 fd-passing 和 recovery**，保持 guest 内直接挂载、RRSA 和当前 privileged 要求，不规划借 HostPath 传 host fd。**RunC fd-capable sidecar 复用已有 fd-passing 和对应 driver 的 daemon recovery，实现非特权**；配置与状态走 file，fd 经同内核 Unix socket 交付。公共适配已有本地实现和集成测试，真实挂载验收尚未完成。customfuse 两种环境均使用直接挂载且不支持 fd-passing/recovery，权限独立说明。既有独立 FUSE Pod 的能力和默认行为保持。
 
 ## 选择依据
 
-两种业务 sidecar 都必须在 NodePublish 返回后才能启动。文件负责配置、完整卷集合和执行状态，不承担 fd 传递；若使用 fd-passing，CSI 可以先建立内核挂载再返回，sidecar 随后接管 fd。数据面真正可用仍须等用户态 daemon 初始化完成。使用 file 可复用已有 inventory、generation、worker、状态和 probe，不需要再开发一套以 socket 承载完整配置和结果的异步执行协议。
+两种业务 sidecar 都必须在 NodePublish 返回后才能启动。文件负责配置、完整卷集合和执行状态，不承担 fd 传递。RunC 的 fd offer 必须延迟到 sidecar 已启动并主动接管时才建立内核挂载，不能在 NodePublish 返回前提前 mount：真实实验已确认后者会让 containerd 卡在未完成 FUSE_INIT 的 stat/getattr，从而阻塞同 Pod 消费方启动。数据面真正可用仍须等用户态 daemon 初始化完成。使用 file 可复用已有 inventory、generation、worker、状态和 probe，不需要再开发一套以 socket 承载完整配置和结果的异步执行协议。延迟交接的传播和真实数据面仍在迭代验收，见[使用与生命周期补充](fuse-sidecar-webhook-zh.md)。
 
 现有独立 FUSE Pod 的共享挂载、同步调用与业务 sidecar 的 Pod 独占挂载、异步执行本来就不同，不能因为都用 socket 而假装无需分叉。代码按消费者和挂载范围组织，避免把传输选择继续塞进 runtimeType 判断。统一的是 sidecar 交付和状态模型，不是隐藏 runc/rund 的目标准备、传播和异常回收差异。
 
@@ -20,14 +20,14 @@
 |---|---|
 | RunD 手动 native sidecar、file 请求、多卷 inventory、probe、回收 | 已实现；详见[现有设计](fuse-manual-sidecar-design-zh.md)和[验收记录](fuse-manual-sidecar-validation-zh.md) |
 | guest file 仅 RRSA、固定 sidecar 名称 | 已实现，提交 a441f4830；Linux OSS/filevolume 测试、集测与 CI 通过；本次命名/鉴权更新未重跑云 E2E |
-| RunC 业务 sidecar、file 异步交付 | 待实现，本文是设计约定；不开发第二套 sidecar socket 投递 |
-| 新 SC 参数、controller 跳过建 FUSE Pod | 待实现；参数名称尚未确定 |
-| 首位 sidecar 正常路径免额外配置、免 PVC GET | 已达成要求，尚未实现；当前代码缺少完整绑定元数据时仍可能 GET PVC |
-| webhook | 后续可选能力，当前未实现 |
-| RunC sidecar 非特权 fd-passing | 必须纳入开发设计；已有底层实现可复用，file 异步交接尚未适配 |
+| RunC 业务 sidecar、file 异步交付 | 已实现本地适配；真实内核挂载和云 E2E 待验收 |
+| 新 SC 参数、controller 跳过建 FUSE Pod | `mountMode: sidecar`；OSS/customfuse controller 已接入 |
+| 首位 sidecar 正常路径免额外配置、免 PVC GET | 已实现；1/10/100 卷真实 NodePublish 调用、禁止 PVC GET 的集成测试通过 |
+| webhook | 已实现可选 admission 和 chart；本地 HTTP/多卷/幂等测试通过，集群验收待执行；仅支持已绑定 PVC |
+| RunC sidecar 非特权 fd-passing | 已实现 OSS2 file+SCM_RIGHTS 适配；真实 fd 交接、重复发布、长路径测试通过，真实 FUSE E2E 待执行 |
 | RunD sidecar fd-passing/recovery | 明确不支持；请求必须报错，不静默降级或忽略 |
-| RunC sidecar recovery | 复用已有 ossfs2 daemon recovery；file worker 和状态模型尚未接入，不宣称覆盖 mountproxy/Pod 重启 |
-| customfuse sidecar | 必须纳入两个环境的交付；独立命名、file 直接挂载，不支持 fd-passing/recovery；命名和真实挂载 E2E 尚未落实 |
+| RunC sidecar recovery | 已接入已有 OSS2 supervisor 和 file 状态/监控；不覆盖 mountproxy/Pod 重启，实际内核 recovery E2E 待执行 |
+| customfuse sidecar | 已实现独立名称、RRSA/原生 Secret 投影、file 多卷发布；本地集测通过，真实客户端挂载 E2E 待执行 |
 
 这里 RunC/RunD 是讨论两条执行路径的称呼，不要求集群存在名为 runc 的 RuntimeClass。Pod runtimeClassName 为 nil 只表示默认 handler，不能据此断言共享宿主机内核。
 
@@ -35,7 +35,7 @@
 
 一个 Pod 由一个 native sidecar 管理多个 FUSE 卷。默认 OSS sidecar 名称固定为 `alibabacloud-csi-mountproxy`；customfuse 名称固定为 `alibabacloud-csi-customfuse-mountproxy`。仅按这两个精确保留名称识别，不使用通配规则，不解析启动 command/args 或镜像名称；候选存在但结构不合法时明确报错，不当成“没有 sidecar”回退。默认名称不用于 customfuse，名称本身也不授权读取凭据或决定实际请求的 fstype。
 
-本阶段一个 Pod 只允许一个挂载消费者候选。多个 customfuse 候选或默认与 customfuse 同时存在均明确报歧义，不按数组顺序随便选择。若以后支持多消费者，必须先设计逐卷归属，不能隐式放开。上文四种分流中的“有 sidecar”包括合法的 customfuse 命名候选。当前代码仍只识别默认精确名称；customfuse 命名规则是待实现契约，不宣称当前已生效。
+本阶段一个 Pod 只允许一个挂载消费者候选。多个 customfuse 候选或默认与 customfuse 同时存在均明确报歧义，不按数组顺序随便选择。若以后支持多消费者，必须先设计逐卷归属，不能隐式放开。上文四种分流中的“有 sidecar”包括合法的 customfuse 命名候选。
 
 结构包括 restartPolicy=Always 的 init container、所需 probe、UID 隔离和数据/控制挂载。推荐放 initContainers 首位，startupProbe 等全部期望卷成功才允许后续 init 和业务启动；不能只看“目前已收到的卷”就放行。增加卷修改 volumes/volumeMounts，不要求用户修改 expected-volumes 或启动参数。webhook 和用户手工配置遵守同一契约。
 
@@ -197,7 +197,7 @@ RunD 和后续 RunC 均必须支持 customfuse，不能仅验通 ossfs2 就视�
 
 ## 可选 webhook：只生成配置，不参与挂载执行
 
-使用 Pod annotation 显式请求注入，例如 `csi.alibabacloud.com/inject-mountproxy: "true"`；该 key 是设计候选，正式名称待实现确定，不是当前可用配置。Deployment 应写在 spec.template.metadata.annotations。未声明时 webhook 不注入，不根据 RuntimeClass 或“发现 FUSE 卷”自动开启。
+使用 Pod annotation 显式请求注入：`csi.alibabacloud.com/inject-mountproxy: "true"`。Deployment 应写在 spec.template.metadata.annotations。未声明时 webhook 不注入，不根据 RuntimeClass 或“发现 FUSE 卷”自动开启。
 
 三个选择分别独立：
 

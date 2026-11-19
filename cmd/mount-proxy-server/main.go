@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -108,14 +109,20 @@ func main() {
 }
 
 func runFileMode() error {
-	if err := server.EnsureFuseDevice("/dev/fuse"); err != nil {
-		return err
-	}
 	fileDrivers := server.InitFileDrivers()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+	var manifest filevolume.Manifest
+	if err := filevolume.ReadJSON(filepath.Join(fileStateDir, "manifest.json"), &manifest); err != nil {
+		return fmt.Errorf("read file manifest: %w", err)
+	}
+	if !manifest.FdPassing {
+		if err := server.EnsureFuseDevice("/dev/fuse"); err != nil {
+			return err
+		}
+	}
 	r := filevolume.Runner{Root: fileStateDir, PodUID: filePodUID, TargetRoot: fileTargetDir,
-		Timeout: handleTimeout, Backend: server.FileBackend{Mounter: mount.NewWithoutSystemd("")}}
+		Timeout: handleTimeout, Backend: server.FileBackend{Mounter: mount.NewWithoutSystemd(""), StateRoot: fileStateDir, TargetRoot: fileTargetDir, HealthStates: &sync.Map{}, FDTargets: &sync.Map{}}}
 	return fileLifecycle(ctx, r.Run, func() { server.Terminate(fileDrivers) }, 20*time.Second)
 }
 

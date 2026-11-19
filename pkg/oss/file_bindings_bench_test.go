@@ -14,6 +14,7 @@ import (
 // The request counter prevents a future refactor silently adding warm GETs.
 func BenchmarkFileBindingWarm(b *testing.B) {
 	pod := manualFilePod("rund", 1)
+	prependUnrelatedPVC(pod)
 	client := fileTestClient(pod)
 	ns := &nodeServer{clientset: client}
 	req := &csi.NodePublishVolumeRequest{TargetPath: "/var/lib/kubelet/pods/pod-a/volumes/kubernetes.io~csi/pv-0/mount", VolumeContext: map[string]string{"csi.storage.k8s.io/pod.uid": "pod-a"}}

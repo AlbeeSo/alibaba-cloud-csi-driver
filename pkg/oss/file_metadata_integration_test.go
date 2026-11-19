@@ -31,6 +31,9 @@ func TestDirectPublishMetadataFileConsumerIntegration(t *testing.T) {
 			root := t.TempDir()
 			t.Setenv("CSI_FUSE_FILE_ROOT", root)
 			pod := manualFilePod("rund", 2)
+			if mixed {
+				prependUnrelatedPVC(pod)
+			}
 			client := fileTestClient(pod)
 			ns := setupTestNodeServer(t, mount.NewFakeMounter(nil), false)
 			ns.clientset = client

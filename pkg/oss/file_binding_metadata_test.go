@@ -75,6 +75,7 @@ func TestDirectPublishIncompleteMetadataUsesFallback(t *testing.T) {
 	for mask := range 7 { // Every incomplete subset of the three fields.
 		t.Run(fmt.Sprint(mask), func(t *testing.T) {
 			pod := manualFilePod("rund", 1)
+			prependUnrelatedPVC(pod)
 			client := fileTestClient(pod)
 			ns := &nodeServer{clientset: client}
 			req := fileRequest(t, 0, "ossfs2")
@@ -100,6 +101,7 @@ func TestDirectPublishConflictingMetadataDoesNotFallback(t *testing.T) {
 		for _, partial := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/partial=%t", field, partial), func(t *testing.T) {
 				pod := manualFilePod("rund", 1)
+				prependUnrelatedPVC(pod)
 				client := fileTestClient(pod)
 				ns := &nodeServer{clientset: client}
 				req := fileRequest(t, 0, "ossfs2")
@@ -123,6 +125,7 @@ func TestDirectPublishConflictingMetadataDoesNotFallback(t *testing.T) {
 
 func TestDirectPublishMetadataDoesNotSeedFallbackCache(t *testing.T) {
 	pod := manualFilePod("rund", 1)
+	prependUnrelatedPVC(pod)
 	client := fileTestClient(pod)
 	ns := &nodeServer{clientset: client}
 	req := fileRequest(t, 0, "ossfs2")

@@ -8,6 +8,7 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/common"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/filevolume"
 	mounterutils "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils"
 	"google.golang.org/grpc/codes"
@@ -62,6 +63,13 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		return nil, status.Errorf(codes.InvalidArgument, "failed to parse options: %v", err)
 	}
 	klog.V(4).Infof("NodePublishVolume: parsed options: fuseType=%s, mountOptions=%s, otherOpts=%s", opts.FuseType, opts.MountOptions, opts.OtherOpts)
+	pod, err := ns.selectFileConsumer(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if pod != nil {
+		return ns.publishFileVolume(req, opts, pod)
+	}
 
 	if err := precheckAuthConfig(opts); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "auth config error: %v", err)
@@ -157,9 +165,17 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 	}
 	defer ns.locks.Release(req.VolumeId)
 
-	err := mountutils.CleanupMountPoint(req.TargetPath, ns.rawMounter, true)
+	// kubelet stops the Pod's native sidecar before calling NodeUnpublish; an
+	// absent acknowledgment must not block standard teardown.
+	if err := filevolume.Unpublish(filevolume.Root(fileRoot), req.VolumeId, req.TargetPath); err != nil {
+		klog.InfoS("Customfuse cleanup acknowledgment unavailable; continuing kubelet teardown", "error", err)
+	}
+	err := mounterutils.SafeCleanupFuseMount(req.TargetPath, ns.rawMounter, false)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to unmount target %q: %v", req.TargetPath, err)
+	}
+	if err := filevolume.Retire(filevolume.Root(fileRoot), req.TargetPath); err != nil {
+		return nil, status.Errorf(codes.Internal, "retire customfuse controls: %v", err)
 	}
 	klog.V(2).Infof("NodeUnpublishVolume: unmounted %s", req.TargetPath)
 	return &csi.NodeUnpublishVolumeResponse{}, nil

@@ -98,11 +98,7 @@ func TestDirectPublishCachedPodRouting(t *testing.T) {
 			}
 			podGets, pvcGets := fileQueryCounts(t, client)
 			require.Equal(t, 4, podGets)
-			if class == "kata-remote" {
-				require.Zero(t, pvcGets)
-			} else {
-				require.Equal(t, 2, pvcGets)
-			}
+			require.Zero(t, pvcGets, "first sidecar requires no binding metadata or PVC GET")
 		})
 	}
 }
@@ -180,6 +176,10 @@ func TestDirectPublishAPICallsScaleWithRequestsOnly(t *testing.T) {
 			root := t.TempDir()
 			t.Setenv("CSI_FUSE_FILE_ROOT", root)
 			client := fileTestClient(manualFilePod("rund", count))
+			client.PrependReactor("get", "persistentvolumeclaims", func(ktesting.Action) (bool, runtime.Object, error) {
+				t.Error("normal first-sidecar publish must not query PVCs")
+				return true, nil, errors.New("PVC access unavailable")
+			})
 			ns := setupTestNodeServer(t, mount.NewFakeMounter(nil), false)
 			ns.clientset = client
 			srv := common.WrapNodeServerWithMetricRecorder(ns, "oss", client)
@@ -191,7 +191,7 @@ func TestDirectPublishAPICallsScaleWithRequestsOnly(t *testing.T) {
 			}
 			podGets, pvcGets := fileQueryCounts(t, client)
 			require.Equal(t, count, podGets)
-			require.Equal(t, count, pvcGets)
+			require.Zero(t, pvcGets)
 			for i := range count {
 				req := fileRequest(t, i, "ossfs2")
 				req.TargetPath = filepath.Join(root, "pods", "pod-a", "volumes", "kubernetes.io~csi", fmt.Sprintf("pv-%d", i), "mount")
@@ -200,7 +200,7 @@ func TestDirectPublishAPICallsScaleWithRequestsOnly(t *testing.T) {
 			}
 			podGets, pvcGets = fileQueryCounts(t, client)
 			require.Equal(t, 2*count, podGets)
-			require.Equal(t, count, pvcGets, "warm republishes must not query claims again")
+			require.Zero(t, pvcGets, "cold and repeated publishes need no PVC lookup")
 		})
 	}
 }
@@ -260,7 +260,7 @@ func TestDirectPublishRRSAUsesPodTokenWithoutCredentials(t *testing.T) {
 			require.Empty(t, d.Mount.Secrets)
 			require.Contains(t, d.Mount.Options, "rrsa_token_file="+filevolume.RRSATokenFile)
 			require.Contains(t, d.Mount.Options, "rrsa_role_arn="+req.VolumeContext["roleArn"])
-			require.Len(t, client.Actions(), 2)
+			require.Len(t, client.Actions(), 1, "reuse the Pod GET without a PVC lookup")
 		})
 	}
 }

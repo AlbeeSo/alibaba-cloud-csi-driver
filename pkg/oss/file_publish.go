@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/cloud/metadata"
 	ossfpm "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/fuse_pod_manager/oss"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/filevolume"
+	mounterutils "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -49,15 +51,42 @@ func (ns *nodeServer) podForDirectPublish(ctx context.Context, req *csi.NodePubl
 }
 
 func (ns *nodeServer) publishFileVolume(ctx context.Context, req *csi.NodePublishVolumeRequest, opts *ossfpm.Options, pod *core.Pod) (*csi.NodePublishVolumeResponse, error) {
-	if pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName == "" || *pod.Spec.RuntimeClassName == utils.RuncRunTimeTag {
+	if opts.DirectAssigned && (pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName == "" || *pod.Spec.RuntimeClassName == utils.RuncRunTimeTag) {
 		return nil, status.Error(codes.FailedPrecondition, "file-mode sidecar requires an explicit non-runc RuntimeClass; the PV runtimeclass declaration does not select the Pod runtime")
 	}
-	if err := validateFileOptions(opts); err != nil {
+	fdMode := !opts.DirectAssigned && opts.FuseType == "ossfs2"
+	validation := *opts
+	secretDirectory := ""
+	if !opts.DirectAssigned && opts.AuthType == "" && opts.SecretRef != "" {
+		var err error
+		keys := []string{mounterutils.KeyAccessKeyId, mounterutils.KeyAccessKeySecret, mounterutils.KeySecurityToken}
+		if opts.FuseType == mounterutils.OssFsType {
+			keys = append(keys, mounterutils.KeyExpiration)
+		}
+		secretDirectory, err = filevolume.SecretDirectory(pod, opts.SecretRef, keys)
+		if err != nil {
+			return nil, status.Error(codes.FailedPrecondition, err.Error())
+		}
+		validation.AuthType = ossfpm.AuthTypeRRSA
+	}
+	if fdMode {
+		if opts.Recovery {
+			if err := filevolume.ValidateRecoveryProjection(pod); err != nil {
+				return nil, status.Error(codes.FailedPrecondition, err.Error())
+			}
+		}
+		validation.FdPassing, validation.Recovery = false, false
+		opts.FdPassing = true
+	}
+	if err := validateFileOptions(&validation); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	manifest, err := filevolume.ManifestForPod(pod, req)
+	manifest, err := filevolume.ManifestForPodWithFD(pod, req, fdMode)
 	if err != nil {
 		return nil, status.Errorf(codes.FailedPrecondition, "manual mountproxy consumer: %v", err)
+	}
+	if manifest.ConsumerName != filevolume.SidecarName {
+		return nil, status.Error(codes.FailedPrecondition, "OSS volumes require the alibabacloud-csi-mountproxy consumer, not customfuse")
 	}
 	if err := ns.validateFileBinding(ctx, pod, req, manifest); err != nil {
 		return nil, err
@@ -92,6 +121,12 @@ func (ns *nodeServer) publishFileVolume(ctx context.Context, req *csi.NodePublis
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	options = manager.AddDefaultMountOptions(options, flags)
+	if secretDirectory != "" {
+		prefix := filepath.Join(mounterutils.GetConfigDir(opts.FuseType), mounterutils.GetPasswdFileName(opts.FuseType))
+		for i, option := range options {
+			options[i] = strings.ReplaceAll(option, prefix, secretDirectory)
+		}
+	}
 	// Point the client at the rotating token in its own Pod, never a host token
 	// or credentials obtained by the CSI node identity.
 	options, err = ossfpm.AppendRRSAAuthOptions(sidecarTokenMetadata{ns.metadata}, options, req.VolumeId, req.TargetPath, auth)
@@ -102,10 +137,18 @@ func (ns *nodeServer) publishFileVolume(ctx context.Context, req *csi.NodePublis
 	if err := filevolume.WriteJSON(filepath.Join(filevolume.Root(ossFileRoot), manifest.PodUID, "manifest.json"), manifest); err != nil {
 		return nil, status.Errorf(codes.FailedPrecondition, "publish Pod volume manifest: %v", err)
 	}
-	err = filevolume.Publish(filevolume.Root(ossFileRoot), req.VolumeContext["csi.storage.k8s.io/pod.uid"], req.VolumeId, req.TargetPath, proxy.MountRequest{
+	request := proxy.MountRequest{
 		// Guest consumers use their own projected identity, never CSI credentials.
-		Fstype: opts.FuseType, Source: fmt.Sprintf("%s:%s", opts.MountBucket(), opts.Path), Options: options, MountFlags: flags,
-	})
+		Fstype: opts.FuseType, Source: fmt.Sprintf("%s:%s", opts.MountBucket(), opts.Path), Options: options, MountFlags: flags, FdPassing: fdMode, Recovery: opts.Recovery,
+	}
+	request.MetricsPath, err = filevolume.WriteMetricsInventory(filevolume.Root(ossFileRoot), req, opts.FuseType, "oss", opts.MountBucket(), opts.RecoveryDegraded)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "prepare sidecar metrics: %v", err)
+	}
+	if fdMode {
+		return ns.publishFDVolume(ctx, req, request, manifest.PodUID)
+	}
+	err = filevolume.Publish(filevolume.Root(ossFileRoot), req.VolumeContext["csi.storage.k8s.io/pod.uid"], req.VolumeId, req.TargetPath, request)
 	if err != nil {
 		code := codes.InvalidArgument
 		var pathError *os.PathError

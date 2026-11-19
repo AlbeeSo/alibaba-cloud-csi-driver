@@ -1,5 +1,17 @@
 enableSubstrate: false
 
+# Optional admission for explicitly annotated Pods. No effect on manual mode.
+fuseSidecarWebhook:
+  enabled: false
+  replicas: 2
+  # Pre-create a kubernetes.io/tls Secret; certificate must cover
+  # csi-fuse-sidecar-webhook.<release-namespace>.svc.
+  tlsSecretName: ""
+  caBundle: ""
+  ossImage: ""
+  customImage: ""
+  allowPrivileged: false
+
 substrate:
   apiEndpoint: k8s:///ate-system/api:443
   apiServerName: api.ate-system.svc

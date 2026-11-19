@@ -1,0 +1,128 @@
+{{- if .Values.fuseSidecarWebhook.enabled }}
+{{- $tlsSecret := required "fuseSidecarWebhook.tlsSecretName is required" .Values.fuseSidecarWebhook.tlsSecretName }}
+{{- $caBundle := required "fuseSidecarWebhook.caBundle is required" .Values.fuseSidecarWebhook.caBundle }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: csi-fuse-sidecar-webhook
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Namespace }}-csi-fuse-sidecar-webhook
+rules:
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims, persistentvolumes]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Namespace }}-csi-fuse-sidecar-webhook
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Release.Namespace }}-csi-fuse-sidecar-webhook
+subjects:
+  - kind: ServiceAccount
+    name: csi-fuse-sidecar-webhook
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: csi-fuse-sidecar-webhook
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: csi-fuse-sidecar-webhook
+  ports:
+    - port: 443
+      targetPort: https
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: csi-fuse-sidecar-webhook
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.fuseSidecarWebhook.replicas }}
+  selector:
+    matchLabels:
+      app: csi-fuse-sidecar-webhook
+  template:
+    metadata:
+      labels:
+        app: csi-fuse-sidecar-webhook
+    spec:
+      serviceAccountName: csi-fuse-sidecar-webhook
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- range . }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
+      containers:
+        - name: webhook
+          image: {{ include "imageSpec" (list .Values "controller") }}
+          command: [/bin/plugin.csi.alibabacloud.com]
+          args:
+            - --run-fuse-sidecar-webhook
+            - {{ printf "--fuse-webhook-oss-image=%s" .Values.fuseSidecarWebhook.ossImage | quote }}
+            - {{ printf "--fuse-webhook-custom-image=%s" .Values.fuseSidecarWebhook.customImage | quote }}
+            - {{ printf "--fuse-webhook-allow-privileged=%t" .Values.fuseSidecarWebhook.allowPrivileged | quote }}
+          ports:
+            - name: https
+              containerPort: 8443
+          readinessProbe:
+            httpGet: {path: /healthz, port: https, scheme: HTTPS}
+          livenessProbe:
+            httpGet: {path: /healthz, port: https, scheme: HTTPS}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ $tlsSecret | quote }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: {{ .Release.Namespace }}-csi-fuse-sidecar
+webhooks:
+  - name: fuse-sidecar.csi.alibabacloud.com
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: 5
+    reinvocationPolicy: IfNeeded
+    # Kubernetes >=1.30: unannotated Pods never call this webhook, even when
+    # its Service/certificates are unavailable.
+    matchConditions:
+      - name: explicit-opt-in
+        expression: "has(object.metadata.annotations) && 'csi.alibabacloud.com/inject-mountproxy' in object.metadata.annotations && object.metadata.annotations['csi.alibabacloud.com/inject-mountproxy'] == 'true'"
+    clientConfig:
+      caBundle: {{ $caBundle | quote }}
+      service:
+        name: csi-fuse-sidecar-webhook
+        namespace: {{ .Release.Namespace }}
+        path: /mutate
+        port: 443
+    rules:
+      - operations: [CREATE]
+        apiGroups: [""]
+        apiVersions: [v1]
+        resources: [pods]
+        scope: Namespaced
+{{- end }}

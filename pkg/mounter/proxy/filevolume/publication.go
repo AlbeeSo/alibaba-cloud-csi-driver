@@ -35,20 +35,29 @@ func Root(defaultRoot string) string {
 	return defaultRoot
 }
 
-func Publish(root, uid, volumeID, hostTarget string, request proxy.MountRequest) error {
+func DesiredFor(uid, volumeID, hostTarget string, request proxy.MountRequest) (Desired, error) {
 	targetUID, relative, err := Target(hostTarget)
 	if err != nil {
-		return err
+		return Desired{}, err
 	}
 	if uid == "" || targetUID != uid {
-		return fmt.Errorf("PodInfo UID missing or does not match target")
+		return Desired{}, fmt.Errorf("PodInfo UID missing or does not match target")
 	}
 	request.Target, request.VolumeID = relative, volumeID
 	d := Desired{MountInfo: directvolume.MountInfo{Source: request.Source, DeviceType: directvolume.DeviceTypeFUSE, FSType: request.Fstype, MountOpts: request.Options, Extra: map[string]string{}}, APIVersion: Version, PodUID: uid, Mount: request}
+	if request.FdPassing {
+		d.RequiredFeatures = []string{FeatureFuseFD}
+	}
 	d.Generation = d.Digest()
-	if err := d.Validate(uid); err != nil {
+	return d, d.Validate(uid)
+}
+
+func Publish(root, uid, volumeID, hostTarget string, request proxy.MountRequest) error {
+	d, err := DesiredFor(uid, volumeID, hostTarget, request)
+	if err != nil {
 		return err
 	}
+	relative := d.Mount.Target
 	path := RequestPath(filepath.Join(root, uid), strings.TrimSuffix(relative, "/mount"))
 	var revoked UnmountRequest
 	if err := ReadJSON(UnmountPath(filepath.Join(root, uid), strings.TrimSuffix(relative, "/mount")), &revoked); err == nil {
@@ -68,8 +77,13 @@ func Publish(root, uid, volumeID, hostTarget string, request proxy.MountRequest)
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	if err := os.MkdirAll(hostTarget, 0755); err != nil {
-		return err
+	// The native producer has already mounted FUSE for fd handoff. Stat or
+	// MkdirAll on that mount can wait for FUSE_INIT, whose daemon cannot start
+	// until kubelet gets this publication response and starts the sidecar.
+	if !request.FdPassing {
+		if err := os.MkdirAll(hostTarget, 0755); err != nil {
+			return err
+		}
 	}
 	return WriteJSON(path, d)
 }
@@ -123,7 +137,11 @@ func Unpublish(root, volumeID, hostTarget string) error {
 	if err := ReadJSON(filepath.Join(root, uid, "session.json"), &session); err != nil || session == "" {
 		return ErrCleanupPending
 	}
-	if s.APIVersion != Version || s.PodUID != uid || s.VolumeID != volumeID || s.ObservedGeneration != d.Generation || s.Session != session || s.Phase != "Unmounted" || s.UnmountResult == nil || s.UnmountResult.Error != "" {
+	cleanupPhase := "Unmounted"
+	if d.Mount.FdPassing {
+		cleanupPhase = "Released"
+	}
+	if s.APIVersion != Version || s.PodUID != uid || s.VolumeID != volumeID || s.ObservedGeneration != d.Generation || s.Session != session || s.Phase != cleanupPhase || s.UnmountResult == nil || s.UnmountResult.Error != "" {
 		return ErrCleanupPending
 	}
 	// Keep desired and the tombstone until inventory retirement. They contain

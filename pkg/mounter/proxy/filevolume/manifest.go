@@ -15,10 +15,11 @@ import (
 )
 
 const (
-	SidecarName      = "alibabacloud-csi-mountproxy"
-	DefaultStateDir  = "/volume-state"
-	DefaultTargetDir = "/pod-volumes"
-	HostStateDir     = "/var/run/ossfs/file-volumes"
+	SidecarName       = "alibabacloud-csi-mountproxy"
+	CustomSidecarName = "alibabacloud-csi-customfuse-mountproxy"
+	DefaultStateDir   = "/volume-state"
+	DefaultTargetDir  = "/pod-volumes"
+	HostStateDir      = "/var/run/ossfs/file-volumes"
 )
 
 // Keys are the CSI target directory names declared by the sidecar, not volume
@@ -29,11 +30,20 @@ type Manifest struct {
 	PodUID       string            `json:"podUID"`
 	VolumeKeys   []string          `json:"volumeKeys"`
 	VolumeClaims map[string]string `json:"volumeClaims,omitempty"`
+	// BindingLookupRequired is local validation state, never a wire capability.
+	// The normal first-sidecar path must not need PVC metadata or API access.
+	BindingLookupRequired bool   `json:"-"`
+	ConsumerName          string `json:"-"`
+	FdPassing             bool   `json:"fdPassing,omitempty"`
 }
 
 func ManifestForPod(pod *core.Pod, req *csi.NodePublishVolumeRequest) (Manifest, error) {
+	return ManifestForPodWithFD(pod, req, false)
+}
+
+func ManifestForPodWithFD(pod *core.Pod, req *csi.NodePublishVolumeRequest, fd bool) (Manifest, error) {
 	var result Manifest
-	err := podManifest(pod, req, func(m Manifest) error { result = m; return nil })
+	err := podManifestMode(pod, req, fd, func(m Manifest) error { result = m; return nil })
 	return result, err
 }
 
@@ -70,7 +80,31 @@ func waitExpected(ctx context.Context, root, uid string) ([]string, error) {
 }
 
 func fileContainer(c core.Container) bool {
-	return c.Name == SidecarName
+	return c.Name == SidecarName || c.Name == CustomSidecarName
+}
+
+// Consumer identifies a single native consumer by exact reserved name. Names
+// select a contract, not a trusted image or authorization to deliver secrets.
+func Consumer(pod *core.Pod) (*core.Container, int, error) {
+	if pod == nil {
+		return nil, -1, fmt.Errorf("missing Pod")
+	}
+	for _, c := range pod.Spec.Containers {
+		if fileContainer(c) {
+			return nil, -1, fmt.Errorf("mountproxy %s must be a restartable init container", c.Name)
+		}
+	}
+	var result *core.Container
+	index := -1
+	for i := range pod.Spec.InitContainers {
+		if fileContainer(pod.Spec.InitContainers[i]) {
+			if result != nil {
+				return nil, -1, fmt.Errorf("multiple file-mode sidecars; each Pod requires one mount consumer")
+			}
+			result, index = &pod.Spec.InitContainers[i], i
+		}
+	}
+	return result, index, nil
 }
 
 func fileProbe(p *core.Probe) bool {
@@ -92,6 +126,10 @@ func ValidatePodManifest(pod *core.Pod, req *csi.NodePublishVolumeRequest) error
 }
 
 func podManifest(pod *core.Pod, req *csi.NodePublishVolumeRequest, accept func(Manifest) error) error {
+	return podManifestMode(pod, req, false, accept)
+}
+
+func podManifestMode(pod *core.Pod, req *csi.NodePublishVolumeRequest, fd bool, accept func(Manifest) error) error {
 	uid, relative, err := Target(req.TargetPath)
 	if err != nil {
 		return err
@@ -99,17 +137,9 @@ func podManifest(pod *core.Pod, req *csi.NodePublishVolumeRequest, accept func(M
 	if string(pod.UID) != uid || req.VolumeContext["csi.storage.k8s.io/pod.uid"] != uid {
 		return fmt.Errorf("manifest Pod UID mismatch")
 	}
-	var consumer *core.Container
-	consumerIndex := -1
-	for i := range pod.Spec.InitContainers {
-		c := &pod.Spec.InitContainers[i]
-		if fileContainer(*c) {
-			if consumer != nil {
-				return fmt.Errorf("multiple file-mode sidecars")
-			}
-			consumer = c
-			consumerIndex = i
-		}
+	consumer, consumerIndex, err := Consumer(pod)
+	if err != nil {
+		return err
 	}
 	if consumer == nil {
 		return fmt.Errorf("direct mount requires a native mountproxy sidecar named %s", SidecarName)
@@ -117,8 +147,12 @@ func podManifest(pod *core.Pod, req *csi.NodePublishVolumeRequest, accept func(M
 	if consumer.RestartPolicy == nil || *consumer.RestartPolicy != core.ContainerRestartPolicyAlways || !fileProbe(consumer.StartupProbe) || !fileProbe(consumer.ReadinessProbe) {
 		return fmt.Errorf("mountproxy must be a restartable init sidecar with startup/readiness exec probes [csi-mount-proxy-server, --file-check-ready]")
 	}
-	if consumer.SecurityContext == nil || consumer.SecurityContext.Privileged == nil || !*consumer.SecurityContext.Privileged {
+	privileged := consumer.SecurityContext != nil && consumer.SecurityContext.Privileged != nil && *consumer.SecurityContext.Privileged
+	if !fd && !privileged {
 		return fmt.Errorf("mountproxy sidecar must be privileged")
+	}
+	if fd && (consumer.Name != SidecarName || privileged) {
+		return fmt.Errorf("fd-passing requires the non-privileged OSS sidecar")
 	}
 	volumes := map[string]core.Volume{}
 	for _, v := range pod.Spec.Volumes {
@@ -139,6 +173,9 @@ func podManifest(pod *core.Pod, req *csi.NodePublishVolumeRequest, accept func(M
 			if v.HostPath == nil || v.HostPath.Path != HostStateDir || vm.SubPathExpr != "$(POD_UID)" || vm.SubPath != "" || vm.ReadOnly || !uidEnv {
 				return fmt.Errorf("mountproxy state must mount %s at %s with Pod UID subPathExpr", HostStateDir, DefaultStateDir)
 			}
+			if vm.MountPropagation != nil && *vm.MountPropagation != core.MountPropagationNone {
+				return fmt.Errorf("mountproxy control directory must not propagate data mounts to the host")
+			}
 			state = true
 			continue
 		}
@@ -146,7 +183,11 @@ func podManifest(pod *core.Pod, req *csi.NodePublishVolumeRequest, accept func(M
 			continue
 		}
 		parts := strings.Split(strings.TrimPrefix(vm.MountPath, DefaultTargetDir+"/"), "/")
-		if len(parts) != 2 || !ValidComponent(parts[0]) || parts[1] != "mount" || v.PersistentVolumeClaim == nil || vm.ReadOnly || vm.SubPath != "" || vm.SubPathExpr != "" || vm.MountPropagation == nil || *vm.MountPropagation != core.MountPropagationBidirectional {
+		propagation := core.MountPropagationBidirectional
+		if fd {
+			propagation = core.MountPropagationHostToContainer
+		}
+		if len(parts) != 2 || !ValidComponent(parts[0]) || parts[1] != "mount" || v.PersistentVolumeClaim == nil || vm.ReadOnly || vm.SubPath != "" || vm.SubPathExpr != "" || vm.MountPropagation == nil || *vm.MountPropagation != propagation {
 			return fmt.Errorf("mountproxy data mounts require PVCs at %s/<CSI-volume-directory>/mount with Bidirectional propagation and no subPath", DefaultTargetDir)
 		}
 		if keys[parts[0]] {
@@ -167,7 +208,14 @@ func podManifest(pod *core.Pod, req *csi.NodePublishVolumeRequest, accept func(M
 	if err := checkPrecedingInitPVCs(pod, consumerIndex, volumes, claims); err != nil {
 		return err
 	}
-	m := Manifest{APIVersion: Version, PodUID: uid, VolumeClaims: map[string]string{}}
+	m := Manifest{APIVersion: Version, PodUID: uid, VolumeClaims: map[string]string{}, ConsumerName: consumer.Name, FdPassing: fd}
+	for _, init := range pod.Spec.InitContainers[:consumerIndex] {
+		for _, vm := range init.VolumeMounts {
+			if volumes[vm.Name].PersistentVolumeClaim != nil {
+				m.BindingLookupRequired = true
+			}
+		}
+	}
 	for key := range keys {
 		m.VolumeKeys = append(m.VolumeKeys, key)
 	}

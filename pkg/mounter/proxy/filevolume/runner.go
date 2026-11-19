@@ -77,7 +77,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			// A rejected restart has no new execution session. Preserve completed
 			// and pending cleanup evidence so it cannot invalidate a valid ACK
 			// just before kubelet calls NodeUnpublish.
-			if s.PodUID == r.PodUID && (s.Phase == "Unmounted" || s.Phase == "CleanupPending" || s.Phase == "Draining") {
+			if s.PodUID == r.PodUID && (s.Phase == "Unmounted" || s.Phase == "Released" || s.Phase == "CleanupPending" || s.Phase == "Draining") {
 				continue
 			}
 			s.APIVersion, s.PodUID, s.UpdatedAt = Version, r.PodUID, time.Now().UTC()
@@ -134,6 +134,12 @@ wait:
 func (r *Runner) volume(ctx context.Context, id, session string) (result error) {
 	s := Status{APIVersion: Version, PodUID: r.PodUID, VolumeID: id, Session: session, Phase: "Pending"}
 	var current *Desired
+	cleanupPhase := func() string {
+		if current != nil && current.Mount.FdPassing {
+			return "Released"
+		}
+		return "Unmounted"
+	}
 	write := func() error {
 		s.UpdatedAt = time.Now().UTC()
 		err := WriteJSON(StatusPath(r.Root, id), s)
@@ -163,7 +169,7 @@ func (r *Runner) volume(ctx context.Context, id, session string) (result error) 
 			s.UnmountResult = &proxy.Response{Error: s.Error}
 			result = fmt.Errorf("volume %s cleanup failed", id)
 		} else {
-			s.Phase = "Unmounted"
+			s.Phase = cleanupPhase()
 			s.UnmountResult = &proxy.Response{}
 		}
 		if err := write(); err != nil {
@@ -198,7 +204,7 @@ func (r *Runner) volume(ctx context.Context, id, session string) (result error) 
 						continue
 					}
 				}
-				s.Phase, s.Error, s.UnmountResult = "Unmounted", "", &proxy.Response{}
+				s.Phase, s.Error, s.UnmountResult = cleanupPhase(), "", &proxy.Response{}
 				if err := write(); err != nil {
 					return err
 				}
@@ -274,13 +280,13 @@ func (r *Runner) volume(ctx context.Context, id, session string) (result error) 
 				// A previous process may have left a disconnected FUSE mount.
 				// Never adopt a mount solely because its pathname still exists.
 				mounted, mountErr := r.Backend.Mounted(target)
-				if mountErr == nil && mounted {
+				if mountErr == nil && mounted && !d.Mount.FdPassing {
 					mountErr = r.Backend.Unmount(target)
 				}
-				if mountErr == nil {
+				if mountErr == nil && !d.Mount.FdPassing {
 					mountErr = os.MkdirAll(target, 0755)
 				}
-				if mountErr == nil {
+				if mountErr == nil && !d.Mount.FdPassing {
 					mountErr = rejectSymlinks(r.TargetRoot, d.Mount.Target)
 				}
 				if mountErr == nil {
@@ -297,7 +303,7 @@ func (r *Runner) volume(ctx context.Context, id, session string) (result error) 
 				s.Result = &proxy.Response{Error: s.Error}
 			}
 		}
-		if attempted && (s.Phase == "Mounted" || s.Phase == "RequestMissing") {
+		if attempted && (s.Phase == "Mounted" || s.Phase == "RequestMissing" || s.Phase == "Recovering") {
 			select {
 			case err := <-exited:
 				s.Phase, s.Error = "Failed", "FUSE process exited"
@@ -309,6 +315,15 @@ func (r *Runner) volume(ctx context.Context, id, session string) (result error) 
 				mounted, err := r.Backend.Mounted(target)
 				if err != nil || !mounted {
 					s.Phase, s.Error = "Failed", "mount point is no longer present"
+				}
+				if mounted && err == nil && current.Mount.Recovery && s.Phase != "RequestMissing" {
+					if health, ok := r.Backend.(interface{ Health(string) (string, error) }); ok {
+						phase, cause := health.Health(target)
+						s.Phase, s.Error = phase, ""
+						if cause != nil {
+							s.Error = redact(cause.Error(), current)
+						}
+					}
 				}
 			}
 		}

@@ -59,7 +59,7 @@ csi.storage.k8s.io/pvc/namespace: fuse-file-demo
 csi.storage.k8s.io/pvc/name: oss-first
 ```
 
-三者分别匹配当前请求的 PV 目标、Pod namespace 和 sidecar 对应挂载的 PVC 名时，不发起 PVC API 请求，也不依赖兜底缓存。动态供给可以在 external-oss-provisioner 增加 `--extra-create-metadata=true`，这些参数会由 CreateVolume 保留并随 PV 回传到 NodePublish；仓库 chart 目前未默认启用。静态声明及 Retain 后重绑定要同步更新，不是实时绑定证明。
+三者分别匹配当前请求的 PV 目标、Pod namespace 和 sidecar 对应挂载的 PVC 名时，不发起 PVC API 请求，也不依赖兜底缓存。chart 已默认给 OSS/customfuse external-provisioner 增加 `--extra-create-metadata=true`，这些参数由 CreateVolume 保留并随新动态 PV 回传到 NodePublish，不补写旧卷。静态声明与重绑定契约需保持正确，不是实时绑定证明；正常首位 sidecar 不依赖该额外配置。
 
 上述字段应在 PV 创建时提供；开启 provisioner 参数不补写存量 PV。`spec.csi.volumeAttributes` 属于 PV 的不可变 volume source，不能把补字段或重绑定后的更正当成普通热更新。存量卷继续使用兜底；如需迁移，应遵循保留数据和 PV source 不可变的规则规划新的 PV 声明，本文不提供自动重建动作。依据见 [Kubernetes 校验](https://github.com/kubernetes/kubernetes/blob/v1.33.3/pkg/apis/core/validation/validation.go#L1995)。
 

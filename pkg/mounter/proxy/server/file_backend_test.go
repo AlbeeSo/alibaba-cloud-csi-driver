@@ -43,7 +43,7 @@ func TestFileDriversAutoDiscoveryAndMixedDispatch(t *testing.T) {
 		exit, err := b.Mount(context.Background(), req)
 		require.NoError(t, err)
 		require.NotNil(t, exit)
-		require.Same(t, req, driver.lastRequest)
+		require.Equal(t, req, driver.lastRequest)
 	}
 	for _, name := range []string{"unknown-fuse", "socket-only"} {
 		_, err := b.Mount(context.Background(), &proxy.MountRequest{Fstype: name})

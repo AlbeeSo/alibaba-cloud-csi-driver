@@ -54,6 +54,8 @@ func (b *fakeBackend) Unmount(target string) error {
 	return nil
 }
 
+func (b *fakeBackend) Health(string) (string, error) { return "Mounted", nil }
+
 func TestRestartAfterStartupRequiresPodRecreation(t *testing.T) {
 	r, b := newRunner(t, "one")
 	request(t, r.Root, "one")
@@ -234,6 +236,12 @@ func TestReadinessRequiresSuccessfulMountResponse(t *testing.T) {
 func TestMissingRequestDoesNotUnmountAndExplicitCommandDoes(t *testing.T) {
 	r, b := newRunner(t, "one")
 	d := request(t, r.Root, "one")
+	// A healthy recovery supervisor must not hide missing control state.
+	d.Mount.Fstype, d.Mount.FdPassing, d.Mount.Recovery = "ossfs2", true, true
+	d.RequiredFeatures = []string{FeatureFuseFD}
+	d.Generation = d.Digest()
+	require.NoError(t, WriteJSON(RequestPath(r.Root, "one"), d))
+	b.mounts[filepath.Join(r.TargetRoot, "one", "mount")] = true
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
@@ -252,7 +260,7 @@ func TestMissingRequestDoesNotUnmountAndExplicitCommandDoes(t *testing.T) {
 	require.NoError(t, WriteJSON(RequestPath(r.Root, "one"), d))
 	require.Eventually(t, func() bool { return CheckReady(r.Root, r.PodUID, r.Expected, time.Now()) == nil }, 3*time.Second, 10*time.Millisecond)
 	require.NoError(t, WriteJSON(UnmountPath(r.Root, "one"), newUnmount(d)))
-	require.Eventually(t, func() bool { var s Status; _ = ReadJSON(StatusPath(r.Root, "one"), &s); return s.Phase == "Unmounted" }, 3*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { var s Status; _ = ReadJSON(StatusPath(r.Root, "one"), &s); return s.Phase == "Released" }, 3*time.Second, 10*time.Millisecond)
 	cancel()
 	require.NoError(t, <-done)
 	b.mu.Lock()

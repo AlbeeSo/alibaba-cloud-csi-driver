@@ -66,6 +66,9 @@ func registeredCollectors(driverNames []string, serviceType utils.ServiceType) m
 			if err != nil {
 				klog.ErrorS(err, "Failed to create collector")
 			} else {
+				if fileCollector, ok := collector.(*usFsStatCollector); ok {
+					fileCollector.fileDrivers = enabledDrivers.Clone()
+				}
 				collectors[reg.Name] = collector
 			}
 		}

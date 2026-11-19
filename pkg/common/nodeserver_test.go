@@ -163,9 +163,13 @@ func TestMetricRecorderRetainsKubeletPodLookupRetry(t *testing.T) {
 		return false, nil, nil
 	})
 	server := &NodeServerWithMetricRecorder{NodeServer: &fakeNodeServer{}, client: client}
-	_, err := server.NodePublishVolume(context.Background(), &csi.NodePublishVolumeRequest{
+	req := &csi.NodePublishVolumeRequest{
 		VolumeContext: map[string]string{utils.PodNameKey: "example-pod", utils.PodNamespaceKey: "example"},
-	})
+	}
+	_, err := server.NodePublishVolume(context.Background(), req)
+	assert.NoError(t, err)
+	assert.Len(t, client.Actions(), 1, "a failed lookup is reused within one RPC")
+	_, err = server.NodePublishVolume(context.Background(), req)
 	assert.NoError(t, err)
 	assert.Len(t, client.Actions(), 2)
 }

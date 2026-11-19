@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils"
 )
 
 // Retire only removes this transport's control files. The caller must first
@@ -31,6 +33,12 @@ func Retire(root, hostTarget string) error {
 	defer func() { _ = base.Close() }()
 	defer func() { _ = pod.Close() }()
 	key := strings.TrimSuffix(relative, "/mount")
+	if err := retireAuxVolume(pod, "fds", ID(key)); err != nil {
+		return err
+	}
+	if err := retireAuxVolume(pod, "metrics", key); err != nil {
+		return err
+	}
 	for _, dir := range []string{"desired", "status", "unmount"} {
 		if err := removeControl(pod, dir+"/"+ID(key)+".json"); err != nil {
 			return err
@@ -103,6 +111,22 @@ func controlJSON(name string) bool {
 // particular, a file called "mount" or a symlink to a data directory is not a
 // cleanup instruction. Only known flat control filenames are removed.
 func retirePod(base, pod *os.Root, uid string) error {
+	for _, dir := range []string{"fds", "metrics"} {
+		entries, err := readControlDir(pod, dir)
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		for _, entry := range entries {
+			if entry.IsDir() && ValidComponent(entry.Name()) {
+				if err := retireAuxVolume(pod, dir, entry.Name()); err != nil {
+					return err
+				}
+			}
+		}
+		if err := pod.Remove(dir); err != nil && !os.IsNotExist(err) && !errors.Is(err, syscall.ENOTEMPTY) {
+			return err
+		}
+	}
 	for _, dir := range []string{"desired", "status", "unmount"} {
 		info, err := pod.Lstat(dir)
 		if os.IsNotExist(err) {
@@ -132,7 +156,7 @@ func retirePod(base, pod *os.Root, uid string) error {
 			return err
 		}
 	}
-	for _, name := range []string{"manifest.json", "session.json", "ready-session.json", ".runner.lock"} {
+	for _, name := range []string{"manifest.json", "session.json", "ready-session.json", ".runner.lock", utils.PodInfoFile} {
 		if err := removeControl(pod, name); err != nil {
 			return err
 		}
@@ -152,6 +176,25 @@ func retirePod(base, pod *os.Root, uid string) error {
 		}
 	}
 	err = base.Remove(uid)
+	if os.IsNotExist(err) || errors.Is(err, syscall.ENOTEMPTY) {
+		return nil
+	}
+	return err
+}
+
+func retireAuxVolume(pod *os.Root, dir, key string) error {
+	files := []string{"socket"}
+	if dir == "metrics" {
+		files = append([]string{utils.MountPointInfoFile}, utils.MountpointMetricsArray...)
+		files = append(files, utils.CounterTypeMetricsArray...)
+		files = append(files, utils.HotSpotMetricsArray...)
+	}
+	for _, name := range files {
+		if err := removeControl(pod, filepath.Join(dir, key, name)); err != nil {
+			return err
+		}
+	}
+	err := pod.Remove(filepath.Join(dir, key))
 	if os.IsNotExist(err) || errors.Is(err, syscall.ENOTEMPTY) {
 		return nil
 	}
@@ -186,6 +229,7 @@ func CollectOrphans(root, kubeletPods string) error {
 		if _, err := os.Lstat(filepath.Join(kubeletPods, uid)); !os.IsNotExist(err) {
 			continue
 		}
+		NativeFDs.ClosePod(uid)
 		base, pod, err := openPodState(root, uid)
 		if os.IsNotExist(err) {
 			continue

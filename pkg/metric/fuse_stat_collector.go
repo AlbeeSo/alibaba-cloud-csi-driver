@@ -4,6 +4,7 @@ package metric
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -362,6 +363,7 @@ func (p *usFsStatCollector) getCommonLabels(fsClientInfo *fuseInfo, fileName, ex
 }
 
 type usFsStatCollector struct {
+	fileDrivers                           sets.Set[string]
 	hotSpotReadFileTop                    *prometheus.Desc
 	hotSpotWriteFileTop                   *prometheus.Desc
 	hotSpotHeadFileTop                    *prometheus.Desc
@@ -734,6 +736,10 @@ func (p *usFsStatCollector) Update(ctx context.Context, pvcs sets.Set[string], c
 			if err := ctx.Err(); err != nil {
 				return err
 			}
+			if subdir == "file-volumes" {
+				p.updateFileSidecars(filepath.Join(dir, subdir), ch)
+				continue
+			}
 			if utils.IsFileExisting(filepath.Join(dir, subdir, utils.PodInfoFile)) {
 				// exclusive metrics case, subdir is podUid
 				p.updateExclusiveMetrics(dir, subdir, fsClientInfo, ch)
@@ -744,6 +750,51 @@ func (p *usFsStatCollector) Update(ctx context.Context, pvcs sets.Set[string], c
 		}
 	}
 	return nil
+}
+
+// File sidecars export through their Pod-scoped control mount. Reuse the
+// existing descriptors and labels instead of adding another metrics endpoint.
+func (p *usFsStatCollector) updateFileSidecars(root string, ch chan<- prometheus.Metric) {
+	pods, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	for _, pod := range pods {
+		if !pod.IsDir() {
+			continue
+		}
+		base := filepath.Join(root, pod.Name())
+		info, err := readFirstLines(filepath.Join(base, utils.PodInfoFile))
+		if err != nil || len(info) < 4 || info[2] != pod.Name() {
+			continue
+		}
+		volumes, err := os.ReadDir(filepath.Join(base, "metrics"))
+		if err != nil {
+			continue
+		}
+		for _, volume := range volumes {
+			if !volume.IsDir() {
+				continue
+			}
+			if p.fileDrivers != nil {
+				info, err := readFirstLines(filepath.Join(base, "metrics", volume.Name(), utils.MountPointInfoFile))
+				if err != nil || len(info) < 2 {
+					continue
+				}
+				driver := ossDriverName
+				if info[1] == "customfuse" {
+					driver = customfuseDriverName
+				} else if info[1] != "oss" {
+					continue
+				}
+				if !p.fileDrivers.Has(driver) {
+					continue
+				}
+			}
+			labels := &fuseInfo{Namespace: info[0], PodName: info[1], PodUID: info[2]}
+			p.postVolMetrics(filepath.Join(base, "metrics", volume.Name()), labels, ch)
+		}
+	}
 }
 
 func (p *usFsStatCollector) updateExclusiveMetrics(fuseMetricsDir, podUid string, fsClientInfo *fuseInfo, ch chan<- prometheus.Metric) {

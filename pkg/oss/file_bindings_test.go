@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	core "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	ktesting "k8s.io/client-go/testing"
@@ -34,15 +35,18 @@ func TestDirectPublishRejectsSwappedPVCMappingBeforeSubmission(t *testing.T) {
 	ns := setupTestNodeServer(t, mount.NewFakeMounter(nil), false)
 	ns.clientset = client
 	server := common.WrapNodeServerWithMetricRecorder(ns, "oss", client)
-	_, err := server.NodePublishVolume(context.Background(), fileRequest(t, 0, "ossfs2"))
+	req := fileRequest(t, 0, "ossfs2")
+	setFileBindingMetadata(req, pod.Namespace, "pv-0", "claim-0")
+	_, err := server.NodePublishVolume(context.Background(), req)
 	require.Equal(t, codes.FailedPrecondition, status.Code(err))
-	require.ErrorContains(t, err, "bound to PV pv-1")
+	require.ErrorContains(t, err, "conflicts")
 	require.NoFileExists(t, filevolume.RequestPath(filepath.Join(root, "pod-a"), "pv-0"))
 	require.NoFileExists(t, filepath.Join(root, "pod-a", "manifest.json"))
 }
 
 func TestDirectPublishBindingFailureIsNotCached(t *testing.T) {
 	pod := manualFilePod("rund", 1)
+	prependUnrelatedPVC(pod)
 	client := fileTestClient(pod)
 	ns := setupTestNodeServer(t, mount.NewFakeMounter(nil), false)
 	ns.clientset = client
@@ -71,6 +75,7 @@ func TestDirectPublishConcurrentBindingLookupIsCoalesced(t *testing.T) {
 	gatetesting.SetFeatureGateDuringTest(t, features.FunctionalMutableFeatureGate, features.RundCSIProtocol3, false)
 	t.Setenv("CSI_FUSE_FILE_ROOT", t.TempDir())
 	pod := manualFilePod("rund", 1)
+	prependUnrelatedPVC(pod)
 	client := fileTestClient(pod)
 	ns := setupTestNodeServer(t, mount.NewFakeMounter(nil), false)
 	ns.clientset = client
@@ -91,4 +96,11 @@ func TestDirectPublishConcurrentBindingLookupIsCoalesced(t *testing.T) {
 	}
 	_, claims := fileQueryCounts(t, client)
 	require.Equal(t, 1, claims)
+}
+
+// Exercise the exceptional binding fallback without putting a managed PVC
+// before the consumer (which would be rejected by the startup-order guard).
+func prependUnrelatedPVC(pod *core.Pod) {
+	pod.Spec.Volumes = append(pod.Spec.Volumes, core.Volume{Name: "prep", VolumeSource: core.VolumeSource{PersistentVolumeClaim: &core.PersistentVolumeClaimVolumeSource{ClaimName: "unrelated"}}})
+	pod.Spec.InitContainers = append([]core.Container{{Name: "prepare", VolumeMounts: []core.VolumeMount{{Name: "prep", MountPath: "/prepare"}}}}, pod.Spec.InitContainers...)
 }

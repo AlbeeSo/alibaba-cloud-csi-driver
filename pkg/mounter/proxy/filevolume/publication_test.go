@@ -46,3 +46,11 @@ func TestPublicationPreservesRequestAndOnlyRemovesState(t *testing.T) {
 	// This transport must not emit RunD's vol_attr.json and trigger a second consumer.
 	require.NoFileExists(t, filepath.Join(filepath.Dir(target), "vol_attr.json"))
 }
+
+func TestFDPublicationDoesNotTouchKernelMountTarget(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(t.TempDir(), "pods", "pod-a", "volumes", "kubernetes.io~csi", "pv-a", "mount")
+	require.NoError(t, Publish(root, "pod-a", "handle", target, proxy.MountRequest{Fstype: "ossfs2", FdPassing: true}))
+	require.NoDirExists(t, target, "only the native producer prepares the kernel target; publication must not stat/mkdir an uninitialized FUSE mount")
+	require.FileExists(t, RequestPath(filepath.Join(root, "pod-a"), "pv-a"))
+}
