@@ -1,8 +1,10 @@
 # RunD 与 RunC 业务 sidecar 文件交付方案
 
-更新：2026-11-19。最终选择是业务 sidecar 统一使用 file，现有独立 FUSE Pod 保留 socket RPC。不提供让用户选择 sidecar file/socket 的开关。本文记录分流原则和后续设计边界，不代表两种运行时均已支持。RunD 现有实现继续在当前 PR review；RunC file sidecar 后续使用独立分支/MR，不把两套入口合并重构。
+更新：2026-11-19。最终选择是业务 sidecar 统一使用 file，现有独立 FUSE Pod 保留 socket RPC。不提供让用户选择 sidecar file/socket 的开关。本文记录分流原则和设计边界，不代表两种运行时均已支持。所有能力在一个功能 PR 内交付，RunD/RunC 运行时适配保持隔离。
 
-最终能力边界：**RunD sidecar 不支持 fd-passing 和 recovery**，保持 guest 内直接挂载、RRSA 和当前 privileged 要求，不规划借 HostPath 传 host fd。**RunC sidecar 后续单独分支/MR 开发**，复用已有 fd-passing 和对应 driver 的 daemon recovery，实现非特权 sidecar；配置与状态走 file，fd 经同内核 Unix socket 交付。该 RunC 能力尚未实现，不影响当前 RunD PR，也不改变既有独立 FUSE Pod。
+统一在一个功能 PR 内完成公共基础、RunD、RunC、customfuse 和可选 webhook，按独立 commit review，不再使用独立 RunC MR/三 PR 依赖计划。完整待执行测试见[单 PR 验收计划](fuse-sidecar-unified-acceptance-zh.md)，不是现有全部通过的声明。
+
+最终能力边界：**RunD sidecar 不支持 fd-passing 和 recovery**，保持 guest 内直接挂载、RRSA 和当前 privileged 要求，不规划借 HostPath 传 host fd。**RunC fd-capable sidecar 复用已有 fd-passing 和对应 driver 的 daemon recovery，实现非特权**；配置与状态走 file，fd 经同内核 Unix socket 交付。该能力尚未实现。customfuse 两种环境均使用直接挂载且不支持 fd-passing/recovery，权限独立说明。既有独立 FUSE Pod 的能力和默认行为保持。
 
 ## 选择依据
 
@@ -185,13 +187,13 @@ RunD 的 host 与 guest 不共享内核，不能通过 HostPath 或 SCM_RIGHTS �
 
 RunD 和后续 RunC 均必须支持 customfuse，不能仅验通 ossfs2 就视为交付完成。customfuse 不考虑 fd-passing/recovery，也不要求任意 FUSE 客户端支持接管 fd；显式请求这些能力应报错。它复用 file 配置、inventory、逐卷 worker、probe 和清理框架，由自定义入口直接执行挂载。现有子进程集测不等于真实 customfuse 文件系统 E2E 已通过。
 
-用户镜像带兼容的 mountproxy 和自己的客户端/入口，sidecar 名称固定为 `alibabacloud-csi-customfuse-mountproxy`。复用既有 customfuse 入口、参数及子进程组管理契约，所需 ConfigMap/Secret 由 Pod 显式挂载，不将 CSI Secret 写进控制 JSON。RunD 继续仅 RRSA；自定义客户端需要适配业务 Pod 身份，不能仅因收到 rrsa 参数就宣称任何文件系统已完成鉴权。RunC 的 Secret volume/身份适配在后续 PR 实现。
+用户镜像带兼容的 mountproxy 和自己的客户端/入口，sidecar 名称固定为 `alibabacloud-csi-customfuse-mountproxy`。复用既有 customfuse 入口、参数及子进程组管理契约，所需 ConfigMap/Secret 由 Pod 显式挂载，不将 CSI Secret 写进控制 JSON。RunD 继续仅 RRSA；自定义客户端需要适配业务 Pod 身份，不能仅因收到 rrsa 参数就宣称任何文件系统已完成鉴权。RunC 的 Secret volume/身份适配随同一 PR 的 RunC 实现提交。
 
 权限必须按 driver 能力说明：RunC 的非特权目标适用于支持 fd 接管的 driver；customfuse 直接 mount 的客户端所需设备、capability、传播和 privileged 要求需独立验证，不能保证任意客户端均非特权，也不能为减少实现而一律给所有 sidecar privileged。业务应用容器不需要因此开启 privileged。若一个挂载消费者管理的混合卷要求不同权限，容器权限按整体生效，不能按卷隔离或继续将其标称非特权；webhook 不得静默提权，须明确允许所需权限或拒绝不兼容配置。
 
 验收必须包括真实 customfuse 双卷挂载、自定义入口失败/退出、子进程回收、部分失败隔离、取消、正常删除/强删/CSI 重启、无残留挂载和远端哨兵保留；同时覆盖独立命名的识别、同名非法配置、多候选拒绝、卷目标映射和 probe 屏障。混合 driver 是否支持由显式能力和单消费者契约决定，不因名字自动允许。优先用单测/子进程集测覆盖参数和异常，真实 E2E 验关键数据面与生命周期；RunD、RunC 分别记录结果。
 
-PR 1 纳入 RunD customfuse 的命名支持、契约与验收；PR 2 纳入 RunC customfuse 的直接挂载分支及权限验收，与 fd-capable 非特权路线区分；PR 3 支持对应命名和自定义镜像的可选注入。仍按三个功能 PR 交付，不把 customfuse 当作无限期后续增强。
+同一 PR 纳入 RunD/RunC customfuse 的命名、直接挂载契约、权限和真实验收，以及对应的可选注入；与 fd-capable 非特权路线区分，不把 customfuse 当作后续增强。
 
 ## 可选 webhook：只生成配置，不参与挂载执行
 
@@ -223,16 +225,10 @@ PR 开发前需确认支持范围和解决方式，保持既有 mountproxy 路�
 
 webhook 测试还需覆盖：不开 annotation、开 annotation、合法手动 sidecar、同名非法容器、重复 admission、多卷/混合 driver、未绑定或已删除 PVC、API 失败、RRSA/Secret、不同运行环境、与其他 webhook 的顺序交互，以及与 SC key 的四种组合。至少实际验通一条 webhook 注入后的完整挂载和正常/强删清理链路。
 
-## PR 拆分与依赖
+## 单 PR 提交组织（替代原拆分计划）
 
-建议总计 **3 个功能 PR**，包含当前 RunD PR；设计文档随相关 PR 更新，不再拆一个纯文档前置 PR。每个 PR 自带必要测试、使用说明和验收记录，不把可用性依赖的清理/错误处理留给后续补丁。
+最终采用一个功能 PR，旧三 PR 计划不再执行。按公共协议/消费者识别与API开销、RunD file、RunC fd-capable非特权/恢复、customfuse直接挂载、可选webhook、验收汇总组织commit；必要测试和文档随功能提交，不等最后补。公共file代码共用，runc/rund运行时适配仍隔离，不因单PR混成一个巨大runtime判断。
 
-| PR | 内容和完成边界 | 依赖 |
-|---|---|---|
-| 1：当前 RunD file 基础 | 当前 PR #13：file 契约、固定名称、RRSA、多卷、probe、失败与回收；明确不支持 fd-passing/recovery；收尾首位正常路径免额外配置/免 PVC GET 等已承诺项 | 不依赖 RunC 或 webhook |
-| 2：RunC 非特权 file sidecar | 独立分支/MR：SC key、controller/node 四种分流、Pod 独占挂载、复用 file 协议与已有 fd-passing/driver recovery、Secret volume、非特权及完整生命周期验收；回归原独立 FUSE Pod | 依赖 PR 1 的公共协议和 worker/probe；不依赖 webhook，手动 Pod 完成验收 |
-| 3：可选 webhook | annotation 驱动的幂等注入、两种环境模板、卷映射与绑定时序处理、部署/证书/失败策略、注入 E2E；不重复实现挂载执行 | 完整覆盖 RunD/RunC 时依赖 PR 1 和 PR 2 的稳定配置契约 |
+customfuse两种环境都属于交付范围，不考虑fd-passing/recovery；RunC的去特权承诺按driver能力区分，不默认提权。ossfs2复用已有可用failover镜像和代码，recovery不支持节点仍保留fd和非特权。完整能力、错误、监控和清理测试见[验收矩阵](fuse-sidecar-unified-acceptance-zh.md)。未实现项不得因文档入PR而宣称已支持。
 
-推荐合并顺序是 PR 1 → PR 2 → PR 3。当前 PR 不加入 RunC 实现；PR 2 从 PR 1 合并后的基线建立，若提前开发则显式以其分支为 base，review 只包含增量。不要因业务需求解耦就宣称代码无依赖。
-
-webhook 在功能上不是两种手动 sidecar 的依赖。PR 3 的调研和测试可并行，但不应先发布猜测 RunC fd 配置的模板。若必须更早交付 RunD-only webhook，可只依赖 PR 1 并明确不支持 RunC，后续再补一个模板扩展 PR；这属于交付计划改变，默认仍按总计三个 PR、不额外拆分。
+代码内部仍有依赖：运行时适配复用公共 file 协议，webhook 复用稳定的手动配置契约。手动模式不依赖 webhook。合并条件是整个约定范围和验收完成，不因部分路径通过就将其余能力留作后续 PR。

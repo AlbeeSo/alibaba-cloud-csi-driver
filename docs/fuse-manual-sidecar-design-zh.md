@@ -7,12 +7,13 @@
 - [逐项根因、标准依据与修复](fuse-manual-sidecar-rootcause-zh.md)
 - [使用方式与双卷 RRSA 示例](fuse-manual-sidecar-usage-zh.md)
 - [完整 corner case 验收矩阵及 ACK Fluid internal 调研](fuse-manual-sidecar-test-plan-zh.md)
+- [单 PR 完整验收：RunD/RunC、customfuse、webhook、fd/recovery 与监控](fuse-sidecar-unified-acceptance-zh.md)
 
 ## 范围与分流
 
-本轮只实现手动配置的原生 init sidecar、RunD、HostPath 控制目录、OSS 文件系统。无 webhook，无 runc sidecar RPC，无 csi-agent 改造。runv 是 RunD 的测试运行时变体，不作为产品模式开关。
+本文描述当前已实现的手动原生 init sidecar、RunD、HostPath 控制目录和 OSS 文件系统；尚无 webhook 或 runc sidecar，无 csi-agent 改造。最终交付范围已扩大为同一 PR 包含 RunC、customfuse 和可选 webhook，详见新设计和完整验收计划；不能把计划当成已实现。runv 是 RunD 的测试运行时变体，不作为产品模式开关。
 
-最终决定：本 RunD sidecar 不支持 fd-passing 和 recovery，继续在 guest 内直接挂载，保留 RRSA 和当前 privileged 要求。RunC 后续独立分支/MR 复用已有 fd-passing/driver recovery 实现非特权 sidecar，配置与状态同样采用 file、fd 使用同内核 socket；不在当前 RunD PR 内实现，也不扩大现有支持范围。详见[统一交付设计](fuse-sidecar-delivery-design-zh.md)。
+最终决定：本 RunD sidecar 不支持 fd-passing 和 recovery，继续在 guest 内直接挂载，保留 RRSA 和当前 privileged 要求。RunC 在同一 PR 的独立 commit 中复用已有 fd-passing/driver recovery 实现 fd-capable 非特权 sidecar，配置与状态同样采用 file、fd 使用同内核 socket；customfuse 直接挂载的权限另行验证。新增能力尚未实现，详见[统一交付设计](fuse-sidecar-delivery-design-zh.md)。
 
 ```text
 NodePublish(req):
