@@ -133,6 +133,13 @@ spec:
             - name: second
               mountPath: /pod-volumes/ossfs2-file-b/mount
               mountPropagation: Bidirectional
+            # Same PVCs at the OSS clients' standard metrics paths.
+            - name: first
+              mountPath: /run/fuse.ossfs/ossfs2-file-a/globalmount
+              mountPropagation: Bidirectional
+            - name: second
+              mountPath: /run/fuse.ossfs/ossfs2-file-b/globalmount
+              mountPropagation: Bidirectional
             - name: rrsa
               mountPath: /var/run/secrets/ack.alibabacloud.com/rrsa-tokens
               readOnly: true

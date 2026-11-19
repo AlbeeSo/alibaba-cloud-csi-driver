@@ -167,16 +167,23 @@ func (in Injector) Mutate(ctx context.Context, pod *core.Pod) (*core.Pod, error)
 	}
 	sidecar := core.Container{Name: name, Image: image, Command: []string{"csi-mount-proxy-server"}, Args: []string{"--file-mode"}, RestartPolicy: ptr.To(core.ContainerRestartPolicyAlways),
 		Env:             []core.EnvVar{{Name: "POD_UID", ValueFrom: &core.EnvVarSource{FieldRef: &core.ObjectFieldSelector{FieldPath: "metadata.uid"}}}},
-		SecurityContext: &core.SecurityContext{Privileged: ptr.To(!fdMode)}, StartupProbe: probe(), ReadinessProbe: probe(),
+		SecurityContext: &core.SecurityContext{Privileged: ptr.To(!fdMode), RunAsUser: ptr.To(int64(0)), RunAsNonRoot: ptr.To(false)}, StartupProbe: probe(), ReadinessProbe: probe(),
 		VolumeMounts: []core.VolumeMount{{Name: "csi-mountproxy-state", MountPath: filevolume.DefaultStateDir, SubPathExpr: "$(POD_UID)"}},
 	}
 	sidecar.ReadinessProbe.FailureThreshold = 1
+	if fdMode {
+		sidecar.SecurityContext.AllowPrivilegeEscalation = ptr.To(false)
+		sidecar.SecurityContext.Capabilities = &core.Capabilities{Drop: []core.Capability{"ALL"}}
+	}
 	propagation := core.MountPropagationBidirectional
 	if fdMode {
 		propagation = core.MountPropagationHostToContainer
 	}
 	for _, d := range data {
 		sidecar.VolumeMounts = append(sidecar.VolumeMounts, core.VolumeMount{Name: d.name, MountPath: path.Join(filevolume.DefaultTargetDir, d.pv, "mount"), MountPropagation: ptr.To(propagation)})
+		if kind == "ossplugin.csi.alibabacloud.com" {
+			sidecar.VolumeMounts = append(sidecar.VolumeMounts, core.VolumeMount{Name: d.name, MountPath: filevolume.ClientTarget(d.pv), MountPropagation: ptr.To(propagation)})
+		}
 	}
 	if recovery {
 		if err := addVolume(core.Volume{Name: "csi-mountproxy-fusectl", VolumeSource: core.VolumeSource{HostPath: &core.HostPathVolumeSource{Path: filevolume.FuseConnectionsDir, Type: ptr.To(core.HostPathDirectory)}}}); err != nil {

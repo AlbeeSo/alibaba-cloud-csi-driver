@@ -160,9 +160,16 @@ func podManifestMode(pod *core.Pod, req *csi.NodePublishVolumeRequest, fd bool, 
 	}
 	uidEnv := false
 	for _, e := range consumer.Env {
-		if e.Name == "POD_UID" && e.ValueFrom != nil && e.ValueFrom.FieldRef != nil && e.ValueFrom.FieldRef.FieldPath == "metadata.uid" {
-			uidEnv = true
+		if e.Name != "POD_UID" {
+			continue
 		}
+		if uidEnv {
+			return fmt.Errorf("mountproxy requires exactly one POD_UID env; duplicate entries can override UID isolation")
+		}
+		if e.Value != "" || e.ValueFrom == nil || e.ValueFrom.FieldRef == nil || e.ValueFrom.FieldRef.FieldPath != "metadata.uid" {
+			return fmt.Errorf("mountproxy POD_UID must come only from metadata.uid")
+		}
+		uidEnv = true
 	}
 	state := false
 	keys := map[string]bool{}

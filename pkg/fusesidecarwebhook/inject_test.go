@@ -41,7 +41,7 @@ func TestInjectionBoundMultiVolumeAndIdempotence(t *testing.T) {
 	require.False(t, *c.SecurityContext.Privileged)
 	require.Equal(t, core.ContainerRestartPolicyAlways, *c.RestartPolicy)
 	require.Len(t, c.Args, 1, "volume count must not enter args")
-	require.Len(t, c.VolumeMounts, 4)
+	require.Len(t, c.VolumeMounts, 6)
 	require.NoError(t, filevolume.ValidateRRSAToken(out))
 	require.Equal(t, "prepare", out.Spec.InitContainers[1].Name)
 	again, err := in.Mutate(context.Background(), out)
@@ -60,6 +60,20 @@ func TestInjectionDisabledDoesNotReadAPI(t *testing.T) {
 	require.NoError(t, err)
 	require.Same(t, pod, out)
 	require.Empty(t, client.Actions())
+}
+
+func TestNativeInjectionDoesNotInheritBusinessUID(t *testing.T) {
+	pod, client := fixture()
+	pod.Spec.SecurityContext = &core.PodSecurityContext{RunAsUser: ptr.To(int64(1000)), RunAsNonRoot: ptr.To(true)}
+	out, err := (Injector{Client: client, OSSImage: "test"}).Mutate(t.Context(), pod)
+	require.NoError(t, err)
+	require.Equal(t, int64(1000), *out.Spec.SecurityContext.RunAsUser)
+	security := out.Spec.InitContainers[0].SecurityContext
+	require.Equal(t, int64(0), *security.RunAsUser)
+	require.False(t, *security.RunAsNonRoot)
+	require.False(t, *security.Privileged)
+	require.False(t, *security.AllowPrivilegeEscalation)
+	require.Equal(t, []core.Capability{"ALL"}, security.Capabilities.Drop)
 }
 
 func TestInjectionSupportsExistingRuntimeClassSpelling(t *testing.T) {

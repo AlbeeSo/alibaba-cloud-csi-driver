@@ -37,6 +37,9 @@ func (m *extendedMounter) mount(ctx context.Context, op *mounter.MountOperation)
 		var err error
 		chanId, err = getFuseChannelID(target)
 		if err != nil {
+			if op.RequireRecovery {
+				return fmt.Errorf("required FUSE recovery cannot identify its connection: %w", err)
+			}
 			logger.Error(err, "Failed to get FUSE channel ID, recovery disabled")
 			recovery = false
 		} else {

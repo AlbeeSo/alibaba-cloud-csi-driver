@@ -56,8 +56,9 @@ func MountFileFD(ctx context.Context, m mounter.Mounter, req *proxy.MountRequest
 func MountFileObserved(ctx context.Context, m mounter.Mounter, req *proxy.MountRequest, ready func(string) (bool, error), fd int, observe func(string, error)) (<-chan error, error) {
 	op := &mounter.MountOperation{Source: req.Source, Target: req.Target, FsType: req.Fstype, Options: req.Options, Args: req.MountFlags, Secrets: req.Secrets, VolumeID: req.VolumeID}
 	op.FuseFd, op.Recovery, op.MetricsPath = fd, req.Recovery, req.MetricsPath
-	if (req.Fstype == "ossfs" || req.Fstype == "ossfs2") && req.MetricsPath != "" {
-		if err := prepareFileClientMetrics(op, "/run/fuse.ossfs", "/var/run/ossfs"); err != nil {
+	op.RequireRecovery = req.Recovery
+	if (req.Fstype == "ossfs" || req.Fstype == "ossfs2") && req.MetricsPath != "" && filevolume.ClientMetricsEnabled(req.Options) {
+		if err := prepareFileClientMetrics(op, "/run/fuse.ossfs", "/var/run/ossfs", m); err != nil {
 			return nil, err
 		}
 	}

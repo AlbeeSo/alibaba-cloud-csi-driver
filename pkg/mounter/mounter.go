@@ -85,6 +85,7 @@ type MountOperation struct {
 	FuseFd           int       // FUSE file descriptor from client; 0 means not available; valid fd > 0
 	FdPassing        bool      // whether to use fd-passing mode (client does kernel mount, passes fd to server)
 	Recovery         bool      // whether to enable recovery loop on process exit
+	RequireRecovery  bool      // fail instead of dropping an accepted asynchronous recovery contract
 	HasActiveDaemon  bool      // server-side: true when a FUSE daemon is already running for this target (token rotation)
 
 	MountResult any

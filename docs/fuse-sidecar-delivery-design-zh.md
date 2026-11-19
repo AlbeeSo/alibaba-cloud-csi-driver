@@ -63,7 +63,7 @@
 
 ## RunC：controller 决定是否创建 FUSE Pod，node 选择消费者
 
-新增一个 SC parameters key，经 CreateVolume 保留在 PV volumeAttributes，成为 ControllerPublish/NodePublish 都能读取的 VolumeContext。本文暂称 requireSidecar，仅为语义占位，不能直接作为当前可用参数使用。
+卷级配置为 PV 的 `spec.csi.volumeAttributes.mountMode: sidecar`，ControllerPublish/NodePublish 从请求的 VolumeContext 读取。静态 PV 可直接声明，不需要 StorageClass、CreateVolume 或查询 PVC。动态供给时可在 SC 的 `parameters.mountMode: sidecar` 声明，由 CreateVolume 透传到 PV；不是每次挂载再读取 SC。
 
 开启表示：controller 不创建独立 FUSE Pod，node 必须找到合法业务 sidecar。未开启保持 controller 原有创建行为，node 仍允许从 Pod 识别业务 sidecar。
 
@@ -76,7 +76,7 @@
 
 保留名称存在但结构不合法时，无论 key 是否开启都报错。查 Pod 失败不能伪装成“没有 sidecar”。首期不通过 controller 查询业务 Pod、扫描消费者或新增 informer 来猜分流。
 
-第三行的代价是独立 FUSE Pod 可能多余，且其创建失败仍会阻塞进入 NodePublish。这是接受自动发现分支后的已知行为；使用 sidecar 的新 SC 建议显式开启 key。node 不擅自删除多余 FUSE Pod，因为同节点其他 Pod 可能仍在使用它。
+第三行的代价是独立 FUSE Pod 可能多余，且其创建失败仍会阻塞进入 NodePublish。这是接受自动发现分支后的已知行为；使用 sidecar 的卷建议显式设置 `mountMode: sidecar`。node 不擅自删除多余 FUSE Pod，因为同节点其他 Pod 可能仍在使用它。
 
 key 作用于整个卷；开启后该卷的所有消费者都必须带 sidecar。新 SC 参数不会自动补写存量 PV，CSI volume source 不可变，不能承诺热补；静态 PV 可在创建时声明同一参数。
 

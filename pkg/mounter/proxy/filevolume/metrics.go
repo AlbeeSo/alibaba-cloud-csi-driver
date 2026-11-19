@@ -8,7 +8,66 @@ import (
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils"
+	core "k8s.io/api/core/v1"
 )
+
+const ClientTargetDir = "/run/fuse.ossfs"
+
+func ClientTarget(key string) string { return filepath.Join(ClientTargetDir, key, "globalmount") }
+
+// ClientMetricsEnabled follows the clients' existing use_metrics option. The
+// lifecycle monitor is independent and remains enabled when IO metrics are off.
+func ClientMetricsEnabled(options []string) bool {
+	enabled := false
+	for _, option := range options {
+		key, value, hasValue := strings.Cut(option, "=")
+		if key == "use_metrics" {
+			enabled = !hasValue || !strings.EqualFold(value, "false")
+		}
+	}
+	return enabled
+}
+
+func ValidateClientMetricsProjection(pod *core.Pod, req *csi.NodePublishVolumeRequest, fd bool) error {
+	_, relative, err := Target(req.TargetPath)
+	if err != nil {
+		return err
+	}
+	key := filepath.Dir(relative)
+	consumer, _, err := Consumer(pod)
+	if err != nil {
+		return err
+	}
+	if consumer == nil {
+		return fmt.Errorf("missing OSS client consumer")
+	}
+	volumes := map[string]core.Volume{}
+	for _, v := range pod.Spec.Volumes {
+		volumes[v.Name] = v
+	}
+	claim := ""
+	for _, vm := range consumer.VolumeMounts {
+		if vm.MountPath == filepath.Join(DefaultTargetDir, relative) {
+			if pvc := volumes[vm.Name].PersistentVolumeClaim; pvc != nil {
+				claim = pvc.ClaimName
+			}
+		}
+	}
+	propagation := core.MountPropagationBidirectional
+	if fd {
+		propagation = core.MountPropagationHostToContainer
+	}
+	for _, vm := range consumer.VolumeMounts {
+		if vm.MountPath != ClientTarget(key) {
+			continue
+		}
+		pvc := volumes[vm.Name].PersistentVolumeClaim
+		if pvc != nil && claim != "" && pvc.ClaimName == claim && !vm.ReadOnly && vm.SubPath == "" && vm.SubPathExpr == "" && vm.MountPropagation != nil && *vm.MountPropagation == propagation {
+			return nil
+		}
+	}
+	return fmt.Errorf("OSS IO metrics require the same PVC projected at %s with matching propagation; add that volumeMount or explicitly disable client IO metrics with use_metrics=false", ClientTarget(key))
+}
 
 // WriteMetricsInventory uses the existing collector's records inside this Pod's
 // control directory. No extra arbitrary hostPath is given to the sidecar.

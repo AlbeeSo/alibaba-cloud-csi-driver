@@ -121,6 +121,11 @@ func (ns *nodeServer) publishFileVolume(ctx context.Context, req *csi.NodePublis
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	options = manager.AddDefaultMountOptions(options, flags)
+	if filevolume.ClientMetricsEnabled(options) {
+		if err := filevolume.ValidateClientMetricsProjection(pod, req, fdMode); err != nil {
+			return nil, status.Error(codes.FailedPrecondition, err.Error())
+		}
+	}
 	if secretDirectory != "" {
 		prefix := filepath.Join(mounterutils.GetConfigDir(opts.FuseType), mounterutils.GetPasswdFileName(opts.FuseType))
 		for i, option := range options {

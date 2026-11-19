@@ -46,6 +46,10 @@ func manualFilePod(class string, count int) *core.Pod {
 	p.Spec.InitContainers = []core.Container{c}
 	p.Spec.Volumes = append(p.Spec.Volumes, core.Volume{Name: "rrsa", VolumeSource: core.VolumeSource{Projected: &core.ProjectedVolumeSource{Sources: []core.VolumeProjection{{ServiceAccountToken: &core.ServiceAccountTokenProjection{Audience: "sts.aliyuncs.com", Path: "token"}}}}}})
 	p.Spec.InitContainers[0].VolumeMounts = append(p.Spec.InitContainers[0].VolumeMounts, core.VolumeMount{Name: "rrsa", MountPath: filevolume.RRSATokenDir, ReadOnly: true})
+	for i := range count {
+		key := fmt.Sprintf("pv-%d", i)
+		p.Spec.InitContainers[0].VolumeMounts = append(p.Spec.InitContainers[0].VolumeMounts, core.VolumeMount{Name: key, MountPath: filevolume.ClientTarget(key), MountPropagation: ptr.To(core.MountPropagationBidirectional)})
+	}
 	return p
 }
 
@@ -105,7 +109,7 @@ func TestDirectPublishCachedPodRouting(t *testing.T) {
 
 func TestDirectPublishFailsClosedWithoutAdditionalQueries(t *testing.T) {
 	gatetesting.SetFeatureGateDuringTest(t, features.FunctionalMutableFeatureGate, features.RundCSIProtocol3, false)
-	for _, scenario := range []string{"api-failure", "uid-mismatch", "wrong-node", "missing-sidecar", "missing-state", "missing-target", "fake-probe", "no-readiness", "ordinary-init", "missing-startup", "missing-uid-env", "unprivileged", "wrong-propagation", "duplicate-pvc", "runc", "nil-class", "empty-class", "terminating-pod", "early-data-init"} {
+	for _, scenario := range []string{"api-failure", "uid-mismatch", "wrong-node", "missing-sidecar", "missing-state", "missing-target", "fake-probe", "no-readiness", "ordinary-init", "missing-startup", "missing-uid-env", "duplicate-uid-env", "literal-uid-env", "unprivileged", "wrong-propagation", "duplicate-pvc", "runc", "nil-class", "empty-class", "terminating-pod", "early-data-init"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := t.TempDir()
 			t.Setenv("CSI_FUSE_FILE_ROOT", root)
@@ -141,6 +145,10 @@ func TestDirectPublishFailsClosedWithoutAdditionalQueries(t *testing.T) {
 				pod.Spec.InitContainers[0].StartupProbe = nil
 			case "missing-uid-env":
 				pod.Spec.InitContainers[0].Env = nil
+			case "duplicate-uid-env":
+				pod.Spec.InitContainers[0].Env = append(pod.Spec.InitContainers[0].Env, core.EnvVar{Name: "POD_UID", Value: "another-pod"})
+			case "literal-uid-env":
+				pod.Spec.InitContainers[0].Env = []core.EnvVar{{Name: "POD_UID", Value: "pod-a"}}
 			case "unprivileged":
 				pod.Spec.InitContainers[0].SecurityContext.Privileged = ptr.To(false)
 			case "wrong-propagation":
