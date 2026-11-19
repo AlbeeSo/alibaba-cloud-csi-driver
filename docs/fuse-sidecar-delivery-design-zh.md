@@ -19,7 +19,7 @@
 | 项目 | 状态 |
 |---|---|
 | RunD 手动 native sidecar、file 请求、多卷 inventory、probe、回收 | 已实现；详见[现有设计](fuse-manual-sidecar-design-zh.md)和[验收记录](fuse-manual-sidecar-validation-zh.md) |
-| guest file 仅 RRSA、固定 sidecar 名称 | 已实现；自建 ACK 1.33/runv 变体的 RRSA 双卷通过，实际 rund RRSA 环境等待管理员授权 |
+| guest file 仅 RRSA、固定 sidecar 名称 | 已实现；自建 ACK 1.33/runv 变体 RRSA 双卷通过；实际 rund 配置信息已补齐，业务 sidecar/轮转待恢复千舟会话后验证 |
 | RunC 业务 sidecar、file 异步交付 | 已实现；实际共享内核双卷挂载通过 |
 | 卷级参数、controller 跳过建 FUSE Pod | PV `volumeAttributes.mountMode: sidecar`；SC parameters 用于动态透传，静态 PV 无需 SC；OSS/customfuse controller 已接入 |
 | 首位 sidecar 正常路径免额外配置、免 PVC GET | 已实现；1/10/100 卷真实 NodePublish 调用、禁止 PVC GET 的集成测试通过 |
