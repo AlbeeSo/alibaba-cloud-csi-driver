@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -21,6 +22,7 @@ type fakeBackend struct {
 	blocked     string
 	failUnmount string
 	calls       int
+	healthErr   error
 }
 
 func (b *fakeBackend) Mount(ctx context.Context, req *proxy.MountRequest) (<-chan error, error) {
@@ -54,7 +56,42 @@ func (b *fakeBackend) Unmount(target string) error {
 	return nil
 }
 
-func (b *fakeBackend) Health(string) (string, error) { return "Mounted", nil }
+func (b *fakeBackend) Health(string) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.healthErr != nil {
+		return "Failed", b.healthErr
+	}
+	return "Mounted", nil
+}
+
+func TestRecoveryTerminalFailurePreservesDriverCause(t *testing.T) {
+	r, b := newRunner(t, "one")
+	d := request(t, r.Root, "one")
+	d.Mount.Fstype, d.Mount.FdPassing, d.Mount.Recovery = "ossfs2", true, true
+	d.RequiredFeatures = []string{FeatureFuseFD}
+	d.Generation = d.Digest()
+	require.NoError(t, WriteJSON(RequestPath(r.Root, "one"), d))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+	require.Eventually(t, func() bool { return CheckReady(r.Root, r.PodUID, r.Expected, time.Now()) == nil }, 3*time.Second, 10*time.Millisecond)
+	b.mu.Lock()
+	b.healthErr = errors.New("recovery exhausted: flush permission denied secret-password")
+	close(b.exits["one"])
+	b.mu.Unlock()
+	require.Eventually(t, func() bool {
+		var s Status
+		_ = ReadJSON(StatusPath(r.Root, "one"), &s)
+		return s.Phase == "Failed" && strings.Contains(s.Error, "flush permission denied")
+	}, 3*time.Second, 10*time.Millisecond)
+	var s Status
+	require.NoError(t, ReadJSON(StatusPath(r.Root, "one"), &s))
+	require.NotContains(t, s.Error, "secret-password")
+	cancel()
+	require.NoError(t, <-done)
+}
 
 func TestRestartAfterStartupRequiresPodRecreation(t *testing.T) {
 	r, b := newRunner(t, "one")

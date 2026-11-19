@@ -185,7 +185,7 @@ func retirePod(base, pod *os.Root, uid string) error {
 func retireAuxVolume(pod *os.Root, dir, key string) error {
 	files := []string{"socket"}
 	if dir == "metrics" {
-		files = append([]string{utils.MountPointInfoFile}, utils.MountpointMetricsArray...)
+		files = append([]string{utils.MountPointInfoFile, utils.PodInfoFile}, utils.MountpointMetricsArray...)
 		files = append(files, utils.CounterTypeMetricsArray...)
 		files = append(files, utils.HotSpotMetricsArray...)
 	}

@@ -21,7 +21,7 @@
 | RunD 手动 native sidecar、file 请求、多卷 inventory、probe、回收 | 已实现；详见[现有设计](fuse-manual-sidecar-design-zh.md)和[验收记录](fuse-manual-sidecar-validation-zh.md) |
 | guest file 仅 RRSA、固定 sidecar 名称 | 已实现，提交 a441f4830；Linux OSS/filevolume 测试、集测与 CI 通过；本次命名/鉴权更新未重跑云 E2E |
 | RunC 业务 sidecar、file 异步交付 | 已实现本地适配；真实内核挂载和云 E2E 待验收 |
-| 新 SC 参数、controller 跳过建 FUSE Pod | `mountMode: sidecar`；OSS/customfuse controller 已接入 |
+| 卷级参数、controller 跳过建 FUSE Pod | PV `volumeAttributes.mountMode: sidecar`；SC parameters 用于动态透传，静态 PV 无需 SC；OSS/customfuse controller 已接入 |
 | 首位 sidecar 正常路径免额外配置、免 PVC GET | 已实现；1/10/100 卷真实 NodePublish 调用、禁止 PVC GET 的集成测试通过 |
 | webhook | 已实现可选 admission 和 chart；本地 HTTP/多卷/幂等测试通过，集群验收待执行；仅支持已绑定 PVC |
 | RunC sidecar 非特权 fd-passing | 已实现 OSS2 file+SCM_RIGHTS 适配；真实 fd 交接、重复发布、长路径测试通过，真实 FUSE E2E 待执行 |

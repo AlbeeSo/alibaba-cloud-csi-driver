@@ -160,7 +160,11 @@ func (m *extendedMounter) ExtendedMount(ctx context.Context, op *mounter.MountOp
 	options := m.driver.ApplyOptionDefaults(op.Options)
 	target := op.Target
 
-	args := mount.MakeMountArgs(op.Source, op.Target, "", options)
+	clientTarget := op.Target
+	if op.ClientTarget != "" {
+		clientTarget = op.ClientTarget
+	}
+	args := mount.MakeMountArgs(op.Source, clientTarget, "", options)
 	args = append(args, op.Args...)
 	args = append(args, "-f")
 

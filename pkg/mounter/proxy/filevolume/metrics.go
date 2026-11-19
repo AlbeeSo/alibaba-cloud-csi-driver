@@ -45,6 +45,9 @@ func WriteMetricsInventory(root string, req *csi.NodePublishVolumeRequest, clien
 	if err := pod.WriteFile(utils.PodInfoFile, []byte(info), 0644); err != nil {
 		return "", err
 	}
+	if err := pod.WriteFile(filepath.Join(rel, utils.PodInfoFile), []byte(info), 0644); err != nil {
+		return "", err
+	}
 	if degraded {
 		if err := pod.WriteFile(filepath.Join(rel, utils.MetricsRecoveryDegraded), []byte("1"), 0644); err != nil {
 			return "", err

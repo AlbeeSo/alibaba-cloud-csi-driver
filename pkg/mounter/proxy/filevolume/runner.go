@@ -310,6 +310,11 @@ func (r *Runner) volume(ctx context.Context, id, session string) (result error) 
 				if err != nil {
 					s.Error += ": " + redact(err.Error(), current)
 				}
+				if health, ok := r.Backend.(interface{ Health(string) (string, error) }); ok {
+					if phase, cause := health.Health(target); phase == "Failed" && cause != nil {
+						s.Error += ": " + redact(cause.Error(), current)
+					}
+				}
 				exited = nil
 			default:
 				mounted, err := r.Backend.Mounted(target)

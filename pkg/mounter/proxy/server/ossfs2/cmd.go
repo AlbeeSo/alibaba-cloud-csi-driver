@@ -80,7 +80,11 @@ func (m *extendedMounter) runCmd(op *mounter.MountOperation, recovery bool, sw s
 // buildOssfs2Args constructs the command-line arguments for ossfs2 based on mount options,
 // fd-passing mode, and recovery settings.
 func buildOssfs2Args(op *mounter.MountOperation, recovery bool) ([]string, error) {
-	args := []string{"mount", op.Target}
+	target := op.Target
+	if op.ClientTarget != "" {
+		target = op.ClientTarget
+	}
+	args := []string{"mount", target}
 	args = append(args, op.Args...)
 	for _, o := range op.Options {
 		args = append(args, fmt.Sprintf("--%s", o))

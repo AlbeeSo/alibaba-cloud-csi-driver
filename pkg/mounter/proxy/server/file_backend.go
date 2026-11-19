@@ -56,6 +56,11 @@ func MountFileFD(ctx context.Context, m mounter.Mounter, req *proxy.MountRequest
 func MountFileObserved(ctx context.Context, m mounter.Mounter, req *proxy.MountRequest, ready func(string) (bool, error), fd int, observe func(string, error)) (<-chan error, error) {
 	op := &mounter.MountOperation{Source: req.Source, Target: req.Target, FsType: req.Fstype, Options: req.Options, Args: req.MountFlags, Secrets: req.Secrets, VolumeID: req.VolumeID}
 	op.FuseFd, op.Recovery, op.MetricsPath = fd, req.Recovery, req.MetricsPath
+	if (req.Fstype == "ossfs" || req.Fstype == "ossfs2") && req.MetricsPath != "" {
+		if err := prepareFileClientMetrics(op, "/run/fuse.ossfs", "/var/run/ossfs"); err != nil {
+			return nil, err
+		}
+	}
 	if fd > 0 {
 		op.Args = nil
 	}
@@ -158,6 +163,13 @@ func (b FileBackend) Mount(ctx context.Context, req *proxy.MountRequest) (<-chan
 		})
 		if err != nil {
 			_ = unix.Close(fd)
+			return exit, err
+		}
+		if mounted, mountErr := b.Mounted(req.Target); mountErr != nil || !mounted {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			stopErr := fdDriver.ReleaseFileFD(stopCtx, req.Target)
+			return nil, fmt.Errorf("FUSE mount is not visible at the protocol target after fd startup (inspect=%v, release=%v)", mountErr, stopErr)
 		}
 		return exit, err
 	}

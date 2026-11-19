@@ -16,14 +16,18 @@ var FuseConnectionsDir = "/sys/fs/fuse/connections"
 
 // GetFuseConnectionID returns the FUSE connection ID (minor device number)
 // for the given mount point by parsing /proc/self/mountinfo.
-// SingleEntryFilter matches only the exact mount point path, so this
-// cannot accidentally return a connection ID for a different mount.
+// Read every entry at the exact pathname. SingleEntryFilter stops at the
+// underlying bind and can hide the propagated FUSE overmount.
 func GetFuseConnectionID(mountpoint string) (uint64, error) {
-	infos, err := mountinfo.GetMounts(mountinfo.SingleEntryFilter(mountpoint))
+	infos, err := mountinfo.GetMounts(exactMountEntries(mountpoint))
 	if err != nil {
 		return 0, fmt.Errorf("get mounts for %s: %w", mountpoint, err)
 	}
 	return fuseConnectionID(infos)
+}
+
+func exactMountEntries(target string) mountinfo.FilterFunc {
+	return func(info *mountinfo.Info) (bool, bool) { return info.Mountpoint != target, false }
 }
 
 func fuseConnectionID(infos []*mountinfo.Info) (uint64, error) {

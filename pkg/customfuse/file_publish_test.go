@@ -24,6 +24,28 @@ import (
 	"k8s.io/utils/ptr"
 )
 
+func TestControllerSidecarHintFromStaticPVAndDynamicParameters(t *testing.T) {
+	for _, dynamic := range []bool{false, true} {
+		name := "static-pv-without-storageclass"
+		if dynamic {
+			name = "dynamic-storageclass-parameters"
+		}
+		t.Run(name, func(t *testing.T) {
+			attrs := map[string]string{filevolume.MountModeKey: "sidecar", "runtimeClass": "runc", "fuseType": "custom-client", "source": "opaque"}
+			controller := &controllerServer{}
+			if dynamic {
+				created, err := controller.CreateVolume(t.Context(), &csi.CreateVolumeRequest{Name: "volume", Parameters: attrs})
+				require.NoError(t, err)
+				attrs = created.Volume.VolumeContext
+			}
+			pv := &core.PersistentVolume{Spec: core.PersistentVolumeSpec{StorageClassName: "", PersistentVolumeSource: core.PersistentVolumeSource{CSI: &core.CSIPersistentVolumeSource{Driver: "customfuseplugin.csi.alibabacloud.com", VolumeHandle: "volume", VolumeAttributes: attrs}}}}
+			response, err := controller.ControllerPublishVolume(t.Context(), &csi.ControllerPublishVolumeRequest{VolumeId: pv.Spec.CSI.VolumeHandle, NodeId: "node", VolumeContext: pv.Spec.CSI.VolumeAttributes})
+			require.NoError(t, err)
+			require.Empty(t, response.PublishContext)
+		})
+	}
+}
+
 func customFileFixture(t *testing.T) (*core.Pod, *csi.NodePublishVolumeRequest) {
 	t.Helper()
 	pod := &core.Pod{ObjectMeta: meta.ObjectMeta{Name: "consumer", Namespace: "test", UID: "uid"}, Spec: core.PodSpec{NodeName: "node", ServiceAccountName: "business", RuntimeClassName: ptr.To("rund")}}

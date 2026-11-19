@@ -65,15 +65,18 @@ type ProxyRefresher interface {
 var ErrTargetNotManagedByBroker = errors.New("target not managed by mount broker")
 
 type MountOperation struct {
-	Source      string
-	Target      string
-	FsType      string
-	Options     []string
-	Args        []string
-	Secrets     map[string]string
-	MetricsPath string
-	VolumeID    string
-	Overlay     bool
+	Source string
+	Target string
+	// ClientTarget is an optional local alias for a client's pathname-based
+	// metrics convention. Target remains the protocol/lifecycle mount identity.
+	ClientTarget string
+	FsType       string
+	Options      []string
+	Args         []string
+	Secrets      map[string]string
+	MetricsPath  string
+	VolumeID     string
+	Overlay      bool
 	// SensitiveOptions are mount options that carry secrets (e.g. STS
 	// credentials). They are passed to the mount via MountSensitive so they
 	// are masked in logs and error messages, and must never be logged.
