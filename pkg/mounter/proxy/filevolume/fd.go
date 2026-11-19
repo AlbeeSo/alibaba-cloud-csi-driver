@@ -137,7 +137,7 @@ func (o *fdOffer) serve() {
 				o.prepare = nil
 			}
 			if o.fd < 0 || o.prepareErr != nil {
-				_, _ = conn.Write([]byte(fmt.Sprintf("FUSE preparation failed: %v", o.prepareErr)))
+				_, _ = fmt.Fprintf(conn, "FUSE preparation failed: %v", o.prepareErr)
 				return
 			}
 			if _, _, err := conn.WriteMsgUnix([]byte{1}, unix.UnixRights(o.fd), nil); err != nil {
