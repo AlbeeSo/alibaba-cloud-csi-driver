@@ -6,7 +6,27 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	mountinfo "github.com/moby/sys/mountinfo"
 )
+
+func TestFuseConnectionIDIgnoresUnderlyingPVCBind(t *testing.T) {
+	for _, infos := range [][]*mountinfo.Info{
+		{{FSType: "ext4", Minor: 3}, {FSType: "fuse", Minor: 386}},
+		{{FSType: "fuse.ossfs2", Minor: 386}, {FSType: "ext4", Minor: 3}},
+		{{FSType: "fuse.virtiofs", Minor: 2}, {FSType: "fuse.ossfs2", Minor: 386}},
+	} {
+		id, err := fuseConnectionID(infos)
+		if err != nil || id != 386 {
+			t.Fatalf("selected connection %d: %v", id, err)
+		}
+	}
+	for _, infos := range [][]*mountinfo.Info{nil, {{FSType: "ext4", Minor: 3}}, {{FSType: "fuse.virtiofs", Minor: 2}}, {{FSType: "fuse", Minor: 386}, {FSType: "fuse", Minor: 387}}} {
+		if _, err := fuseConnectionID(infos); err == nil {
+			t.Fatal("must not flush an unverified connection")
+		}
+	}
+}
 
 func TestFlushFuseConnection(t *testing.T) {
 	tmp := t.TempDir()

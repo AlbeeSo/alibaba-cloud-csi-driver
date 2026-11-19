@@ -18,12 +18,15 @@
 - 最新延迟 fd 适配的相关模块测试及 OSS/filevolume race 测试通过。
 - Helm 真正渲染的 chart 测试通过：metadata 参数、默认关闭 webhook、特权注入显式许可。
 - 独立 ACK 1.33/runv 测试变体的 RunD RRSA 双卷基线通过：读取、写回、只读；CSI node 已禁止 PVC get/list/watch。
+- 延迟 fd 修正后，RunC 真机双卷通过：sidecar 非特权、drop ALL capabilities、无绑定元数据、PVC API 权限禁用，两个卷 Mounted 且数据读取/只读检查成功。
 
 ## 已确认并修正的真实启动问题
 
 直接复用同步 fd 流程、在 NodePublish 返回前建立 FUSE 挂载，会阻塞同 Pod 消费方创建。真实实验捕获 containerd 线程卡在 FUSE stat/getattr；管道模拟的集成测试无法发现这一点。
 
-当前修正为：NodePublish 只准备目录、配置和延迟 offer；sidecar 已启动并请求接管时，CSI 才建立内核挂载并交付 fd。单测与集测通过，但**该修正的真实传播、FUSE_INIT 和数据面尚待验收**。失败用例的旧 Pod 已请求删除，并重启测试 CSI 释放其 pending fd。必须核对旧 UID 控制目录和宿主机挂载清理，不能把 Pod API 删除当作 runtime 已清理。
+当前修正为：NodePublish 只准备目录、配置和延迟 offer；sidecar 已启动并请求接管时，CSI 才建立内核挂载并交付 fd。单测、集测及真实 RunC 双卷的数据面已通过。失败用例的旧 Pod 已请求删除，并重启测试 CSI 释放其 pending fd。必须核对旧 UID 控制目录和宿主机挂载清理，不能把 Pod API 删除当作 runtime 已清理。
+
+真实 recovery 用例又定位出连接选择问题：同一路径存在底层 PVC ext4 bind 和上层 FUSE 记录，旧 helper 取第一条，尝试 flush ext4 minor 对应的不存在连接。已改为只选择真实 FUSE、排除 virtiofs、拒绝多 FUSE 歧义；新增叠加挂载测试和相关 OSS/driver 回归通过。真实 recovery 必须在更新镜像后重测，当前仍不能标为通过。另一个卷在本次故障时保持 Mounted。
 
 另外补齐 runtimeClass/runtimeclass 大小写兼容、冲突参数明确报错；recovery 要求显式可写 fusectl 投影。自建节点已检测到内核 recovery 符号，但尚未据此宣称真实 recovery 验收通过。
 
