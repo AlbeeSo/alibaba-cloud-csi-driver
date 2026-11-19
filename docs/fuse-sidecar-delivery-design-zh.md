@@ -2,6 +2,8 @@
 
 更新：2026-11-19。最终选择是业务 sidecar 统一使用 file，现有独立 FUSE Pod 保留 socket RPC。不提供让用户选择 sidecar file/socket 的开关。本文记录分流原则和后续设计边界，不代表两种运行时均已支持。RunD 现有实现继续在当前 PR review；RunC file sidecar 后续使用独立分支/MR，不把两套入口合并重构。
 
+最终能力边界：**RunD sidecar 不支持 fd-passing 和 recovery**，保持 guest 内直接挂载、RRSA 和当前 privileged 要求，不规划借 HostPath 传 host fd。**RunC sidecar 后续单独分支/MR 开发**，复用已有 fd-passing 和对应 driver 的 daemon recovery，实现非特权 sidecar；配置与状态走 file，fd 经同内核 Unix socket 交付。该 RunC 能力尚未实现，不影响当前 RunD PR，也不改变既有独立 FUSE Pod。
+
 ## 选择依据
 
 两种业务 sidecar 都必须在 NodePublish 返回后才能启动。文件负责配置、完整卷集合和执行状态，不承担 fd 传递；若使用 fd-passing，CSI 可以先建立内核挂载再返回，sidecar 随后接管 fd。数据面真正可用仍须等用户态 daemon 初始化完成。使用 file 可复用已有 inventory、generation、worker、状态和 probe，不需要再开发一套以 socket 承载完整配置和结果的异步执行协议。
@@ -21,7 +23,8 @@
 | 首位 sidecar 正常路径免额外配置、免 PVC GET | 已达成要求，尚未实现；当前代码缺少完整绑定元数据时仍可能 GET PVC |
 | webhook | 后续可选能力，当前未实现 |
 | RunC sidecar 非特权 fd-passing | 必须纳入开发设计；已有底层实现可复用，file 异步交接尚未适配 |
-| sidecar recovery | 已有 ossfs2 daemon recovery 可复用；file worker 和状态模型尚未接入，不宣称覆盖 mountproxy/Pod 重启 |
+| RunD sidecar fd-passing/recovery | 明确不支持；请求必须报错，不静默降级或忽略 |
+| RunC sidecar recovery | 复用已有 ossfs2 daemon recovery；file worker 和状态模型尚未接入，不宣称覆盖 mountproxy/Pod 重启 |
 
 这里 RunC/RunD 是讨论两条执行路径的称呼，不要求集群存在名为 runc 的 RuntimeClass。Pod runtimeClassName 为 nil 只表示默认 handler，不能据此断言共享宿主机内核。
 
@@ -169,8 +172,8 @@ sidecar：启动 → 读 file → 接收匹配的 fd
 
 最小新增边界是异步交接、请求与 fd 的关联、重复/过期接收、取消和未接收清理，以及 FileMounter 到已有 FuseFd/Recovery 执行的适配。CSI 重启会丢失其进程持有的 fd，文件不能恢复这个句柄，需明确接管前后的重试/重建边界，不能声称持久配置等于持久 fd。实际实现应复用已有函数和测试，避免复制一套 fd 管理器。
 
-已有 recovery 针对 mountproxy 存活时的 daemon 故障，可以复用，不应重新发明；但 file worker 目前将 daemon 退出视为失败，需要适配“恢复中/恢复成功/耗尽”的结果和 probe 语义。mountproxy 本身退出、整个 Pod 重建的恢复范围须单独说明，不能扩大现有保证。driver 能力要逐个确认，不能仅因 ossfs2 支持就对 ossfs/customfuse 全部开启。
+RunC 复用的已有 recovery 针对 mountproxy 存活时的 daemon 故障，不应重新发明；但 file worker 目前将 daemon 退出视为失败，需要适配“恢复中/恢复成功/耗尽”的结果和 probe 语义。mountproxy 本身退出、整个 Pod 重建的恢复范围须单独说明，不能扩大现有保证。driver 能力要逐个确认，不能仅因 ossfs2 支持就对 ossfs/customfuse 全部开启。此适配不向 RunD 开放 recovery。
 
 RunC 验收需增加：sidecar 和业务容器均非 privileged、无多余 capability/设备授权、CSI 建挂载后 sidecar 延迟启动、重复 fd 交接/失败清理、daemon recovery 复用、CSI 在接管前后重启，以及 inode/既有业务挂载保持有效。启动期内核未服务挂载可能阻塞访问，需验证 kubelet/CRI 启动与挂载检查不会因此死锁。
 
-RunD 的 host 与 guest 不共享内核，不能通过 SCM_RIGHTS 直接交付宿主机 FUSE connection。guest 内非特权方案还需要运行时提供的 guest 内有权限挂载者或其他明确支持；当前没有确认该接口。现有 guest file 仍要求 privileged，这是未解决的权限限制，不能以“文件模式必须特权”解释，也不在本轮私自改造 rund。两条路径统一控制协议，不意味着底层 fd 通道或权限能力相同。
+RunD 的 host 与 guest 不共享内核，不能通过 HostPath 或 SCM_RIGHTS 直接交付宿主机 FUSE connection。最终决定不支持 RunD sidecar fd-passing/recovery，也不将新增 guest 内有权限挂载者或运行时代理作为本方案的开发项。现有 guest file 保持 privileged，这是当前权限边界，不能解释为所有 file 模式都必须特权。两条路径统一控制协议，不意味着底层 fd 通道或权限能力相同。
