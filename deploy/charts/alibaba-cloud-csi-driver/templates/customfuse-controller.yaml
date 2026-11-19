@@ -156,6 +156,7 @@ spec:
         - name: external-customfuse-provisioner
           image: {{ include "imageSpec" (list .Values "externalProvisioner") }}
           args:
+            - --extra-create-metadata=true
             - --csi-address=/csi/csi.sock
             - --http-endpoint=:8131
             - --volume-name-prefix=customfuse

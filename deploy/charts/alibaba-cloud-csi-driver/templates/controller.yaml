@@ -464,6 +464,7 @@ spec:
 {{- if and .Values.csi.oss.enabled .Values.csi.oss.controller.enabled }}
         - name: external-oss-provisioner
           args:
+            - --extra-create-metadata=true
             - --csi-address=/csi/csi.sock
             - --http-endpoint=:8100
             - --volume-name-prefix=oss
