@@ -28,6 +28,7 @@
 | RunC OSS2 fd 双卷 | root UID、非 privileged、drop ALL、无提权，业务可读取两卷 | PASS |
 | RunC SecretRef | 显式只读 Secret volume、短期 STS、双卷可读；desired JSON 无凭据值 | PASS；不代表凭据轮换已完整验收 |
 | 同节点两 Pod 共用两 PVC | 强删一个后，另一个两卷保持 Mounted，原数据及新写哨兵可读 | PASS |
+| CSI daemonset 重启 | 已交接 FD 的 native 双卷及 guest 混合双卷仍可读取 | PASS；不代表尚未交接 FD 的恢复保证 |
 | RunC daemon recovery | 真正终止一卷 daemon、恢复计数增长，同 Pod 两卷可读 | PASS |
 | customfuse guest/native | 固定 custom 名称、自定义入口执行真实 OSS2 客户端、RRSA 双卷 | PASS；不是任意第三方客户端兼容性证明 |
 | native OSS webhook | 真 TLS admission、首位 Always init、双卷、后序 init 使用存储 | PASS |
@@ -43,10 +44,11 @@
 | native 普通/强删及 custom native 强删 | Pod 消失后继续检查 UID 控制目录与宿主机 mountinfo | PASS |
 | native 主进程/daemon 异常后的强删 | 两类异常 UID 的 host 挂载与控制目录均消失 | PASS，分别约 5 秒 |
 | 早期 eager-fd 失败实验 | 两个旧 UID 的 host 挂载和控制目录确认消失 | PASS；不是靠最终销毁节点证明 |
+| 最终整轮 Pod 回收 | 集群仍运行时检查最后 13 个 UID，控制目录与 host UID 挂载均消失，再次独立读取远端哨兵 | PASS |
 | 远端数据安全 | 清理后通过独立 OSS API 再读取原始两个哨兵 | PASS；不是 FUSE 缓存读 |
 | 真实监控 endpoint | HTTP 抓取 CSI Prometheus endpoint，存在 FUSE 样本 | PASS；不能代替逐卷 IO 验收 |
 | guest/direct 客户端 IO | 原版客户端产生逐卷 capacity/iops/throughput 等文件 | PASS |
-| native FD 客户端 IO | 原版与 failover SDK 各双卷对照，排除混入 OSS1 库，仍向未分卷根目录输出 | 未通过，见下文 |
+| native FD 客户端 IO | ACK 标准版与 failover SDK 各双卷对照，排除混入 OSS1 库，仍向未分卷根目录输出 | 未通过，见下文 |
 
 正常删除 native Pod 的部分样例业务循环没有 SIGTERM trap，会耗尽约 90 秒 grace，依靠后续 runtime/kubelet 回收；这些样例只能证明最终清理，不能声称观察到正常 Released ACK。带 trap 的 guest custom 样例已实际观察 Unmounted。公开示例已补业务退出 trap。
 
@@ -71,9 +73,15 @@ NodeUnpublish 发明确的卸载请求；desired 缺失不是卸载命令。强�
 ## 尚未关闭的边界
 
 - **实际 rund RRSA：外部授权阻塞。** 历史自建 runv 的 projected token/原子替换一致性问题不等价于实际 rund 同样存在，也不代表已解决；需具备实际身份后重新验证轮转。长 token 仅是测试窗口。
-- **native FD 的逐卷 SDK IO 指标：尚未通过。** pristine 标准/failover OSS2 在相同真实 PVC 投影下均可读写，但仍写未分卷根目录。仓库中没有该闭源 SDK 的指标路径实现，现有公开 CLI 没有目录重定向参数；需客户端侧确认或修复。不能把根目录统计复制到多个卷冒充正确归属，也不采用额外特权、chroot 或注入库绕过。
+- **native FD 的逐卷 SDK IO 指标：尚未通过。** 未混入额外库的 ACK 标准/failover OSS2 在相同真实 PVC 投影下均可读写，但仍写未分卷根目录。OSSFS2 本身已开源，不能称为闭源。核对[公开 main.cpp](https://github.com/aliyun/ossfs/blob/9cd0c7eb56a380929a083bfd832a49dc951e2ec7/src/main.cpp#L1170)：仅非 FD 分支给 g_mountpoint 赋值，FD 分支改用 `/dev/fd/N` 避免 realpath 阻塞，而 fs_options.mountpoint 来自该全局变量。这与 FD 下丢失卷路径的现象一致，但尚不能据此声称精确证明 ACK 指标扩展的根因；本次查看的公开源码未包含 ACK 镜像使用的 use_metrics/mount_point_info 文件输出实现。需匹配镜像版本的客户端源码或修正版验证；现有 CLI 未提供指标目录重定向参数。不能把根目录统计复制到多个卷冒充正确归属，也不采用额外特权、chroot 或注入库绕过。
 - **不支持 recovery 的真实节点未测。** 当前仅一个支持能力的节点；能力探测/降级有集成测试，不冒充第二种内核 E2E。
 - **完整节点重启/永久断连、跨节点共享卷、全部客户端/架构没有穷举。** 已有进程/协议故障集测不能替代这些真实环境保证，不能据本轮报告宣称已覆盖。
 - **webhook 仅支持 Bound PVC。** WFFC/未绑定卷明确拒绝，不等待调度；无需求自动回退到任意路径。native OSS1/customfuse 直接挂载仍需特权 mountproxy，非特权承诺限定 FD-capable OSS2。
 
 上述缺口保留在验收计划，不因 CI 通过或文档入 PR 而消失。
+
+## 资源和交付收尾
+
+最终回收在验证挂载清理后才销毁集群。自建集群、节点、镜像 namespace/仓库、专用网络连接、bucket、测试角色/策略、密钥对与专用交换机已删除，原有共享 VPC/镜像实例保留。独立查询确认节点角色、EIP、安全组、SLB、OIDC provider 与关联磁盘均不存在；私有回执保存在本地忽略目录。
+
+功能源码和文档已推送同一个 fork PR；功能及第一轮结果文档提交的 lint、增量覆盖率、拼写 CI 均通过。后续纯记录修正仍以 PR 当前 head 的检查为准。当前交付是有完整证据与明确缺口的 review 版本，不把上述客户端/实际运行时问题标记为生产验收通过。
