@@ -31,7 +31,7 @@
 
 ## 共同契约
 
-一个 Pod 由一个 native sidecar 管理多个 FUSE 卷。默认 OSS sidecar 名称固定为 `alibabacloud-csi-mountproxy`；customfuse 使用独立的 `<vendor>-csi-customfuse-<name>` 命名，例如 `example-csi-customfuse-storage`，前后段非空并遵守 Kubernetes 容器名称约束。按保留名称或严格命名规则识别，不解析启动 command/args 或镜像名称；候选存在但结构不合法时明确报错，不当成“没有 sidecar”回退。默认名称不用于 customfuse，名称本身也不授权读取凭据或决定实际请求的 fstype。
+一个 Pod 由一个 native sidecar 管理多个 FUSE 卷。默认 OSS sidecar 名称固定为 `alibabacloud-csi-mountproxy`；customfuse 名称固定为 `alibabacloud-csi-customfuse-mountproxy`。仅按这两个精确保留名称识别，不使用通配规则，不解析启动 command/args 或镜像名称；候选存在但结构不合法时明确报错，不当成“没有 sidecar”回退。默认名称不用于 customfuse，名称本身也不授权读取凭据或决定实际请求的 fstype。
 
 本阶段一个 Pod 只允许一个挂载消费者候选。多个 customfuse 候选或默认与 customfuse 同时存在均明确报歧义，不按数组顺序随便选择。若以后支持多消费者，必须先设计逐卷归属，不能隐式放开。上文四种分流中的“有 sidecar”包括合法的 customfuse 命名候选。当前代码仍只识别默认精确名称；customfuse 命名规则是待实现契约，不宣称当前已生效。
 
@@ -185,7 +185,7 @@ RunD 的 host 与 guest 不共享内核，不能通过 HostPath 或 SCM_RIGHTS �
 
 RunD 和后续 RunC 均必须支持 customfuse，不能仅验通 ossfs2 就视为交付完成。customfuse 不考虑 fd-passing/recovery，也不要求任意 FUSE 客户端支持接管 fd；显式请求这些能力应报错。它复用 file 配置、inventory、逐卷 worker、probe 和清理框架，由自定义入口直接执行挂载。现有子进程集测不等于真实 customfuse 文件系统 E2E 已通过。
 
-用户镜像带兼容的 mountproxy 和自己的客户端/入口，sidecar 名称使用 `<vendor>-csi-customfuse-<name>`。复用既有 customfuse 入口、参数及子进程组管理契约，所需 ConfigMap/Secret 由 Pod 显式挂载，不将 CSI Secret 写进控制 JSON。RunD 继续仅 RRSA；自定义客户端需要适配业务 Pod 身份，不能仅因收到 rrsa 参数就宣称任何文件系统已完成鉴权。RunC 的 Secret volume/身份适配在后续 PR 实现。
+用户镜像带兼容的 mountproxy 和自己的客户端/入口，sidecar 名称固定为 `alibabacloud-csi-customfuse-mountproxy`。复用既有 customfuse 入口、参数及子进程组管理契约，所需 ConfigMap/Secret 由 Pod 显式挂载，不将 CSI Secret 写进控制 JSON。RunD 继续仅 RRSA；自定义客户端需要适配业务 Pod 身份，不能仅因收到 rrsa 参数就宣称任何文件系统已完成鉴权。RunC 的 Secret volume/身份适配在后续 PR 实现。
 
 权限必须按 driver 能力说明：RunC 的非特权目标适用于支持 fd 接管的 driver；customfuse 直接 mount 的客户端所需设备、capability、传播和 privileged 要求需独立验证，不能保证任意客户端均非特权，也不能为减少实现而一律给所有 sidecar privileged。业务应用容器不需要因此开启 privileged。若一个挂载消费者管理的混合卷要求不同权限，容器权限按整体生效，不能按卷隔离或继续将其标称非特权；webhook 不得静默提权，须明确允许所需权限或拒绝不兼容配置。
 
