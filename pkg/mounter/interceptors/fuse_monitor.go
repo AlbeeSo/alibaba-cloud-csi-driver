@@ -82,15 +82,17 @@ func FuseMonitorInterceptor(ctx context.Context, op *mounter.MountOperation, han
 	op.MountResult = res
 	go func() {
 		exitErr, received := <-originalExit
-		if received {
-			workerExit <- exitErr
-		}
-		close(workerExit)
 		// Assume the process exits with no error upon receiving SIGTERM,
 		// and exits with an error in case of unexpected failures.
 		if err == nil && exitErr != nil {
 			monitor.HandleMountFailureOrExit(exitErr)
 		}
+		// The worker may retire its control directory immediately after this
+		// terminal notification. Finish the metric write before handing it off.
+		if received {
+			workerExit <- exitErr
+		}
+		close(workerExit)
 	}()
 
 	if err != nil {
