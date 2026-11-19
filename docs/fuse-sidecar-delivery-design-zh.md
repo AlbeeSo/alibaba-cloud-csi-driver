@@ -177,3 +177,47 @@ RunC 复用的已有 recovery 针对 mountproxy 存活时的 daemon 故障，不
 RunC 验收需增加：sidecar 和业务容器均非 privileged、无多余 capability/设备授权、CSI 建挂载后 sidecar 延迟启动、重复 fd 交接/失败清理、daemon recovery 复用、CSI 在接管前后重启，以及 inode/既有业务挂载保持有效。启动期内核未服务挂载可能阻塞访问，需验证 kubelet/CRI 启动与挂载检查不会因此死锁。
 
 RunD 的 host 与 guest 不共享内核，不能通过 HostPath 或 SCM_RIGHTS 直接交付宿主机 FUSE connection。最终决定不支持 RunD sidecar fd-passing/recovery，也不将新增 guest 内有权限挂载者或运行时代理作为本方案的开发项。现有 guest file 保持 privileged，这是当前权限边界，不能解释为所有 file 模式都必须特权。两条路径统一控制协议，不意味着底层 fd 通道或权限能力相同。
+
+## 可选 webhook：只生成配置，不参与挂载执行
+
+使用 Pod annotation 显式请求注入，例如 `csi.alibabacloud.com/inject-mountproxy: "true"`；该 key 是设计候选，正式名称待实现确定，不是当前可用配置。Deployment 应写在 spec.template.metadata.annotations。未声明时 webhook 不注入，不根据 RuntimeClass 或“发现 FUSE 卷”自动开启。
+
+三个选择分别独立：
+
+| 声明 | 职责 |
+|---|---|
+| Pod 注入 annotation | 请求 webhook 生成 sidecar、控制挂载、probe 等配置 |
+| SC/PV 的 requireSidecar 候选 key | controller 跳过独立 FUSE Pod；node 强制要求 sidecar |
+| 最终 Pod 中保留名称的 sidecar | node 识别、校验并选择消费者，不关心手工还是 webhook 生成 |
+
+关闭或未安装 webhook 时，用户仍可手动配置。annotation 本身不会让 CSI 自动生成容器；RunC requireSidecar 开启但最终没有 sidecar，node 明确 FailedMount。未开启该 key 时仍遵循前述四种分流，不能承诺仅有 annotation 就阻止 controller 创建独立 FUSE Pod。RunD 保持其现有缺 consumer 报错入口。
+
+webhook 负责生成符合公共契约的 Pod：固定名称的 Always init sidecar 放在首位、完整卷集合、默认 file-mode/probe、PodUID 控制目录隔离、数据卷映射、RRSA projection 或支持的 Secret volume、资源及安全上下文。RunD 只允许 RRSA 并保持当前权限；RunC 按 fd-passing 能力生成非特权 sidecar 和 fd 通道配置，不能统一注入 privileged 以绕过差异。需要明确的运行环境/能力配置，不能把 runtimeClassName=nil 当作 runc 的证明。
+
+已存在保留名称时不再插入第二份。合法手动配置保持，不能覆盖自定义镜像/启动入口；明确请求注入但现有配置不兼容、卷类型或 driver 能力不支持时返回可操作的 admission 错误，不静默跳过。重复 admission 应幂等。注入结果仍由 node 校验，不以 annotation 当作可信认证。其他 mutating webhook 可能再次调整 init 顺序，必须通过组合测试验证；不能因自己 prepend 就保证最终顺序永远成立。
+
+对明确请求注入的 Pod，推荐 webhook 不可用时 admission 失败，避免静默遗漏；未请求注入的 Pod 不应受其故障影响。具体 webhook 匹配范围、failurePolicy、超时、证书和升级通过部署设计落实。webhook 不执行 mount、不处理 NodeUnpublish，不持有 FUSE fd，也不复制 CSI Secret 到 Pod env/annotation。
+
+### 卷绑定信息与 admission 成本
+
+webhook 可能需要读取 PVC、PV 和 SC，才能识别目标 driver、参数并生成当前 `/pod-volumes/<PV-name>/mount` 映射。这是 admission 阶段成本，不是 node 每次发布的新增请求；应按 Pod 内唯一卷去重查询，不能简单宣称全过程零额外 API。
+
+必须处理 Pod 创建时 PVC 尚未 Bound 的情况。特别是 WaitForFirstConsumer：如果 webhook 因拿不到 PV 就等待绑定，而绑定需要该 Pod 先进入调度，会形成等待循环；不能把延长 admission 超时当作方案。当前路径协议需要 PV 名，因此 webhook 不能仅靠一个 annotation 就承诺支持所有动态供给场景。
+
+PR 开发前需确认支持范围和解决方式，保持既有 mountproxy 路径协议。可以先限定已绑定卷并明确拒绝未支持场景，但必须标明不支持该 WaitForFirstConsumer 创建流程，不能声称会自动重试完成；如要覆盖未绑定动态卷，需有经过验证的注入/映射方案，不能悄悄改路径、要求用户手填卷列表或阻塞 admission 等 PV。此问题是 webhook 的独立验收项，不反向成为手动 sidecar 核心能力的前置依赖。
+
+webhook 测试还需覆盖：不开 annotation、开 annotation、合法手动 sidecar、同名非法容器、重复 admission、多卷/混合 driver、未绑定或已删除 PVC、API 失败、RRSA/Secret、不同运行环境、与其他 webhook 的顺序交互，以及与 SC key 的四种组合。至少实际验通一条 webhook 注入后的完整挂载和正常/强删清理链路。
+
+## PR 拆分与依赖
+
+建议总计 **3 个功能 PR**，包含当前 RunD PR；设计文档随相关 PR 更新，不再拆一个纯文档前置 PR。每个 PR 自带必要测试、使用说明和验收记录，不把可用性依赖的清理/错误处理留给后续补丁。
+
+| PR | 内容和完成边界 | 依赖 |
+|---|---|---|
+| 1：当前 RunD file 基础 | 当前 PR #13：file 契约、固定名称、RRSA、多卷、probe、失败与回收；明确不支持 fd-passing/recovery；收尾首位正常路径免额外配置/免 PVC GET 等已承诺项 | 不依赖 RunC 或 webhook |
+| 2：RunC 非特权 file sidecar | 独立分支/MR：SC key、controller/node 四种分流、Pod 独占挂载、复用 file 协议与已有 fd-passing/driver recovery、Secret volume、非特权及完整生命周期验收；回归原独立 FUSE Pod | 依赖 PR 1 的公共协议和 worker/probe；不依赖 webhook，手动 Pod 完成验收 |
+| 3：可选 webhook | annotation 驱动的幂等注入、两种环境模板、卷映射与绑定时序处理、部署/证书/失败策略、注入 E2E；不重复实现挂载执行 | 完整覆盖 RunD/RunC 时依赖 PR 1 和 PR 2 的稳定配置契约 |
+
+推荐合并顺序是 PR 1 → PR 2 → PR 3。当前 PR 不加入 RunC 实现；PR 2 从 PR 1 合并后的基线建立，若提前开发则显式以其分支为 base，review 只包含增量。不要因业务需求解耦就宣称代码无依赖。
+
+webhook 在功能上不是两种手动 sidecar 的依赖。PR 3 的调研和测试可并行，但不应先发布猜测 RunC fd 配置的模板。若必须更早交付 RunD-only webhook，可只依赖 PR 1 并明确不支持 RunC，后续再补一个模板扩展 PR；这属于交付计划改变，默认仍按总计三个 PR、不额外拆分。
