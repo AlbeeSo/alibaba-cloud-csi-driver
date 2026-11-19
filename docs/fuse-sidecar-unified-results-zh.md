@@ -1,6 +1,6 @@
 # FUSE sidecar 本轮实现与验收记录
 
-日期：2026-11-19。本文记录统一功能 PR 的当前证据，不将[验收计划](fuse-sidecar-unified-acceptance-zh.md)中的 86 组自动视为全部通过。设计见[交付方案](fuse-sidecar-delivery-design-zh.md)，注入、权限与生命周期契约见[使用补充](fuse-sidecar-webhook-zh.md)。真实目标 rund 的 RRSA 和 native FD 的客户端逐卷 IO 指标仍有缺口，当前不能作为完整生产验收通过的结论。
+初始记录：2026-11-19；客户端定位与本地复验更新：2026-11-20。本文记录统一功能 PR 的当前证据，不将[验收计划](fuse-sidecar-unified-acceptance-zh.md)中的 86 组自动视为全部通过。设计见[交付方案](fuse-sidecar-delivery-design-zh.md)，注入、权限与生命周期契约见[使用补充](fuse-sidecar-webhook-zh.md)。真实目标 rund 的 sidecar RRSA 和新客户端的云上逐卷 IO 指标仍需复验，不能作为完整生产验收通过的结论。
 
 ## 环境与可信边界
 
@@ -8,7 +8,7 @@
 
 测试使用自己的私有 bucket、受限 `run/*` 权限、业务 Pod SA 的 RRSA 身份，以及独立镜像 namespace。CSI node 的 PVC get/list/watch 权限被移除，验证首位 sidecar 的真实正常路径无需 PVC GET。独立 FUSE Pod 回归额外允许同一测试角色信任 CSI 专用 SA，仍仅能访问测试 prefix。
 
-实际目标 rund 参考集群的 RRSA 仍等待管理员侧 IAM 条件；不能用本轮 runv 证据代替。资源标识、凭据、原始日志、JSON 与 kubeconfig 均不进入版本库。
+初始验收时，实际目标 rund 参考集群尚缺 RRSA 条件。2026-11-20 用户已补充配置与既有验证记录，当前需恢复千舟会话后复验业务 sidecar；不能用 runv 或既有独立 Pod 的证据代替。资源标识、凭据、原始日志、JSON 与 kubeconfig 均不进入版本库。
 
 ## 本地与 CI
 
@@ -48,7 +48,7 @@
 | 远端数据安全 | 清理后通过独立 OSS API 再读取原始两个哨兵 | PASS；不是 FUSE 缓存读 |
 | 真实监控 endpoint | HTTP 抓取 CSI Prometheus endpoint，存在 FUSE 样本 | PASS；不能代替逐卷 IO 验收 |
 | guest/direct 客户端 IO | 原版客户端产生逐卷 capacity/iops/throughput 等文件 | PASS |
-| native FD 客户端 IO | ACK 标准版与 failover SDK 各双卷对照，排除混入 OSS1 库，仍向未分卷根目录输出 | 未通过，见下文 |
+| native FD 客户端 IO | 旧 ACK 标准/failover 镜像向根目录输出；修复 SDK 的本地真实 FUSE 双卷输出已独立 | 旧镜像未通过；修复版本地 PASS，云上待复验 |
 
 正常删除 native Pod 的部分样例业务循环没有 SIGTERM trap，会耗尽约 90 秒 grace，依靠后续 runtime/kubelet 回收；这些样例只能证明最终清理，不能声称观察到正常 Released ACK。带 trap 的 guest custom 样例已实际观察 Unmounted。公开示例已补业务退出 trap。
 
@@ -72,8 +72,8 @@ NodeUnpublish 发明确的卸载请求；desired 缺失不是卸载命令。强�
 
 ## 尚未关闭的边界
 
-- **实际 rund RRSA：外部授权阻塞。** 历史自建 runv 的 projected token/原子替换一致性问题不等价于实际 rund 同样存在，也不代表已解决；需具备实际身份后重新验证轮转。长 token 仅是测试窗口。
-- **native FD 的逐卷 SDK IO 指标：尚未通过。** 未混入额外库的 ACK 标准/failover OSS2 在相同真实 PVC 投影下均可读写，但仍写未分卷根目录。OSSFS2 本身已开源，不能称为闭源。核对[公开 main.cpp](https://github.com/aliyun/ossfs/blob/9cd0c7eb56a380929a083bfd832a49dc951e2ec7/src/main.cpp#L1170)：仅非 FD 分支给 g_mountpoint 赋值，FD 分支改用 `/dev/fd/N` 避免 realpath 阻塞，而 fs_options.mountpoint 来自该全局变量。这与 FD 下丢失卷路径的现象一致，但尚不能据此声称精确证明 ACK 指标扩展的根因；本次查看的公开源码未包含 ACK 镜像使用的 use_metrics/mount_point_info 文件输出实现。需匹配镜像版本的客户端源码或修正版验证；现有 CLI 未提供指标目录重定向参数。不能把根目录统计复制到多个卷冒充正确归属，也不采用额外特权、chroot 或注入库绕过。
+- **实际 rund RRSA：需恢复会话后复验 sidecar。** 用户已补充 RRSA 配置及既有令牌换证/真实挂载记录，“缺 IAM 配置”不再是当前阻塞结论。2026-11-20 千舟只读访问要求重新登录，尚未重新验证业务 sidecar 与轮转。历史自建 runv 的一致性问题不能直接推导到实际 rund；长 token 仅是测试窗口。
+- **native FD 的逐卷 SDK IO：根因已确认，客户端本地修复已验证，云上待复验。** 对照测试的两个旧 ACK 镜像仍有问题；用户提供源码后，已直接检查对应 commit。真正的指标链路使用 `fuse_opts.mountpoint`，该值在 FD 模式已改成设备路径；解析失败被忽略，空卷名产生根目录输出。此前关于空 g_mountpoint 的推测不是该指标链路的直接原因。客户端测试分支保留原始逻辑路径用于指标，libfuse 继续用 FD 路径，并拒绝非法指标路径。完整编译和 26 项相关单测通过；真实 FUSE/跨进程 SCM_RIGHTS 的内存 OSS HTTP 夹具中，旧客户端准确失败、修复版 FD 和 direct 两模式均通过，双卷计数分别为 6,656/14,336 字节且根目录无指标。该结果不是云上 OSS/RRSA 或新 SDK daemon recovery E2E；镜像仍待正常仓库访问恢复后上传和复验。没有复制根目录统计冒充逐卷归属，也没有引入额外客户端特权、chroot 或注入库。
 - **不支持 recovery 的真实节点未测。** 当前仅一个支持能力的节点；能力探测/降级有集成测试，不冒充第二种内核 E2E。
 - **完整节点重启/永久断连、跨节点共享卷、全部客户端/架构没有穷举。** 已有进程/协议故障集测不能替代这些真实环境保证，不能据本轮报告宣称已覆盖。
 - **webhook 仅支持 Bound PVC。** WFFC/未绑定卷明确拒绝，不等待调度；无需求自动回退到任意路径。native OSS1/customfuse 直接挂载仍需特权 mountproxy，非特权承诺限定 FD-capable OSS2。

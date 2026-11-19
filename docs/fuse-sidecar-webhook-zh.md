@@ -58,4 +58,4 @@ recovery 复用已有 OSS2 supervisor 和内核 flush 控制，仍需要可写�
 
 file adapter 保留 MountRequest.Target 和生命周期身份。开启客户端指标时，同一 PVC 额外投影到 `/run/fuse.ossfs/<PV>/globalmount`，OSS 子进程使用该路径；数据路径不能用软链接代替，因为客户端会规范化路径。webhook 自动添加第二个 volumeMount；手工模板需声明同一投影，也可通过 `use_metrics=false` 关闭客户端 IO 指标，生命周期指标不受影响。只有 `/var/run/ossfs/<PV>` 指标目录使用容器内软链接，指向 UID 隔离目录里的本卷 metrics。没有新增 hostPath 或特权，JSON 目标协议不变。内部 MountOperation.ClientTarget 仅用于客户端 argv，恢复连接选择和卸载仍使用原始 Target；socket 模式不设置这个字段。自定义客户端不被套用 OSS 的路径规则。
 
-单元/集成回归已覆盖双卷隔离、幂等、冲突拒绝和原始目标不变。真实 guest/direct 客户端已产出逐卷 IO 指标；原生 FD 路径尚未通过这项验收：隔离的原版和 failover OSS2 镜像均可读写，但指标写入未分卷的根目录。该对照排除了混入 OSS1 库的影响，具体客户端路径选择原因仍待定位；不能将生命周期指标正常当成完整监控验收通过。
+单元/集成回归已覆盖双卷隔离、幂等、冲突拒绝和原始目标不变。真实 guest/direct 客户端已产出逐卷 IO 指标。原生 FD 的两个旧 ACK 镜像可读写但指标落根目录；2026-11-20 已确认 SDK 错把 libfuse 设备路径传给指标解析器。客户端修复分离逻辑路径，FD/direct 两种本地真实 FUSE 双卷集成都通过，云上新镜像仍待复验。不能将本地 HTTP 夹具或生命周期指标正常当成真实 OSS/RRSA 的完整监控验收通过。
