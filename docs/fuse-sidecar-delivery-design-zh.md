@@ -10,7 +10,7 @@
 
 现有独立 FUSE Pod 的共享挂载、同步调用与业务 sidecar 的 Pod 独占挂载、异步执行本来就不同，不能因为都用 socket 而假装无需分叉。代码按消费者和挂载范围组织，避免把传输选择继续塞进 runtimeType 判断。统一的是 sidecar 交付和状态模型，不是隐藏 runc/rund 的目标准备、传播和异常回收差异。
 
-权限要求优先于减少改动：不能为了使用 file 就要求业务 Pod 内的 mountproxy 以 privileged 运行。RunC 设计必须纳入已有 fd-passing 的适配，目标是 CSI 负责有权限的内核挂载、非特权 sidecar 接管 fd。普通业务容器也不需要 privileged。file + fd socket 是两种互补通道，不提供用户任选 file/socket 配置交付的开关。RunD 当前 privileged 要求仍是实现限制，不能借 RunC 的同内核方案宣称已解决。
+权限要求优先于减少改动：不能为了使用 file 就一律要求业务 Pod 内的 mountproxy 以 privileged 运行。RunC 对 fd-capable driver 复用已有 fd-passing，目标是 CSI 负责内核挂载、非特权 sidecar 接管 fd；customfuse 直接挂载的权限独立说明，不要求支持 fd-passing/recovery。普通业务容器不需要 privileged。file + fd socket 是互补通道，不提供用户任选 file/socket 配置交付的开关。RunD 当前 privileged 要求仍是限制，不能借 RunC 同内核方案宣称已解决。
 
 ## 实现状态
 
@@ -25,12 +25,15 @@
 | RunC sidecar 非特权 fd-passing | 必须纳入开发设计；已有底层实现可复用，file 异步交接尚未适配 |
 | RunD sidecar fd-passing/recovery | 明确不支持；请求必须报错，不静默降级或忽略 |
 | RunC sidecar recovery | 复用已有 ossfs2 daemon recovery；file worker 和状态模型尚未接入，不宣称覆盖 mountproxy/Pod 重启 |
+| customfuse sidecar | 必须纳入两个环境的交付；独立命名、file 直接挂载，不支持 fd-passing/recovery；命名和真实挂载 E2E 尚未落实 |
 
 这里 RunC/RunD 是讨论两条执行路径的称呼，不要求集群存在名为 runc 的 RuntimeClass。Pod runtimeClassName 为 nil 只表示默认 handler，不能据此断言共享宿主机内核。
 
 ## 共同契约
 
-一个 Pod 由一个 native sidecar 管理多个 FUSE 卷，名称固定为 `alibabacloud-csi-mountproxy`。按名称识别，不解析启动 command/args 或镜像名称；有该名称但结构不合法时明确报错，不当成“没有 sidecar”回退。
+一个 Pod 由一个 native sidecar 管理多个 FUSE 卷。默认 OSS sidecar 名称固定为 `alibabacloud-csi-mountproxy`；customfuse 使用独立的 `<vendor>-csi-customfuse-<name>` 命名，例如 `example-csi-customfuse-storage`，前后段非空并遵守 Kubernetes 容器名称约束。按保留名称或严格命名规则识别，不解析启动 command/args 或镜像名称；候选存在但结构不合法时明确报错，不当成“没有 sidecar”回退。默认名称不用于 customfuse，名称本身也不授权读取凭据或决定实际请求的 fstype。
+
+本阶段一个 Pod 只允许一个挂载消费者候选。多个 customfuse 候选或默认与 customfuse 同时存在均明确报歧义，不按数组顺序随便选择。若以后支持多消费者，必须先设计逐卷归属，不能隐式放开。上文四种分流中的“有 sidecar”包括合法的 customfuse 命名候选。当前代码仍只识别默认精确名称；customfuse 命名规则是待实现契约，不宣称当前已生效。
 
 结构包括 restartPolicy=Always 的 init container、所需 probe、UID 隔离和数据/控制挂载。推荐放 initContainers 首位，startupProbe 等全部期望卷成功才允许后续 init 和业务启动；不能只看“目前已收到的卷”就放行。增加卷修改 volumes/volumeMounts，不要求用户修改 expected-volumes 或启动参数。webhook 和用户手工配置遵守同一契约。
 
@@ -174,9 +177,21 @@ sidecar：启动 → 读 file → 接收匹配的 fd
 
 RunC 复用的已有 recovery 针对 mountproxy 存活时的 daemon 故障，不应重新发明；但 file worker 目前将 daemon 退出视为失败，需要适配“恢复中/恢复成功/耗尽”的结果和 probe 语义。mountproxy 本身退出、整个 Pod 重建的恢复范围须单独说明，不能扩大现有保证。driver 能力要逐个确认，不能仅因 ossfs2 支持就对 ossfs/customfuse 全部开启。此适配不向 RunD 开放 recovery。
 
-RunC 验收需增加：sidecar 和业务容器均非 privileged、无多余 capability/设备授权、CSI 建挂载后 sidecar 延迟启动、重复 fd 交接/失败清理、daemon recovery 复用、CSI 在接管前后重启，以及 inode/既有业务挂载保持有效。启动期内核未服务挂载可能阻塞访问，需验证 kubelet/CRI 启动与挂载检查不会因此死锁。
+RunC fd-capable driver 验收需增加：sidecar 和业务容器均非 privileged、无多余 capability/设备授权、CSI 建挂载后 sidecar 延迟启动、重复 fd 交接/失败清理、daemon recovery 复用、CSI 在接管前后重启，以及 inode/既有业务挂载保持有效。启动期内核未服务挂载可能阻塞访问，需验证 kubelet/CRI 启动与挂载检查不会因此死锁。customfuse 的权限按下一节独立验收。
 
 RunD 的 host 与 guest 不共享内核，不能通过 HostPath 或 SCM_RIGHTS 直接交付宿主机 FUSE connection。最终决定不支持 RunD sidecar fd-passing/recovery，也不将新增 guest 内有权限挂载者或运行时代理作为本方案的开发项。现有 guest file 保持 privileged，这是当前权限边界，不能解释为所有 file 模式都必须特权。两条路径统一控制协议，不意味着底层 fd 通道或权限能力相同。
+
+## customfuse：必须支持的独立能力分支
+
+RunD 和后续 RunC 均必须支持 customfuse，不能仅验通 ossfs2 就视为交付完成。customfuse 不考虑 fd-passing/recovery，也不要求任意 FUSE 客户端支持接管 fd；显式请求这些能力应报错。它复用 file 配置、inventory、逐卷 worker、probe 和清理框架，由自定义入口直接执行挂载。现有子进程集测不等于真实 customfuse 文件系统 E2E 已通过。
+
+用户镜像带兼容的 mountproxy 和自己的客户端/入口，sidecar 名称使用 `<vendor>-csi-customfuse-<name>`。复用既有 customfuse 入口、参数及子进程组管理契约，所需 ConfigMap/Secret 由 Pod 显式挂载，不将 CSI Secret 写进控制 JSON。RunD 继续仅 RRSA；自定义客户端需要适配业务 Pod 身份，不能仅因收到 rrsa 参数就宣称任何文件系统已完成鉴权。RunC 的 Secret volume/身份适配在后续 PR 实现。
+
+权限必须按 driver 能力说明：RunC 的非特权目标适用于支持 fd 接管的 driver；customfuse 直接 mount 的客户端所需设备、capability、传播和 privileged 要求需独立验证，不能保证任意客户端均非特权，也不能为减少实现而一律给所有 sidecar privileged。业务应用容器不需要因此开启 privileged。若一个挂载消费者管理的混合卷要求不同权限，容器权限按整体生效，不能按卷隔离或继续将其标称非特权；webhook 不得静默提权，须明确允许所需权限或拒绝不兼容配置。
+
+验收必须包括真实 customfuse 双卷挂载、自定义入口失败/退出、子进程回收、部分失败隔离、取消、正常删除/强删/CSI 重启、无残留挂载和远端哨兵保留；同时覆盖独立命名的识别、同名非法配置、多候选拒绝、卷目标映射和 probe 屏障。混合 driver 是否支持由显式能力和单消费者契约决定，不因名字自动允许。优先用单测/子进程集测覆盖参数和异常，真实 E2E 验关键数据面与生命周期；RunD、RunC 分别记录结果。
+
+PR 1 纳入 RunD customfuse 的命名支持、契约与验收；PR 2 纳入 RunC customfuse 的直接挂载分支及权限验收，与 fd-capable 非特权路线区分；PR 3 支持对应命名和自定义镜像的可选注入。仍按三个功能 PR 交付，不把 customfuse 当作无限期后续增强。
 
 ## 可选 webhook：只生成配置，不参与挂载执行
 
@@ -192,7 +207,7 @@ RunD 的 host 与 guest 不共享内核，不能通过 HostPath 或 SCM_RIGHTS �
 
 关闭或未安装 webhook 时，用户仍可手动配置。annotation 本身不会让 CSI 自动生成容器；RunC requireSidecar 开启但最终没有 sidecar，node 明确 FailedMount。未开启该 key 时仍遵循前述四种分流，不能承诺仅有 annotation 就阻止 controller 创建独立 FUSE Pod。RunD 保持其现有缺 consumer 报错入口。
 
-webhook 负责生成符合公共契约的 Pod：固定名称的 Always init sidecar 放在首位、完整卷集合、默认 file-mode/probe、PodUID 控制目录隔离、数据卷映射、RRSA projection 或支持的 Secret volume、资源及安全上下文。RunD 只允许 RRSA 并保持当前权限；RunC 按 fd-passing 能力生成非特权 sidecar 和 fd 通道配置，不能统一注入 privileged 以绕过差异。需要明确的运行环境/能力配置，不能把 runtimeClassName=nil 当作 runc 的证明。
+webhook 负责生成符合公共契约的 Pod：按 OSS 默认名称或 customfuse 独立命名的 Always init sidecar 放在首位、完整卷集合、默认 file-mode/probe、PodUID 控制目录隔离、数据卷映射、RRSA projection 或支持的 Secret volume、资源及安全上下文。RunD 只允许 RRSA 并保持当前权限；RunC 按 driver 能力区分非特权 fd 接管与 customfuse 直接挂载，不能统一注入 privileged 或静默提权。需要明确的运行环境/能力配置，不能把 runtimeClassName=nil 当作 runc 的证明。
 
 已存在保留名称时不再插入第二份。合法手动配置保持，不能覆盖自定义镜像/启动入口；明确请求注入但现有配置不兼容、卷类型或 driver 能力不支持时返回可操作的 admission 错误，不静默跳过。重复 admission 应幂等。注入结果仍由 node 校验，不以 annotation 当作可信认证。其他 mutating webhook 可能再次调整 init 顺序，必须通过组合测试验证；不能因自己 prepend 就保证最终顺序永远成立。
 
