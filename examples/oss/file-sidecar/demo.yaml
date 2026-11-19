@@ -24,7 +24,8 @@ spec:
     volumeHandle: ossfs2-file-a
     volumeAttributes:
       runtimeClass: rund
-    # Set this binding contract at PV creation; it avoids a cold PVC GET.
+      mountMode: sidecar
+      # Optional diagnostic metadata; a first init sidecar never needs a PVC GET.
       csi.storage.k8s.io/pv/name: ossfs2-file-a
       csi.storage.k8s.io/pvc/name: oss-first
       csi.storage.k8s.io/pvc/namespace: fuse-file-demo
@@ -52,6 +53,7 @@ spec:
     volumeHandle: ossfs2-file-b
     volumeAttributes:
       runtimeClass: rund
+      mountMode: sidecar
       csi.storage.k8s.io/pv/name: ossfs2-file-b
       csi.storage.k8s.io/pvc/name: oss-second
       csi.storage.k8s.io/pvc/namespace: fuse-file-demo
@@ -158,7 +160,8 @@ spec:
               test "$(cat "/first/write-$POD_UID")" = "$POD_UID"
               if touch /second/forbidden; then echo 'read-only mount accepted a write'; exit 1; fi
               echo 'OSSFS2: two prefixes, write-back and read-only checks passed'
-              while true; do sleep 10; done
+              trap 'exit 0' TERM INT
+              while true; do sleep 1; done
           volumeMounts:
             - {name: first, mountPath: /first, mountPropagation: HostToContainer}
             - {name: second, mountPath: /second, readOnly: true, mountPropagation: HostToContainer}

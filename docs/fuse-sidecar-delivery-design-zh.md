@@ -4,7 +4,7 @@
 
 统一在一个功能 PR 内完成公共基础、RunD、RunC、customfuse 和可选 webhook，按独立 commit review，不再使用独立 RunC MR/三 PR 依赖计划。完整待执行测试见[单 PR 验收计划](fuse-sidecar-unified-acceptance-zh.md)，不是现有全部通过的声明。
 
-最终能力边界：**RunD sidecar 不支持 fd-passing 和 recovery**，保持 guest 内直接挂载、RRSA 和当前 privileged 要求，不规划借 HostPath 传 host fd。**RunC fd-capable sidecar 复用已有 fd-passing 和对应 driver 的 daemon recovery，实现非特权**；配置与状态走 file，fd 经同内核 Unix socket 交付。公共适配已有本地实现和集成测试，真实挂载验收尚未完成。customfuse 两种环境均使用直接挂载且不支持 fd-passing/recovery，权限独立说明。既有独立 FUSE Pod 的能力和默认行为保持。
+最终能力边界：**RunD sidecar 不支持 fd-passing 和 recovery**，保持 guest 内直接挂载、RRSA 和当前 privileged 要求，不规划借 HostPath 传 host fd。**RunC fd-capable sidecar 复用已有 fd-passing 和对应 driver 的 daemon recovery，实现非特权**；配置与状态走 file，fd 经同内核 Unix socket 交付。公共适配和关键真实挂载链路已有验证，尚有监控及运行时验收缺口，见[当前检查点](fuse-sidecar-iteration-status-zh.md)。customfuse 两种环境均使用直接挂载且不支持 fd-passing/recovery，权限独立说明。既有独立 FUSE Pod 的能力和默认行为保持。
 
 ## 选择依据
 
@@ -19,15 +19,15 @@
 | 项目 | 状态 |
 |---|---|
 | RunD 手动 native sidecar、file 请求、多卷 inventory、probe、回收 | 已实现；详见[现有设计](fuse-manual-sidecar-design-zh.md)和[验收记录](fuse-manual-sidecar-validation-zh.md) |
-| guest file 仅 RRSA、固定 sidecar 名称 | 已实现，提交 a441f4830；Linux OSS/filevolume 测试、集测与 CI 通过；本次命名/鉴权更新未重跑云 E2E |
-| RunC 业务 sidecar、file 异步交付 | 已实现本地适配；真实内核挂载和云 E2E 待验收 |
+| guest file 仅 RRSA、固定 sidecar 名称 | 已实现；自建 ACK 1.33/runv 变体的 RRSA 双卷通过，实际 rund RRSA 环境等待管理员授权 |
+| RunC 业务 sidecar、file 异步交付 | 已实现；实际共享内核双卷挂载通过 |
 | 卷级参数、controller 跳过建 FUSE Pod | PV `volumeAttributes.mountMode: sidecar`；SC parameters 用于动态透传，静态 PV 无需 SC；OSS/customfuse controller 已接入 |
 | 首位 sidecar 正常路径免额外配置、免 PVC GET | 已实现；1/10/100 卷真实 NodePublish 调用、禁止 PVC GET 的集成测试通过 |
-| webhook | 已实现可选 admission 和 chart；本地 HTTP/多卷/幂等测试通过，集群验收待执行；仅支持已绑定 PVC |
-| RunC sidecar 非特权 fd-passing | 已实现 OSS2 file+SCM_RIGHTS 适配；真实 fd 交接、重复发布、长路径测试通过，真实 FUSE E2E 待执行 |
+| webhook | 已实现可选 admission 和 chart；HTTP/多卷/幂等测试及 native OSS、guest customfuse 真 TLS 注入挂载通过；仅支持已绑定 PVC |
+| RunC sidecar 非特权 fd-passing | OSS2 file+SCM_RIGHTS 真实双卷通过，UID 0、drop ALL、无 privileged/SYS_ADMIN；其他客户端不承诺同等能力 |
 | RunD sidecar fd-passing/recovery | 明确不支持；请求必须报错，不静默降级或忽略 |
-| RunC sidecar recovery | 已接入已有 OSS2 supervisor 和 file 状态/监控；不覆盖 mountproxy/Pod 重启，实际内核 recovery E2E 待执行 |
-| customfuse sidecar | 已实现独立名称、RRSA/原生 Secret 投影、file 多卷发布；本地集测通过，真实客户端挂载 E2E 待执行 |
+| RunC sidecar recovery | OSS2 supervisor 和 file 状态/监控已接入，真实内核单 daemon 故障恢复通过；不覆盖 mountproxy/Pod 重启 |
+| customfuse sidecar | 独立名称、RRSA/原生 Secret 投影、file 多卷发布已实现；guest/native 的真实自定义入口双卷通过，入口采用 OSS2 客户端，不代表任意第三方客户端均已验证 |
 
 这里 RunC/RunD 是讨论两条执行路径的称呼，不要求集群存在名为 runc 的 RuntimeClass。Pod runtimeClassName 为 nil 只表示默认 handler，不能据此断言共享宿主机内核。
 
@@ -144,9 +144,9 @@ RunD 已有测试结果不能替代 RunC 验收：runc 的 mount namespace、传
 
 ## 开销要求与尚待落地的细节
 
-正常首位 sidecar 应无需额外绑定元数据、无新增 PVC GET。非首位但前序 init 不挂 PVC，也不因顺序检查查询；只有前序存在 PVC 且需要确定交集时，才考虑已有元数据优先、查询兜底。这个顺序检查目标与当前独立绑定校验的实现不同，尚待调整；跳过绑定校验也意味着失去当前针对手工交换 PV/PVC 映射的额外保护，不能同时宣称两者均保留。
+正常首位 sidecar 无需额外绑定元数据、无新增 PVC GET。非首位但前序 init 不挂 PVC，也不因顺序检查查询；只有前序存在 PVC 且需要确定交集时，才使用已有元数据优先、查询兜底。上述顺序已实现并有 1/10/100 卷集成测试。跳过绑定校验意味着正常路径不提供额外的手工 PV/PVC 映射真实性校验，不能同时宣称两者均保留。
 
-RunC 开发前需补齐具体契约，但不重新讨论已定的 file/socket 选择：
+RunC 实现与验收遵循以下契约，不重新讨论已定的 file/socket 选择：
 
 1. 新 key 的正式名称、布尔解析、错误提示与参数保留测试。
 2. 复用 PodUID 控制目录、manifest/desired/result 和默认 file-mode/probe 契约，确认 runc 的挂载映射。
@@ -169,15 +169,17 @@ RunC 开发前需补齐具体契约，但不重新讨论已定的 file/socket �
 当前差异是 client.Mount 同步“建挂载→连接并发送→等执行结果”，失败时会清理新挂载；同 Pod sidecar 首次尚未启动，不能直接调用它后返回成功。需要拆出或复用底层步骤，增加 Pod/卷/generation 绑定的异步 fd 交接。文件继续交付配置与状态，socket 仅交付对应连接的 fd，不把 fd 数字写入 JSON 冒充可恢复句柄。
 
 ```text
-CSI：校验 → 创建 Pod 独占内核 FUSE 挂载并暂持 fd
-   → 持久发布 file 配置、准备 fd 交接端点 → NodePublish 返回
-sidecar：启动 → 读 file → 接收匹配的 fd
+CSI：校验 → 创建普通目标目录、持久发布 file 配置、准备延迟 fd 端点
+   → NodePublish 返回
+sidecar：启动 → 读 file → 向 CSI 请求匹配的 fd
+CSI：此时才建立 Pod 独占内核 FUSE 挂载 → 交付 fd
+sidecar：接收 fd
         → 复用支持该能力的 driver 执行链路 → 写结果 → probe 放行
 ```
 
 最小新增边界是异步交接、请求与 fd 的关联、重复/过期接收、取消和未接收清理，以及 FileMounter 到已有 FuseFd/Recovery 执行的适配。CSI 重启会丢失其进程持有的 fd，文件不能恢复这个句柄，需明确接管前后的重试/重建边界，不能声称持久配置等于持久 fd。实际实现应复用已有函数和测试，避免复制一套 fd 管理器。
 
-RunC 复用的已有 recovery 针对 mountproxy 存活时的 daemon 故障，不应重新发明；但 file worker 目前将 daemon 退出视为失败，需要适配“恢复中/恢复成功/耗尽”的结果和 probe 语义。mountproxy 本身退出、整个 Pod 重建的恢复范围须单独说明，不能扩大现有保证。driver 能力要逐个确认，不能仅因 ossfs2 支持就对 ossfs/customfuse 全部开启。此适配不向 RunD 开放 recovery。
+RunC 复用的已有 recovery 针对 mountproxy 存活时的 daemon 故障；file worker 已对接恢复回调和最终退出状态。真实双卷终止单 daemon 后恢复通过。mountproxy 本身被强杀时，本轮实际观察 kubelet 重建容器因失联 FUSE 挂载点 stat 失败而报错，Pod 非 Ready，需要重建 Pod；强删后已验证宿主机挂载及控制目录清理。不能扩大为 sidecar 进程的原地恢复保证。driver 能力逐个确认，不能仅因 ossfs2 支持就对 ossfs/customfuse 全部开启。此适配不向 RunD 开放 recovery。
 
 RunC fd-capable driver 验收需增加：sidecar 和业务容器均非 privileged、无多余 capability/设备授权、CSI 建挂载后 sidecar 延迟启动、重复 fd 交接/失败清理、daemon recovery 复用、CSI 在接管前后重启，以及 inode/既有业务挂载保持有效。启动期内核未服务挂载可能阻塞访问，需验证 kubelet/CRI 启动与挂载检查不会因此死锁。customfuse 的权限按下一节独立验收。
 
