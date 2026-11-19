@@ -3,6 +3,7 @@
 本分支实现集群 CSI DaemonSet 向业务 Pod 内的 mountproxy 交付挂载请求。2026-11-18 已修复并真实复测 PVC 绑定校验、无 ACK 的标准卸载和控制文件 GC；双卷 RRSA、混合 ossfs1/ossfs2、失败隔离与异常退出链路已有证据。自建旧运行时存在共享文件一致性问题；实际 rund 的补充原生文件实验已通过，没有复现该问题，但完整 FUSE/RRSA 链路仍须在实际环境验收。
 
 - [验证记录与未通过项](fuse-manual-sidecar-validation-zh.md)
+- [RunD file 与 RunC socket 后续方案、分流和实现边界](fuse-sidecar-file-and-socket-design-zh.md)
 - [逐项根因、标准依据与修复](fuse-manual-sidecar-rootcause-zh.md)
 - [使用方式与双卷 RRSA 示例](fuse-manual-sidecar-usage-zh.md)
 - [完整 corner case 验收矩阵及 ACK Fluid internal 调研](fuse-manual-sidecar-test-plan-zh.md)
