@@ -58,4 +58,9 @@ recovery 复用已有 OSS2 supervisor 和内核 flush 控制，仍需要可写�
 
 file adapter 保留 MountRequest.Target 和生命周期身份。开启客户端指标时，同一 PVC 额外投影到 `/run/fuse.ossfs/<PV>/globalmount`，OSS 子进程使用该路径；数据路径不能用软链接代替，因为客户端会规范化路径。webhook 自动添加第二个 volumeMount；手工模板需声明同一投影，也可通过 `use_metrics=false` 关闭客户端 IO 指标，生命周期指标不受影响。只有 `/var/run/ossfs/<PV>` 指标目录使用容器内软链接，指向 UID 隔离目录里的本卷 metrics。没有新增 hostPath 或特权，JSON 目标协议不变。内部 MountOperation.ClientTarget 仅用于客户端 argv，恢复连接选择和卸载仍使用原始 Target；socket 模式不设置这个字段。自定义客户端不被套用 OSS 的路径规则。
 
-单元/集成回归已覆盖双卷隔离、幂等、冲突拒绝和原始目标不变。真实 guest/direct 客户端已产出逐卷 IO 指标。原生 FD 的两个旧 ACK 镜像可读写但指标落根目录；2026-11-20 已确认 SDK 错把 libfuse 设备路径传给指标解析器。客户端修复分离逻辑路径，FD/direct 两种本地真实 FUSE 双卷集成都通过，云上新镜像仍待复验。不能将本地 HTTP 夹具或生命周期指标正常当成真实 OSS/RRSA 的完整监控验收通过。
+单元/集成回归已覆盖双卷隔离、幂等、冲突拒绝和原始目标不变。真实 guest/direct 客户端已产出逐卷 IO 指标。原生 FD 的两个旧 ACK 镜像可读写但指标落根目录；2026-11-20 已确认 SDK 错把 libfuse 设备路径传给指标解析器。客户端修复分离逻辑路径，FD/direct 两种本地真实 FUSE 双卷集成和新镜像在 Kubernetes 的真实 OSS/RRSA 双卷、逐卷 IO/恢复计数及 Prometheus 均已验证；根目录无共享指标。详见[最终验收记录](fuse-sidecar-unified-results-zh.md)。
+
+
+## 恢复与节点重启的使用边界
+
+OSS2 daemon recovery 不承诺所有旧业务文件 FD 透明继续使用：遇到 ESTALE/EBADF 时应用应关闭并重开；不要删除 SDK 的旧 inode/句柄检查。完整节点重启后应等待 Node 新 boot ID、容器新实例及新 IO，旧 Ready/历史日志不能作为恢复成功依据。Pod 终止期间 CSI 拒绝新挂载，使用可重试的 Aborted 保留 kubelet 的卸载元数据；用户仍通过标准 Pod 删除/重建操作，不手工删控制文件或数据目录。

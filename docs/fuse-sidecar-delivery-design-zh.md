@@ -206,10 +206,10 @@ RunD 和后续 RunC 均必须支持 customfuse，不能仅验通 ossfs2 就视�
 | 声明 | 职责 |
 |---|---|
 | Pod 注入 annotation | 请求 webhook 生成 sidecar、控制挂载、probe 等配置 |
-| SC/PV 的 requireSidecar 候选 key | controller 跳过独立 FUSE Pod；node 强制要求 sidecar |
+| SC parameters / PV volumeAttributes 的 `mountMode: sidecar` | controller 跳过独立 FUSE Pod；node 强制要求 sidecar |
 | 最终 Pod 中保留名称的 sidecar | node 识别、校验并选择消费者，不关心手工还是 webhook 生成 |
 
-关闭或未安装 webhook 时，用户仍可手动配置。annotation 本身不会让 CSI 自动生成容器；RunC requireSidecar 开启但最终没有 sidecar，node 明确 FailedMount。未开启该 key 时仍遵循前述四种分流，不能承诺仅有 annotation 就阻止 controller 创建独立 FUSE Pod。RunD 保持其现有缺 consumer 报错入口。
+关闭或未安装 webhook 时，用户仍可手动配置。annotation 本身不会让 CSI 自动生成容器；RunC 配置 `mountMode: sidecar` 但最终没有 sidecar，node 明确 FailedMount。未开启该 key 时仍遵循前述四种分流，不能承诺仅有 annotation 就阻止 controller 创建独立 FUSE Pod。RunD 保持其现有缺 consumer 报错入口。
 
 webhook 负责生成符合公共契约的 Pod：按 OSS 默认名称或 customfuse 独立命名的 Always init sidecar 放在首位、完整卷集合、默认 file-mode/probe、PodUID 控制目录隔离、数据卷映射、RRSA projection 或支持的 Secret volume、资源及安全上下文。RunD 只允许 RRSA 并保持当前权限；RunC 按 driver 能力区分非特权 fd 接管与 customfuse 直接挂载，不能统一注入 privileged 或静默提权。需要明确的运行环境/能力配置，不能把 runtimeClassName=nil 当作 runc 的证明。
 
@@ -234,3 +234,8 @@ webhook 测试还需覆盖：不开 annotation、开 annotation、合法手动 s
 customfuse两种环境都属于交付范围，不考虑fd-passing/recovery；RunC的去特权承诺按driver能力区分，不默认提权。ossfs2复用已有可用failover镜像和代码，recovery不支持节点仍保留fd和非特权。完整能力、错误、监控和清理测试见[验收矩阵](fuse-sidecar-unified-acceptance-zh.md)。未实现项不得因文档入PR而宣称已支持。
 
 代码内部仍有依赖：运行时适配复用公共 file 协议，webhook 复用稳定的手动配置契约。手动模式不依赖 webhook。合并条件是整个约定范围和验收完成，不因部分路径通过就将其余能力留作后续 PR。
+
+
+## 终止期间的重建请求与错误分类
+
+节点重启时 kubelet 可能重建已发布卷，与 Pod 删除并发。已确认身份和节点的 terminating Pod 不开始新挂载，但返回 `Aborted`，表示该卷终止/清理仍在进行；不能返回会被 kubelet 视为已结束失败的 `FailedPrecondition`，否则它可能移除自己的 `vol_data.json`，使后续 NewUnmounter 无法调用 NodeUnpublish。身份/节点不匹配仍明确拒绝，不因该例外弱化隔离。OSS guest/native 和 customfuse 复用校验并保留状态码，无新增 API 请求。根因、Kubernetes 源码依据和重启验证见[验收记录](fuse-sidecar-unified-results-zh.md)。
