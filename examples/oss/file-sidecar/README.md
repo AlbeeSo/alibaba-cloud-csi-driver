@@ -17,6 +17,8 @@ startup/readiness probe 均执行 `csi-mount-proxy-server --file-check-ready`。
 
 数据路径保持 `/pod-volumes/<PV-name>/mount`，不是 PVC 名或 volumeHandle。同一 PVC 的第二个 `/run/fuse.ossfs/<PV-name>/globalmount` projection 用于既有 OSS SDK 的指标路径；不是新卷或新 hostPath。可以显式 `use_metrics=false` 关闭 SDK IO 指标，但 mountproxy 生命周期指标仍保留。native FD 的 SDK 逐卷 IO 目前仍有验收缺口，见[结果记录](../../../docs/fuse-sidecar-unified-results-zh.md)。
 
+历史 `RundCSIProtocol3=true` 会让集群 CSI 提前跳过 rund Pod 的发布。本手工 sidecar 路径要求执行发布的 CSI 不启用该历史跳过逻辑；不要将该测试方式等同于 csi-agent 的旧协议。
+
 ## RunC OSS2 非特权配置
 
 以同一模板为基础：

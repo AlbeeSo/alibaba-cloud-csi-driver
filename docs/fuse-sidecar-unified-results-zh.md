@@ -72,7 +72,7 @@ NodeUnpublish 发明确的卸载请求；desired 缺失不是卸载命令。强�
 
 ## 尚未关闭的边界
 
-- **实际 rund RRSA：需恢复会话后复验 sidecar。** 用户已补充 RRSA 配置及既有令牌换证/真实挂载记录，“缺 IAM 配置”不再是当前阻塞结论。2026-11-20 已通过 CLI 恢复只读访问，并确认实际 RuntimeClass 的 handler 为 rund；现有 CSI 仍是原版本，尚未用新镜像重新验证业务 sidecar 与轮转。历史自建 runv 的一致性问题不能直接推导到实际 rund；长 token 仅是测试窗口。
+- **实际 rund RRSA：本轮手工 sidecar 已验证。** 2026-11-20 使用实际 handler 为 rund 的 RuntimeClass、标准 projected ServiceAccount token 和最终镜像，完成双卷真实 OSS、逐卷 IO、600 秒 token 在 guest 中可见轮转及新 token 的 STS 换证。没有修改 runtime 或 IAM，也没有使用静态 AK。此结果不覆盖完整 STS 会话到期后的 SDK 自动续期、所有 rund 版本及任意文件替换缓存行为。历史自建 runv 的问题不能据此外推到所有 rund。
 - **native FD 的逐卷 SDK IO：根因已确认，客户端本地修复已验证，云上待复验。** 对照测试的两个旧 ACK 镜像仍有问题；用户提供源码后，已直接检查对应 commit。真正的指标链路使用 `fuse_opts.mountpoint`，该值在 FD 模式已改成设备路径；解析失败被忽略，空卷名产生根目录输出。此前关于空 g_mountpoint 的推测不是该指标链路的直接原因。客户端测试分支保留原始逻辑路径用于指标，libfuse 继续用 FD 路径，并拒绝非法指标路径。完整编译和 26 项相关单测通过；真实 FUSE/跨进程 SCM_RIGHTS 的内存 OSS HTTP 夹具中，旧客户端准确失败、修复版 FD 和 direct 两模式均通过，双卷计数分别为 6,656/14,336 字节且根目录无指标。该结果不是云上 OSS/RRSA 或新 SDK daemon recovery E2E；测试镜像现已由源码流水线构建并可匿名完整拉取；最终镜像内的客户端也通过相同 FD/direct 双卷回归，云上真实 OSS/RRSA 与新 SDK daemon recovery 仍待复验。没有复制根目录统计冒充逐卷归属，也没有引入额外客户端特权、chroot 或注入库。
 - **不支持 recovery 的真实节点未测。** 当前仅一个支持能力的节点；能力探测/降级有集成测试，不冒充第二种内核 E2E。
 - **完整节点重启/永久断连、跨节点共享卷、全部客户端/架构没有穷举。** 已有进程/协议故障集测不能替代这些真实环境保证，不能据本轮报告宣称已覆盖。
@@ -94,3 +94,25 @@ OSSFS2 Dockerfile 的 mountproxy 构建器由 Go 1.26.4 升级至官方 Go 1.26.
 构建期间发现 `RUN git clone` 同名分支会命中旧 Docker 层缓存；该次构建已取消，最终验收使用关闭缓存、确认重新执行 clone 的流水线结果。后续重用可变分支时必须失效 clone 缓存或使用不可变源码标识，不能仅凭流水线显示的分支名称确认版本。
 
 升级后 Linux proxy/filevolume 测试通过，两个 mountproxy 程序交叉编译通过，PR 的 lint、增量覆盖率与拼写检查通过。使用最终镜像中的 OSSFS2 再执行真实 FUSE 双卷回归：FD 模式通过跨进程 SCM_RIGHTS 传递，客户端 effective/bounding capabilities 均为空；FD 与普通 direct 模式的两个吞吐计数均分别为 6,656 和 14,336 字节，共享根目录无指标文件。后端为内存 OSS HTTP 夹具；此结果不替代真实 OSS、RRSA、kubelet 生命周期或新 SDK recovery 的集群验收。
+
+
+## 实际 rund 环境复验
+
+本轮使用实际 `rund` handler，手工配置一个 Always init mountproxy，未启用 webhook。仅在选定节点临时替换 CSI Pod：DaemonSet 使用 OnDelete，关闭该测试模板中的历史 `RundCSIProtocol3` 跳过逻辑；其他节点不主动重启。该旧开关为 true 时仍会提前返回，本轮不是验证 csi-agent 的历史协议。原镜像、参数和更新策略保存后按原值恢复，测试记录保留回滚核对结果。
+
+| 项目 | 实际结果 |
+| --- | --- |
+| RRSA 双卷 | guest 内真实 OSS 两卷读取、第一卷写回及独立 API 读取、第二卷只读拒绝写入均通过 |
+| SDK IO 与 CSI 监控 | 两卷独立 throughput/iops 文件；CSI Prometheus endpoint 抓到对应容量、IO、挂载状态等样本 |
+| 短 token 轮转 | 标准 projection 设为 600 秒；guest 读到 expiration 变化，随后用新 token 换取 STS 成功 |
+| 部分失败 | 正常卷成功，另一卷访问不存在的 bucket；状态 Failed、startupProbe Unhealthy、业务未启动，无新的 FailedMount |
+| 部分失败后删除 | 本 Pod UID 的 host 挂载、kubelet 目录及控制目录消失；共用正常 PVC 的另一 Pod 两卷保持可读 |
+| Ready Pod 强删 | API 强删后继续检查实际 host 状态，UID 挂载及目录全部消失；另一 Pod 两卷仍可读 |
+| 正常退出 | 观察到 Mounted → Unmounted，随后 UID host 挂载和目录全部消失 |
+| 远端数据安全 | 所有数据 Pod 清理后，独立 RRSA Pod 直接调用 OSS API 确认三个测试对象内容完整，再仅删除这三个已知对象 |
+
+独立 API 夹具首次请求未按 SDK 的 query/form 参数约定发送 STS，导致业务校验退出；修正夹具后重测通过，未修改已成功的挂载实现。失败尝试的 UID 同样纳入最终清理检查。该首次失败不记为存储实现回归，也不省略失败记录。
+
+本轮共检查四个数据 Pod UID 的 host 挂载、kubelet Pod 目录和 UID 控制目录，均在测试节点仍运行、新 CSI 尚未恢复前消失。清理不使用递归数据目录删除。真实 OSS API 检查发生在挂载和 Pod 已消失之后，不能用 FUSE 缓存解释其数据保留结果。RunC 新 SDK 的 Kubernetes FD/recovery 复验仍单独保留：本轮实际 rund 不支持该能力；最终镜像的真实 Linux FD 夹具已通过，不能替代该 Kubernetes 场景。
+
+配套 CSI plugin 镜像扫描另外发现 Go 1.26.10、distroless zlib 和 tracing 依赖问题，已升级官方 Go 1.26.11、固定修复后的 distroless digest、otel/trace v1.47.0 并同步 vendor。Linux OSS/filevolume 测试、完整 CSI 编译通过，重建后的 CSI 镜像也通过 CVE 门禁；从最终镜像核对实际依赖和 zlib 包版本，更新 `hack/base-image-deps.txt`。
