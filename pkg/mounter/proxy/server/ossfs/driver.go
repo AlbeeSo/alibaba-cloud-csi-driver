@@ -15,6 +15,7 @@ import (
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/interceptors"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/diagnostic"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/server"
 	mounterutils "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils/agentidentity"
@@ -170,9 +171,9 @@ func (m *extendedMounter) ExtendedMount(ctx context.Context, op *mounter.MountOp
 
 	var stderrBuf bytes.Buffer
 	multiWriter := io.MultiWriter(os.Stderr, &stderrBuf)
-	sw := server.NewSwitchableWriter(multiWriter)
+	sw := server.NewSwitchableWriter(multiWriter, op.Secrets)
 	cmd := newMountCmd(args...)
-	cmd.Stdout = os.Stdout
+	cmd.Stdout = diagnostic.NewWriter(os.Stdout, op.Secrets)
 	cmd.Stderr = sw
 	defer func() {
 		sw.SwitchTarget(os.Stderr)
@@ -184,7 +185,7 @@ func (m *extendedMounter) ExtendedMount(ctx context.Context, op *mounter.MountOp
 	}
 
 	pid := cmd.Process.Pid
-	logger.Info("Started ossfs", "pid", pid, "args", args)
+	logger.Info("Started ossfs", "pid", pid, "args", diagnostic.Args(args, op.Secrets))
 
 	if dumpable := os.Getenv("SET_DUMPABLE"); dumpable == "true" {
 		err = unix.Prctl(unix.PR_SET_DUMPABLE, 1, 0, 0, 0)
@@ -202,6 +203,7 @@ func (m *extendedMounter) ExtendedMount(ctx context.Context, op *mounter.MountOp
 		defer m.driver.pids.Delete(pid)
 
 		err := cmd.Wait()
+		diagnostic.FlushCommand(cmd)
 		if err != nil {
 			stderrContent := stderrBuf.String()
 			if stderrContent != "" {

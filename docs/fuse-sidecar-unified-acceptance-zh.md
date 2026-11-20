@@ -36,7 +36,7 @@ nil RuntimeClass 不是运行时能力证据；覆盖默认确为 runc、默认�
 E2E 收敛为可复用的少量端到端场景族：
 
 1. RunD真实双卷RRSA、业务读写/RO、probe与监控、正常及强删清理；旧runv与实际rund分别记证据。实际身份轮转需真实环境，不用fake STS冒充。
-2. RunC真实OSS2 failover镜像、fd接管和非特权、daemon故障恢复、业务旧引用保持、监控与清理；与CSI重启/接管边界故障组合在同一隔离部署内验证。
+2. RunC真实OSS2 failover镜像、fd接管和非特权、daemon故障恢复、旧业务文件句柄的错误可见与重新打开、监控与清理；与CSI重启/接管边界故障组合在同一隔离部署内验证。
 3. recovery不支持的真实节点：一次完整降级/非特权/读写/指标链路，能力读取失败等其余变体由U/I覆盖。
 4. customfuse在RunD/RunC各一条真实双卷及关键退出/清理链路，不重复枚举所有脚本失败形式。
 5. webhook在D/C各一条实际注入→挂载→失败可见→清理链路；可与上述场景复用部署，四组合的完整断言以U/I为主。绑定/调度时序须至少验证声明支持的真实流程。
@@ -107,7 +107,7 @@ E2E 收敛为可复用的少量端到端场景族：
 | D07 | 错 UID/key/generation 的 fd、重复交接、多个 fd、截断/异常控制消息、客户端中途断开 | 身份关联、拒绝错投、fd 关闭和接管去重；无跨 Pod连接，/proc fd计数不增长；I |
 | D08 | CSI 在建 mount 前后、文件写入前后、fd 接收前后重启 | 明确哪个进程持 fd；配置持久不等于 fd 持久；重试不假恢复原连接、不泄漏；I/E |
 | D09 | 接管后 driver 启动失败、FUSE_INIT 卡住/失败、response/结果缺失 | 未初始化不 Ready；清理用不会因未服务 FUSE 卡 D-state 的路径；I/E |
-| D10 | OSS2 daemon SIGKILL、并发真实 I/O、反复故障 | 复用既有 fd 持有与 supervise，恢复后原挂载/inode/业务引用有效，无透明重挂；I/E |
+| D10 | OSS2 daemon SIGKILL、并发真实 I/O、反复故障 | 复用既有 fd 持有与 supervise，恢复后保留原 FUSE 挂载/连接，新打开文件和新 I/O 可用；旧业务文件 FD 按既有 SDK 语义可能 ESTALE/EBADF，须显式重开，不能宣称旧 inode/文件句柄透明保留；I/E |
 | D11 | recovery 重启失败、重试/backoff耗尽、取消与drain竞态 | 中间态/成功/耗尽与 probe/metrics 一致；终止后不再恢复，另一卷不受影响；I/E |
 | D12 | recovery sysfs 缺失、只读、权限不足、flush失败 | 明确诊断；不能靠 privileged=true 随意修复或把坏状态报 healthy；I/E |
 | D13 | mountproxy SIGKILL/OOM、Pod重建、节点重启 | 与 daemon recovery 区分；不扩大既有恢复保证；正常接管或明确不可恢复并清理，禁止假 Ready；I/E |
@@ -198,4 +198,4 @@ E2E 收敛为可复用的少量端到端场景族：
 
 每个用例必须记录 PASS/FAIL/NOT RUN、代码提交、镜像digest/客户端版本、环境能力、测试层级和证据位置；未实现项不能填PASS。先跑有意义的U/I，再选关键E；故障注入重跑对应回归，不反复全量E2E。新目标的单PR合并条件是全部约定能力和P0生命周期/安全项通过；目标环境授权或运行时缺陷导致的未验收须明确列出，不能自动视为允许带缺口合并。
 
-真实链路至少保存：Pod/CSI/sidecar时间线、逐卷generation/session/phase、probe和脱敏Event、fd/进程/mount namespace归属、实际业务读写与远端哨兵校验、最终无残留证据。fd/recovery还要证明原连接/既有业务引用有效；非特权要核对实际Pod和进程权限。资源信息、JWT、AK/SK和原始含敏感JSON仅保存在忽略目录，不提交。先证明产品回收，再销毁测试云资源，最后独立核查费用资源已删除。
+真实链路至少保存：Pod/CSI/sidecar时间线、逐卷generation/session/phase、probe和脱敏Event、fd/进程/mount namespace归属、实际业务读写与远端哨兵校验、最终无残留证据。fd/recovery还要证明原 FUSE 连接继续使用、新打开文件可用，以及旧业务文件句柄按 SDK 契约报错/重新打开的行为；非特权要核对实际Pod和进程权限。资源信息、JWT、AK/SK和原始含敏感JSON仅保存在忽略目录，不提交。先证明产品回收，再销毁测试云资源，最后独立核查费用资源已删除。

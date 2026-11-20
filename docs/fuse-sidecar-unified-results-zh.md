@@ -116,3 +116,12 @@ OSSFS2 Dockerfile 的 mountproxy 构建器由 Go 1.26.4 升级至官方 Go 1.26.
 本轮共检查四个数据 Pod UID 的 host 挂载、kubelet Pod 目录和 UID 控制目录，均在测试节点仍运行、新 CSI 尚未恢复前消失。清理不使用递归数据目录删除。真实 OSS API 检查发生在挂载和 Pod 已消失之后，不能用 FUSE 缓存解释其数据保留结果。RunC 新 SDK 的 Kubernetes FD/recovery 复验仍单独保留：本轮实际 rund 不支持该能力；最终镜像的真实 Linux FD 夹具已通过，不能替代该 Kubernetes 场景。
 
 配套 CSI plugin 镜像扫描另外发现 Go 1.26.10、distroless zlib 和 tracing 依赖问题，已升级官方 Go 1.26.11、固定修复后的 distroless digest、otel/trace v1.47.0 并同步 vendor。Linux OSS/filevolume 测试、完整 CSI 编译通过，重建后的 CSI 镜像也通过 CVE 门禁；从最终镜像核对实际依赖和 zlib 包版本，更新 `hack/base-image-deps.txt`。
+
+
+## 继续验收发现的 SDK 句柄边界与诊断修复
+
+新版 SDK 的 native 双卷在真实 Kubernetes 节点验证了非特权 FD 交接与 daemon 重启。额外保留业务文件 FD 的实验发现：daemon 重启后，旧 inode/文件句柄可能返回 ESTALE/EBADF。客户端 `RecoveryFileHandleMapper::is_valid_ino` 有意拒绝旧 ID，相应 SDK 测试也要求拒绝旧句柄并允许重开；这不是 RunD 问题，也不能通过移除 ID 检查修复。此前验收计划中“旧业务引用保持”的表述过强，现明确区分：原 FUSE 挂载/连接继续使用、新打开文件恢复可用，不能承诺所有旧业务文件 FD 透明延续。按这一既有契约重测，两次 SIGKILL 后业务显式重开失效句柄，并持续读取两卷新对象，容器无重启，逐卷恢复计数与 Prometheus 指标更新。
+
+失败诊断还暴露 SDK stderr 中的临时 AccessKeyId 会进入状态/probe。新增共享诊断过滤器：在 stdout/stderr 分行完整识别后再发布，覆盖已知请求 Secret 值、常见 AK/JWT、带名 token/secret/password、HTTP authorization 等形式；错误状态在截断前再次过滤，保留卷和失败原因。未完成的行跨 Write/输出切换保持私有，超长单行明确省略，避免从截断边缘泄露部分凭据；正常多行错误仍按既有有限尾缓冲传递。切换输出目标不等待可能阻塞的日志 sink。子进程 EOF 刷新末行，关闭/超时仍按原进程组生命周期处理。
+
+该过滤器处理 mountproxy 收集并公开的诊断，不能替代任意自定义客户端自行写文件的日志策略，也不能识别任意无标签、未知格式的私密业务数据。增加了真实子进程无换行输出、分片凭据、输出切换、超长单行、协议错误截断和 race 回归。

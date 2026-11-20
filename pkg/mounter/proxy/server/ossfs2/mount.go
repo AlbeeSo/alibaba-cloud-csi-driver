@@ -14,6 +14,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/diagnostic"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/server"
 	mounterutils "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -49,7 +50,7 @@ func (m *extendedMounter) mount(ctx context.Context, op *mounter.MountOperation)
 
 	// Capture stderr during initial mount for error diagnostics
 	var stderrBuf bytes.Buffer
-	sw := server.NewSwitchableWriter(io.MultiWriter(os.Stderr, &stderrBuf))
+	sw := server.NewSwitchableWriter(io.MultiWriter(os.Stderr, &stderrBuf), op.Secrets)
 
 	proc, err := m.startAndWaitReady(ctx, op, recovery, sw)
 	sw.SwitchTarget(os.Stderr)
@@ -106,6 +107,7 @@ func (m *extendedMounter) startAndWaitReady(
 	var cmdDone atomic.Bool
 	go func() {
 		waitErr := cmd.Wait()
+		diagnostic.FlushCommand(cmd)
 		if waitErr == nil {
 			waitErr = fmt.Errorf("ossfs2 exited with no error")
 		}

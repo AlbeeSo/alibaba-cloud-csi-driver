@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/diagnostic"
 	"golang.org/x/sys/unix"
 	"k8s.io/klog/v2"
 )
@@ -362,14 +363,12 @@ func rejectSymlinks(root, relative string) error {
 
 func redact(message string, d *Desired) string {
 	if d != nil {
+		message = diagnostic.Redact(message, d.Mount.Secrets)
 		if d.Mount.Source != "" {
-			message = strings.ReplaceAll(message, d.Mount.Source, "[source]")
+			message = strings.ReplaceAll(message, diagnostic.Redact(d.Mount.Source, d.Mount.Secrets), "[source]")
 		}
-		for _, value := range d.Mount.Secrets {
-			if value != "" {
-				message = strings.ReplaceAll(message, value, "[redacted]")
-			}
-		}
+	} else {
+		message = diagnostic.Redact(message, nil)
 	}
 	if len(message) > 4096 {
 		message = message[:4096]

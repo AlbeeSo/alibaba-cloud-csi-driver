@@ -181,7 +181,7 @@ sidecar：接收 fd
 
 RunC 复用的已有 recovery 针对 mountproxy 存活时的 daemon 故障；file worker 已对接恢复回调和最终退出状态。真实双卷终止单 daemon 后恢复通过。mountproxy 本身被强杀时，本轮实际观察 kubelet 重建容器因失联 FUSE 挂载点 stat 失败而报错，Pod 非 Ready，需要重建 Pod；强删后已验证宿主机挂载及控制目录清理。不能扩大为 sidecar 进程的原地恢复保证。driver 能力逐个确认，不能仅因 ossfs2 支持就对 ossfs/customfuse 全部开启。此适配不向 RunD 开放 recovery。
 
-RunC fd-capable driver 验收需增加：sidecar 和业务容器均非 privileged、无多余 capability/设备授权、CSI 建挂载后 sidecar 延迟启动、重复 fd 交接/失败清理、daemon recovery 复用、CSI 在接管前后重启，以及 inode/既有业务挂载保持有效。启动期内核未服务挂载可能阻塞访问，需验证 kubelet/CRI 启动与挂载检查不会因此死锁。customfuse 的权限按下一节独立验收。
+RunC fd-capable driver 验收需增加：sidecar 和业务容器均非 privileged、无多余 capability/设备授权、CSI 建挂载后 sidecar 延迟启动、重复 fd 交接/失败清理、daemon recovery 复用、CSI 在接管前后重启，以及 原 FUSE 挂载与连接继续使用；已打开的业务文件句柄按 SDK 既有契约可能返回 ESTALE/EBADF，需要应用重新打开。启动期内核未服务挂载可能阻塞访问，需验证 kubelet/CRI 启动与挂载检查不会因此死锁。customfuse 的权限按下一节独立验收。
 
 RunD 的 host 与 guest 不共享内核，不能通过 HostPath 或 SCM_RIGHTS 直接交付宿主机 FUSE connection。最终决定不支持 RunD sidecar fd-passing/recovery，也不将新增 guest 内有权限挂载者或运行时代理作为本方案的开发项。现有 guest file 保持 privileged，这是当前权限边界，不能解释为所有 file 模式都必须特权。两条路径统一控制协议，不意味着底层 fd 通道或权限能力相同。
 
