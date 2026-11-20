@@ -114,6 +114,15 @@ func TestBuildOssfs2Args(t *testing.T) {
 	}
 }
 
+func TestRequiredRecoveryRejectsMissingFUSEConnection(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reader.Close(); _ = writer.Close() })
+	m := &extendedMounter{driver: &Driver{}}
+	err = m.mount(t.Context(), &mounter.MountOperation{Target: t.TempDir(), FuseFd: int(reader.Fd()), Recovery: true, RequireRecovery: true})
+	require.ErrorContains(t, err, "required FUSE recovery cannot identify its connection")
+}
+
 // TestFuseFdSurvivesDupAndGC verifies that the unix.Dup pattern used in runCmd
 // keeps the original fd alive across multiple child process lifecycles and GC cycles.
 // This is the core test for the fix: without Dup, os.NewFile's GC finalizer would

@@ -29,6 +29,7 @@ import (
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/common"
 	fpm "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/fuse_pod_manager"
 	ossfpm "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/fuse_pod_manager/oss"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/filevolume"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
 	mounterutils "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
 	"google.golang.org/grpc/codes"
@@ -172,6 +173,13 @@ func (cs *controllerServer) ControllerPublishVolume(ctx context.Context, req *cs
 	// resolve agenticBucket/bucketSpace options
 	if err := resolveAgenticBucketOptions(opts, cs.metadata); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	requireSidecar, err := filevolume.RequireSidecar(req.VolumeContext)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if requireSidecar {
+		return &csi.ControllerPublishVolumeResponse{}, nil
 	}
 
 	// Note: Skip controller publish for direct=true.

@@ -44,6 +44,7 @@ import (
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/disk"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/ens"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/features"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/fusesidecarwebhook"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/labeler"
 	csilog "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/log"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/metric"
@@ -100,14 +101,21 @@ const (
 )
 
 var (
-	endpoint             = flag.String("endpoint", "unix://tmp/csi.sock", "CSI endpoint")
-	nodeID               = flag.String("nodeid", "", "node id")
-	runAsController      = flag.Bool("run-as-controller", false, "Only run as controller service (deprecated)")
-	runControllerService = flag.Bool("run-controller-service", true, "activate CSI controller service")
-	runNodeService       = flag.Bool("run-node-service", true, "activate CSI node service")
-	runLabeler           = flag.Bool("run-labeler", false, "Run the centralized node metadata labeler (patches max-disk annotation and disk type labels on nodes)")
-	useLabeler           = flag.Bool("use-labeler", false, "Use the label added by the labeler, and disable fetch from OpenAPI")
-	driver               = flag.String("driver", TypePluginDISK, "CSI Driver")
+	runFuseWebhook         = flag.Bool("run-fuse-sidecar-webhook", false, "run optional FUSE sidecar admission instead of CSI services")
+	fuseWebhookAddress     = flag.String("fuse-webhook-address", ":8443", "FUSE admission HTTPS address")
+	fuseWebhookCert        = flag.String("fuse-webhook-cert", "/tls/tls.crt", "FUSE admission TLS certificate")
+	fuseWebhookKey         = flag.String("fuse-webhook-key", "/tls/tls.key", "FUSE admission TLS private key")
+	fuseWebhookOSSImage    = flag.String("fuse-webhook-oss-image", "", "compatible OSS mountproxy sidecar image")
+	fuseWebhookCustomImage = flag.String("fuse-webhook-custom-image", "", "compatible customfuse sidecar image")
+	fuseWebhookPrivileged  = flag.Bool("fuse-webhook-allow-privileged", false, "explicitly permit injection of privileged direct-mount consumers")
+	endpoint               = flag.String("endpoint", "unix://tmp/csi.sock", "CSI endpoint")
+	nodeID                 = flag.String("nodeid", "", "node id")
+	runAsController        = flag.Bool("run-as-controller", false, "Only run as controller service (deprecated)")
+	runControllerService   = flag.Bool("run-controller-service", true, "activate CSI controller service")
+	runNodeService         = flag.Bool("run-node-service", true, "activate CSI node service")
+	runLabeler             = flag.Bool("run-labeler", false, "Run the centralized node metadata labeler (patches max-disk annotation and disk type labels on nodes)")
+	useLabeler             = flag.Bool("use-labeler", false, "Use the label added by the labeler, and disable fetch from OpenAPI")
+	driver                 = flag.String("driver", TypePluginDISK, "CSI Driver")
 	// Deprecated: rootDir is instead by KUBELET_ROOT_DIR env.
 	rootDir = flag.String("rootdir", "/var/lib/kubelet/csi-plugins", "Kubernetes root directory")
 
@@ -157,6 +165,14 @@ func setupFlags() {
 
 func main() {
 	setupFlags()
+	if *runFuseWebhook {
+		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+		defer cancel()
+		if err := fusesidecarwebhook.Run(ctx, *fuseWebhookAddress, *fuseWebhookCert, *fuseWebhookKey, fusesidecarwebhook.Injector{OSSImage: *fuseWebhookOSSImage, CustomImage: *fuseWebhookCustomImage, AllowPrivileged: *fuseWebhookPrivileged}); err != nil {
+			klog.Exitf("FUSE admission failed: %v", err)
+		}
+		return
+	}
 	serviceType := utils.GetServiceType(*runAsController, *runControllerService, *runNodeService)
 
 	// enable pprof analyse
@@ -300,6 +316,7 @@ func main() {
 			nasServers = nas.NewServers(meta, *endpoint, utils.Node, csiCfg, resolvedNasMountProxySock)
 		}
 
+		var fileGC sync.Once
 		for _, driverName := range driverNames {
 			endpoint := replaceCsiEndpoint(driverName, *endpoint)
 			klog.Infof("CSI endpoint for driver %s: %s", driverName, endpoint)
@@ -332,6 +349,9 @@ func main() {
 				driver = nasServers
 			case TypePluginOSS:
 				driver = oss.NewServers(endpoint, meta, serviceType, csiCfg, k8sVersion, *mountProxySock)
+				if serviceType&utils.Node != 0 {
+					fileGC.Do(func() { wg.Go(func() { oss.RunFileStateGC(ctx) }) })
+				}
 			case TypePluginDISK:
 				driver = disk.NewServers(meta, ecsClient, endpoint, serviceType, csiCfg, *useLabeler)
 			case TypePluginCPFS:
@@ -359,6 +379,9 @@ func main() {
 				driver = bmcpfs.NewServers(meta, endpoint, serviceType)
 			case TypePluginCustomFuse:
 				driver = customfuse.NewServers(endpoint, serviceType, csiCfg, k8sVersion, *customfuseMountProxySock)
+				if serviceType&utils.Node != 0 {
+					fileGC.Do(func() { wg.Go(func() { oss.RunFileStateGC(ctx) }) })
+				}
 			default:
 				klog.Fatalf("CSI start failed, not support driver: %s", driverName)
 			}

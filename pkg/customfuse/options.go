@@ -71,8 +71,11 @@ type fuseOptions struct {
 	// environment variables to the FUSE entrypoint. "agent-identity" exchanges
 	// a sandbox token for a scoped STS credential in mount-proxy and delivers
 	// it to the entrypoint on stdin, refreshed for the mount lifetime.
-	// Planned future value: "rrsa".
+	// Business-sidecar file mode additionally accepts "rrsa"; its entrypoint
+	// consumes the Pod-projected token and owns the credential exchange.
 	AuthType string
+	// SecretRef is used only by explicit business-sidecar projections.
+	SecretRef string
 	// SandboxId identifies the sandbox whose token is exchanged for a scoped
 	// STS credential. Required when AuthType is "agent-identity".
 	SandboxId string
@@ -319,6 +322,8 @@ func parseOptions(req publishRequest) (*fuseOptions, error) {
 			opts.FuseType = value
 		case "authtype":
 			opts.AuthType = value
+		case "secretref":
+			opts.SecretRef = value
 		case "sandboxid":
 			opts.SandboxId = value
 		case "sandboxcredprovidername", "credentialprovidername":

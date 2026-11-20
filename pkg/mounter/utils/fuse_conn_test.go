@@ -5,8 +5,41 @@ package utils
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	mountinfo "github.com/moby/sys/mountinfo"
 )
+
+func TestFuseConnectionIDParsesPastUnderlyingBind(t *testing.T) {
+	const table = "100 1 253:3 /data /target rw - ext4 /dev/root rw\n101 100 0:386 / /target rw - fuse ossfs2 rw\n102 1 0:777 / /another-pod rw - fuse ossfs2 rw\n"
+	infos, err := mountinfo.GetMountsFromReader(strings.NewReader(table), exactMountEntries("/target"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := fuseConnectionID(infos)
+	if err != nil || id != 386 {
+		t.Fatalf("must select the propagated FUSE connection, got %d: %v", id, err)
+	}
+}
+
+func TestFuseConnectionIDIgnoresUnderlyingPVCBind(t *testing.T) {
+	for _, infos := range [][]*mountinfo.Info{
+		{{FSType: "ext4", Minor: 3}, {FSType: "fuse", Minor: 386}},
+		{{FSType: "fuse.ossfs2", Minor: 386}, {FSType: "ext4", Minor: 3}},
+		{{FSType: "fuse.virtiofs", Minor: 2}, {FSType: "fuse.ossfs2", Minor: 386}},
+	} {
+		id, err := fuseConnectionID(infos)
+		if err != nil || id != 386 {
+			t.Fatalf("selected connection %d: %v", id, err)
+		}
+	}
+	for _, infos := range [][]*mountinfo.Info{nil, {{FSType: "ext4", Minor: 3}}, {{FSType: "fuse.virtiofs", Minor: 2}}, {{FSType: "fuse", Minor: 386}, {FSType: "fuse", Minor: 387}}} {
+		if _, err := fuseConnectionID(infos); err == nil {
+			t.Fatal("must not flush an unverified connection")
+		}
+	}
+}
 
 func TestFlushFuseConnection(t *testing.T) {
 	tmp := t.TempDir()

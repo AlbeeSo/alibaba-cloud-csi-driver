@@ -475,7 +475,7 @@ func TestExtendedMount(t *testing.T) {
 	// it has to stay sendable: the proxy caps a message at proxy.MaxMsgSize and
 	// refuses the request outright past that, so an unbounded capture can destroy the
 	// very diagnosis it exists to deliver.
-	t.Run("an oversized stderr keeps its end and says it was cut", func(t *testing.T) {
+	t.Run("an oversized stderr line is omitted safely", func(t *testing.T) {
 		// ExtendedMount mirrors the entrypoint's stderr to os.Stderr, which under a
 		// test is the test log. Sending it away keeps this about what was retained
 		// rather than about pages of filler in the output.
@@ -498,9 +498,8 @@ func TestExtendedMount(t *testing.T) {
 		err = m.ExtendedMount(context.Background(), &mounter.MountOperation{Target: t.TempDir()})
 
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), last, "what a caller acts on is at the end of the stream")
-		assert.Contains(t, err.Error(), "earlier byte(s) dropped",
-			"a partial stream must not read as the whole of what the client said")
+		assert.NotContains(t, err.Error(), last, "an unclassified truncated line must not publish a partial credential")
+		assert.Contains(t, err.Error(), "oversized client diagnostic omitted")
 		assert.Less(t, len(err.Error()), stderrTailLimit+2048,
 			"the error stays well inside the %d byte message cap", proxy.MaxMsgSize)
 	})

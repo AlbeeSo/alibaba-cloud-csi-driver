@@ -12,14 +12,14 @@ import (
 	"syscall"
 	"time"
 
-	"golang.org/x/sys/unix"
-
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/interceptors"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/diagnostic"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/server"
 	mounterutils "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils/agentidentity"
+	"golang.org/x/sys/unix"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 	"k8s.io/mount-utils"
@@ -85,6 +85,10 @@ func (h *Driver) Mount(ctx context.Context, req *proxy.MountRequest, fuseFd int)
 }
 
 func (h *Driver) Init() {}
+
+func (h *Driver) MountFile(ctx context.Context, req *proxy.MountRequest, ready func(string) (bool, error)) (<-chan error, error) {
+	return server.MountFile(ctx, h.Mounter, req, ready)
+}
 
 // ApplyOptionDefaults applies driver-specific option defaults to mount options.
 // Rules are divided into:
@@ -157,15 +161,19 @@ func (m *extendedMounter) ExtendedMount(ctx context.Context, op *mounter.MountOp
 	options := m.driver.ApplyOptionDefaults(op.Options)
 	target := op.Target
 
-	args := mount.MakeMountArgs(op.Source, op.Target, "", options)
+	clientTarget := op.Target
+	if op.ClientTarget != "" {
+		clientTarget = op.ClientTarget
+	}
+	args := mount.MakeMountArgs(op.Source, clientTarget, "", options)
 	args = append(args, op.Args...)
 	args = append(args, "-f")
 
 	var stderrBuf bytes.Buffer
 	multiWriter := io.MultiWriter(os.Stderr, &stderrBuf)
-	sw := server.NewSwitchableWriter(multiWriter)
+	sw := server.NewSwitchableWriter(multiWriter, op.Secrets)
 	cmd := newMountCmd(args...)
-	cmd.Stdout = os.Stdout
+	cmd.Stdout = diagnostic.NewWriter(os.Stdout, op.Secrets)
 	cmd.Stderr = sw
 	defer func() {
 		sw.SwitchTarget(os.Stderr)
@@ -177,7 +185,7 @@ func (m *extendedMounter) ExtendedMount(ctx context.Context, op *mounter.MountOp
 	}
 
 	pid := cmd.Process.Pid
-	logger.Info("Started ossfs", "pid", pid, "args", args)
+	logger.Info("Started ossfs", "pid", pid, "args", diagnostic.Args(args, op.Secrets))
 
 	if dumpable := os.Getenv("SET_DUMPABLE"); dumpable == "true" {
 		err = unix.Prctl(unix.PR_SET_DUMPABLE, 1, 0, 0, 0)
@@ -195,6 +203,7 @@ func (m *extendedMounter) ExtendedMount(ctx context.Context, op *mounter.MountOp
 		defer m.driver.pids.Delete(pid)
 
 		err := cmd.Wait()
+		diagnostic.FlushCommand(cmd)
 		if err != nil {
 			stderrContent := stderrBuf.String()
 			if stderrContent != "" {
@@ -220,6 +229,11 @@ func (m *extendedMounter) ExtendedMount(ctx context.Context, op *mounter.MountOp
 			return false, fmt.Errorf("ossfs exited")
 		default:
 			notMnt, err := m.IsLikelyNotMountPoint(target)
+			if op.MountReady != nil {
+				var ready bool
+				ready, err = op.MountReady(target)
+				notMnt = !ready
+			}
 			if err != nil {
 				logger.Error(err, "check mountpoint", "mountpoint", target)
 				return false, nil

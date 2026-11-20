@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sort"
 	"time"
 
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy"
@@ -156,6 +157,12 @@ func (c *client) Mount(ctx context.Context, req *proxy.MountRequest) (*proxy.Res
 // prepareFuseFd opens /dev/fuse, performs the kernel mount, and returns the fd.
 // It also strips FUSE-specific options from req.Options, leaving only daemon options.
 func (c *client) prepareFuseFd(ctx context.Context, req *proxy.MountRequest, mounter mount.Interface) (int, error) {
+	return PrepareFuseFD(ctx, req, mounter)
+}
+
+// PrepareFuseFD is shared with asynchronous native-sidecar delivery. The caller
+// owns the returned fd and must close it and undo the mount on submission error.
+func PrepareFuseFD(ctx context.Context, req *proxy.MountRequest, mounter mount.Interface) (int, error) {
 	logger := klog.FromContext(ctx)
 
 	fuseFd, err := unix.Open("/dev/fuse", unix.O_RDWR, 0o644)
@@ -188,6 +195,16 @@ func (c *client) prepareFuseFd(ctx context.Context, req *proxy.MountRequest, mou
 	// Only daemon options are sent to server
 	req.Options = daemonOptions
 	return fuseFd, nil
+}
+
+// DaemonOptions permits a producer to hash the same request on every retry
+// without opening another FUSE connection just to normalize kernel options.
+func DaemonOptions(req *proxy.MountRequest) []string {
+	_, options := splitFuseOptions(req.Options, req.MountFlags)
+	// splitFuseOptions returns a set; canonicalize it before hashing a file
+	// request so an identical NodePublish retry keeps the same generation.
+	sort.Strings(options)
+	return options
 }
 
 func (c *client) Unmount(ctx context.Context, req *proxy.UnmountRequest) (*proxy.Response, error) {

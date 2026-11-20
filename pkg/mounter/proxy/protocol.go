@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"slices"
+	"strings"
 
 	"k8s.io/klog/v2"
 )
@@ -82,22 +84,78 @@ func (r *Response) HasMethod(m Method) bool {
 }
 
 type MountRequest struct {
-	Source      string            `json:"source,omitempty"`
-	Target      string            `json:"target,omitempty"`
-	Fstype      string            `json:"fstype,omitempty"`
-	FdPassing   bool              `json:"fdPassing,omitempty"`
-	Recovery    bool              `json:"recovery,omitempty"`
-	Options     []string          `json:"options,omitempty"`
-	MountFlags  []string          `json:"mountFlags,omitempty"`
-	Secrets     map[string]string `json:"secrets,omitempty"`
-	MetricsPath string            `json:"metricsPath,omitempty"`
-	VolumeID    string            `json:"volumeID,omitempty"`
+	// Extensions preserves fields introduced by a newer CSI image when a
+	// request is decoded, validated and serialized by an older file consumer.
+	Extensions  map[string]json.RawMessage `json:"-"`
+	Source      string                     `json:"source,omitempty"`
+	Target      string                     `json:"target,omitempty"`
+	Fstype      string                     `json:"fstype,omitempty"`
+	FdPassing   bool                       `json:"fdPassing,omitempty"`
+	Recovery    bool                       `json:"recovery,omitempty"`
+	Options     []string                   `json:"options,omitempty"`
+	MountFlags  []string                   `json:"mountFlags,omitempty"`
+	Secrets     map[string]string          `json:"secrets,omitempty"`
+	MetricsPath string                     `json:"metricsPath,omitempty"`
+	VolumeID    string                     `json:"volumeID,omitempty"`
 	// Overlay instructs mount-proxy-server to set up an overlayfs on top of the
 	// FUSE/NFS mount. When true, mount-proxy-server mounts the filesystem to an
 	// internal lower dir, then creates an overlay with a writable upper layer and
 	// exposes the merged view at Target.
 	// Forward-compatible: old mount-proxy-server versions ignore unknown JSON fields.
 	Overlay bool `json:"overlay,omitempty"`
+}
+
+type mountRequestJSON MountRequest
+
+func (m MountRequest) MarshalJSON() ([]byte, error) {
+	b, err := json.Marshal(mountRequestJSON(m))
+	if err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(b, &fields); err != nil {
+		return nil, err
+	}
+	for k, v := range m.Extensions {
+		// Known fields, including omitted zero values, always win.
+		if _, known := mountRequestFields[strings.ToLower(k)]; !known {
+			fields[k] = v
+		}
+	}
+	return json.Marshal(fields)
+}
+
+var mountRequestFields = func() map[string]struct{} {
+	fields := map[string]struct{}{}
+	t := reflect.TypeOf(mountRequestJSON{})
+	for i := 0; i < t.NumField(); i++ {
+		key := strings.Split(t.Field(i).Tag.Get("json"), ",")[0]
+		if key != "" && key != "-" {
+			fields[strings.ToLower(key)] = struct{}{}
+		}
+	}
+	return fields
+}()
+
+func (m *MountRequest) UnmarshalJSON(b []byte) error {
+	var decoded mountRequestJSON
+	if err := json.Unmarshal(b, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(b, &fields); err != nil {
+		return err
+	}
+	for k := range fields {
+		if _, known := mountRequestFields[strings.ToLower(k)]; known {
+			delete(fields, k)
+		}
+	}
+	*m = MountRequest(decoded)
+	if len(fields) > 0 {
+		m.Extensions = fields
+	}
+	return nil
 }
 
 // UnmountRequest asks mount-proxy-server to unmount a mount point that was

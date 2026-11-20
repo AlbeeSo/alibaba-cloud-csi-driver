@@ -28,12 +28,14 @@ func init() {
 
 type Driver struct {
 	mounter.Mounter
-	pids           *sync.Map
-	activeTargets  sync.Map // target path → struct{}; tracks targets with a running daemon
-	monitorManager *server.MountMonitorManager
-	wg             sync.WaitGroup
-	overlay        *server.OverlayManager
-	terminating    atomic.Bool // Set to true during Terminate() to block recovery
+	pids            *sync.Map
+	activeTargets   sync.Map // target path → struct{}; tracks targets with a running daemon
+	monitorManager  *server.MountMonitorManager
+	wg              sync.WaitGroup
+	overlay         *server.OverlayManager
+	terminating     atomic.Bool // Set to true during Terminate() to block recovery
+	fileStops       sync.Map    // target -> *fileFDStop; only asynchronous file/fd consumers
+	targetProcesses sync.Map    // target -> *exec.Cmd, including recovery replacements
 }
 
 func NewDriver() *Driver {
@@ -82,6 +84,59 @@ func (h *Driver) Mount(ctx context.Context, req *proxy.MountRequest, fuseFd int)
 }
 
 func (h *Driver) Init() {}
+
+func (h *Driver) MountFile(ctx context.Context, req *proxy.MountRequest, ready func(string) (bool, error)) (<-chan error, error) {
+	return server.MountFile(ctx, h.Mounter, req, ready)
+}
+
+func (h *Driver) MountFileFD(ctx context.Context, req *proxy.MountRequest, fd int, observe func(string, error)) (<-chan error, error) {
+	stop := &fileFDStop{done: make(chan struct{})}
+	if _, loaded := h.fileStops.LoadOrStore(req.Target, stop); loaded {
+		return nil, fmt.Errorf("file fd consumer already exists")
+	}
+	exit, err := server.MountFileObserved(ctx, h.Mounter, req, nil, fd, observe)
+	if err != nil {
+		h.fileStops.Delete(req.Target)
+	}
+	return exit, err
+}
+
+type fileFDStop struct {
+	stopping atomic.Bool
+	done     chan struct{}
+}
+
+func (h *Driver) shouldStop(target string) bool {
+	if h.terminating.Load() {
+		return true
+	}
+	if value, ok := h.fileStops.Load(target); ok {
+		return value.(*fileFDStop).stopping.Load()
+	}
+	return false
+}
+
+// ReleaseFileFD stops only this consumer. It cannot unmount the host target:
+// that privileged operation remains with CSI after the release acknowledgment.
+func (h *Driver) ReleaseFileFD(ctx context.Context, target string) error {
+	value, ok := h.fileStops.Load(target)
+	if !ok {
+		return nil
+	}
+	stop := value.(*fileFDStop)
+	stop.stopping.Store(true)
+	if command, ok := h.targetProcesses.Load(target); ok {
+		if err := command.(*exec.Cmd).Process.Signal(syscall.SIGTERM); err != nil && err != os.ErrProcessDone {
+			return err
+		}
+	}
+	select {
+	case <-stop.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 // ApplyOptionDefaults applies driver-specific option defaults to mount options.
 // Rules are divided into:

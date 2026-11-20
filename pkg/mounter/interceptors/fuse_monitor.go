@@ -34,14 +34,24 @@ func FuseMonitorInterceptor(ctx context.Context, op *mounter.MountOperation, han
 
 	// Register callbacks for async metrics updates before mount starts.
 	// This ensures callbacks are ready before any post-attach failure occurs.
+	previousExit, previousSuccess, previousFailure := op.OnProcessExit, op.OnRecoverySuccess, op.OnRecoveryFailed
 	op.OnProcessExit = func(exitErr error) {
 		monitor.HandleProcessExitForRecovery(exitErr)
+		if previousExit != nil {
+			previousExit(exitErr)
+		}
 	}
 	op.OnRecoverySuccess = func(pid int, exitErr error, attempts int) {
 		monitor.HandleRecoverySuccess(pid, exitErr, attempts)
+		if previousSuccess != nil {
+			previousSuccess(pid, exitErr, attempts)
+		}
 	}
 	op.OnRecoveryFailed = func(exitErr error, recoveryErr error, attempts int) {
 		monitor.HandleRecoveryFailed(exitErr, recoveryErr, attempts)
+		if previousFailure != nil {
+			previousFailure(exitErr, recoveryErr, attempts)
+		}
 	}
 
 	err := handler(ctx, op)
@@ -64,13 +74,25 @@ func FuseMonitorInterceptor(ctx context.Context, op *mounter.MountOperation, han
 		return err
 	}
 
+	// Relay the terminal outcome to the file worker after observing it. Two
+	// independent readers on the original channel could lose the exit error.
+	originalExit := res.ExitChan
+	workerExit := make(chan error, 1)
+	res.ExitChan = workerExit
+	op.MountResult = res
 	go func() {
-		exitErr := <-res.ExitChan
+		exitErr, received := <-originalExit
 		// Assume the process exits with no error upon receiving SIGTERM,
 		// and exits with an error in case of unexpected failures.
 		if err == nil && exitErr != nil {
 			monitor.HandleMountFailureOrExit(exitErr)
 		}
+		// The worker may retire its control directory immediately after this
+		// terminal notification. Finish the metric write before handing it off.
+		if received {
+			workerExit <- exitErr
+		}
+		close(workerExit)
 	}()
 
 	if err != nil {

@@ -9,6 +9,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/diagnostic"
 	mounterutils "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
 	"k8s.io/klog/v2"
 )
@@ -47,8 +48,8 @@ func (m *extendedMounter) runCmd(op *mounter.MountOperation, recovery bool, sw s
 	}
 
 	cmd := exec.Command("ossfs2", args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = diagnostic.NewWriter(os.Stdout, op.Secrets)
+	cmd.Stderr = diagnostic.NewWriter(os.Stderr, op.Secrets)
 	if sw != nil {
 		cmd.Stderr = sw
 	}
@@ -69,7 +70,7 @@ func (m *extendedMounter) runCmd(op *mounter.MountOperation, recovery bool, sw s
 		klog.V(4).InfoS("Passing FUSE fd to ossfs2 child", "originalFd", op.FuseFd, "dupFd", dupFd, "childFd", 3)
 	}
 
-	klog.V(4).InfoS("Starting ossfs2", "args", args)
+	klog.V(4).InfoS("Starting ossfs2", "args", diagnostic.Args(args, op.Secrets))
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start ossfs2 failed: %w", err)
 	}
@@ -80,7 +81,11 @@ func (m *extendedMounter) runCmd(op *mounter.MountOperation, recovery bool, sw s
 // buildOssfs2Args constructs the command-line arguments for ossfs2 based on mount options,
 // fd-passing mode, and recovery settings.
 func buildOssfs2Args(op *mounter.MountOperation, recovery bool) ([]string, error) {
-	args := []string{"mount", op.Target}
+	target := op.Target
+	if op.ClientTarget != "" {
+		target = op.ClientTarget
+	}
+	args := []string{"mount", target}
 	args = append(args, op.Args...)
 	for _, o := range op.Options {
 		args = append(args, fmt.Sprintf("--%s", o))

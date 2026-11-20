@@ -2,10 +2,10 @@ package directvolume
 
 import (
 	"encoding/json"
-	utilsio "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils/io"
 	"os"
 	"path/filepath"
 
+	utilsio "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils/io"
 	"github.com/pkg/errors"
 	"golang.org/x/sys/unix"
 )
@@ -13,6 +13,7 @@ import (
 const (
 	DeviceTypeBlock     = "block"
 	DeviceTypeNFS       = "nfs"
+	DeviceTypeFUSE      = "fuse"
 	DeviceTypeCPFS      = "cpfs-nfs"
 	DeviceTypePCI       = "pci"
 	DeviceTypeDFBusPort = "dfbus"

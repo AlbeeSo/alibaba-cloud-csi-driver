@@ -14,8 +14,10 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/diagnostic"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/server"
 	mounterutils "github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/utils"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 )
 
@@ -36,6 +38,9 @@ func (m *extendedMounter) mount(ctx context.Context, op *mounter.MountOperation)
 		var err error
 		chanId, err = getFuseChannelID(target)
 		if err != nil {
+			if op.RequireRecovery {
+				return fmt.Errorf("required FUSE recovery cannot identify its connection: %w", err)
+			}
 			logger.Error(err, "Failed to get FUSE channel ID, recovery disabled")
 			recovery = false
 		} else {
@@ -45,7 +50,7 @@ func (m *extendedMounter) mount(ctx context.Context, op *mounter.MountOperation)
 
 	// Capture stderr during initial mount for error diagnostics
 	var stderrBuf bytes.Buffer
-	sw := server.NewSwitchableWriter(io.MultiWriter(os.Stderr, &stderrBuf))
+	sw := server.NewSwitchableWriter(io.MultiWriter(os.Stderr, &stderrBuf), op.Secrets)
 
 	proc, err := m.startAndWaitReady(ctx, op, recovery, sw)
 	sw.SwitchTarget(os.Stderr)
@@ -71,6 +76,7 @@ func (m *extendedMounter) mount(ctx context.Context, op *mounter.MountOperation)
 
 	trulyExited := make(chan error, 1)
 	m.driver.pids.Store(pid, proc.cmd)
+	m.driver.targetProcesses.Store(target, proc.cmd)
 	m.driver.activeTargets.Store(target, struct{}{})
 	op.MountResult = server.FuseMountResult{
 		PID:      pid,
@@ -101,6 +107,7 @@ func (m *extendedMounter) startAndWaitReady(
 	var cmdDone atomic.Bool
 	go func() {
 		waitErr := cmd.Wait()
+		diagnostic.FlushCommand(cmd)
 		if waitErr == nil {
 			waitErr = fmt.Errorf("ossfs2 exited with no error")
 		}
@@ -113,7 +120,18 @@ func (m *extendedMounter) startAndWaitReady(
 		err = m.waitForFdPassingMountReady(ctx, op.Target, op.FuseFd, exited)
 	} else {
 		klog.InfoS("Waiting for legacy mount readiness", "target", op.Target, "pid", cmd.Process.Pid)
-		err = m.waitForLegacyMountReady(ctx, op.Target, exited)
+		if op.MountReady == nil {
+			err = m.waitForLegacyMountReady(ctx, op.Target, exited)
+		} else {
+			err = wait.PollUntilContextCancel(ctx, 100*time.Millisecond, true, func(context.Context) (bool, error) {
+				select {
+				case err := <-exited:
+					return false, ossfs2ExitError(err)
+				default:
+					return op.MountReady(op.Target)
+				}
+			})
+		}
 	}
 
 	if err != nil {

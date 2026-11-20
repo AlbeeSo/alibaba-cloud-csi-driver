@@ -134,6 +134,8 @@ spec:
               name: kata-direct-volumes
             - mountPath: /host/var/run/customfuse
               name: customfuse-metrics-dir
+            - mountPath: /host/var/run/ossfs/file-volumes
+              name: fuse-file-controls
             - mountPath: /run/fuse.customfuse
               name: customfuse-attach-dir
               mountPropagation: "Bidirectional"
@@ -178,6 +180,10 @@ spec:
         - name: customfuse-metrics-dir
           hostPath:
             path: /var/run/customfuse
+            type: DirectoryOrCreate
+        - name: fuse-file-controls
+          hostPath:
+            path: /var/run/ossfs/file-volumes
             type: DirectoryOrCreate
         - name: customfuse-attach-dir
           hostPath:

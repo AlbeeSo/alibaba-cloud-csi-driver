@@ -18,6 +18,7 @@ import (
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/interceptors"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/jwtauth"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy"
+	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/diagnostic"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/mounter/proxy/server"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
@@ -160,6 +161,10 @@ func (h *Driver) Mount(ctx context.Context, req *proxy.MountRequest, _ int) erro
 	})
 }
 
+func (h *Driver) MountFile(ctx context.Context, req *proxy.MountRequest, ready func(string) (bool, error)) (<-chan error, error) {
+	return server.MountFile(ctx, h.Mounter, req, ready)
+}
+
 type extendedMounter struct {
 	driver *Driver
 	mount.Interface
@@ -193,13 +198,13 @@ func (m *extendedMounter) ExtendedMount(ctx context.Context, op *mounter.MountOp
 
 	stderrBuf := newStderrTail(stderrTailLimit)
 	multiWriter := io.MultiWriter(os.Stderr, stderrBuf)
-	sw := server.NewSwitchableWriter(multiWriter)
+	sw := server.NewSwitchableWriter(multiWriter, op.Secrets)
 	cmd := newEntrypointCmd(entrypoint)
 	// Safe to append after the inherited environment: buildEnvVars refuses any
 	// name it already defines, so nothing here can shadow it.
 	cmd.Env = append(os.Environ(), env...)
 	cmd.Stdin = op.Stdin
-	cmd.Stdout = os.Stdout
+	cmd.Stdout = diagnostic.NewWriter(os.Stdout, op.Secrets)
 	cmd.Stderr = sw
 	// Its own process group, so that cleanup reaches what the entrypoint starts
 	// before exec'ing the client, and not just the entrypoint. See signalGroup.
@@ -223,6 +228,7 @@ func (m *extendedMounter) ExtendedMount(ctx context.Context, op *mounter.MountOp
 		defer m.driver.pids.Delete(pid)
 
 		err := cmd.Wait()
+		diagnostic.FlushCommand(cmd)
 		if err != nil {
 			stderrContent := stderrBuf.String()
 			if stderrContent != "" {
@@ -245,6 +251,11 @@ func (m *extendedMounter) ExtendedMount(ctx context.Context, op *mounter.MountOp
 			return false, fmt.Errorf("entrypoint exited unexpectedly")
 		default:
 			notMnt, err := m.IsLikelyNotMountPoint(target)
+			if op.MountReady != nil {
+				var ready bool
+				ready, err = op.MountReady(target)
+				notMnt = !ready
+			}
 			if err != nil {
 				logger.Error(err, "check mountpoint", "mountpoint", target)
 				return false, nil

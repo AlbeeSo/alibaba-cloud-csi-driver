@@ -69,6 +69,6 @@ func (t *stderrTail) String() string {
 		// write that exactly fills the ring, which leaves pos back at zero.
 		return string(t.buf[:t.written])
 	}
-	return fmt.Sprintf("...[%d earlier byte(s) dropped; the entrypoint's full stderr is in this container's log]\n%s%s",
+	return fmt.Sprintf("...[%d earlier byte(s) dropped; filtered client diagnostics are in this container's log]\n%s%s",
 		t.written-limit, t.buf[t.pos:], t.buf[:t.pos])
 }

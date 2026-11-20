@@ -65,15 +65,18 @@ type ProxyRefresher interface {
 var ErrTargetNotManagedByBroker = errors.New("target not managed by mount broker")
 
 type MountOperation struct {
-	Source      string
-	Target      string
-	FsType      string
-	Options     []string
-	Args        []string
-	Secrets     map[string]string
-	MetricsPath string
-	VolumeID    string
-	Overlay     bool
+	Source string
+	Target string
+	// ClientTarget is an optional local alias for a client's pathname-based
+	// metrics convention. Target remains the protocol/lifecycle mount identity.
+	ClientTarget string
+	FsType       string
+	Options      []string
+	Args         []string
+	Secrets      map[string]string
+	MetricsPath  string
+	VolumeID     string
+	Overlay      bool
 	// SensitiveOptions are mount options that carry secrets (e.g. STS
 	// credentials). They are passed to the mount via MountSensitive so they
 	// are masked in logs and error messages, and must never be logged.
@@ -82,9 +85,14 @@ type MountOperation struct {
 	FuseFd           int       // FUSE file descriptor from client; 0 means not available; valid fd > 0
 	FdPassing        bool      // whether to use fd-passing mode (client does kernel mount, passes fd to server)
 	Recovery         bool      // whether to enable recovery loop on process exit
+	RequireRecovery  bool      // fail instead of dropping an accepted asynchronous recovery contract
 	HasActiveDaemon  bool      // server-side: true when a FUSE daemon is already running for this target (token rotation)
 
 	MountResult any
+
+	// MountReady distinguishes a new FUSE mount from an existing shared PVC
+	// projection. Nil keeps the socket transport's mountpoint check.
+	MountReady func(string) (bool, error)
 
 	// Callbacks for lifecycle events (registered by interceptors, invoked by driver)
 	OnProcessExit     func(exitErr error)                                  // Called when process exits unexpectedly
