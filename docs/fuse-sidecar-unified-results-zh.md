@@ -72,8 +72,8 @@ NodeUnpublish 发明确的卸载请求；desired 缺失不是卸载命令。强�
 
 ## 尚未关闭的边界
 
-- **实际 rund RRSA：需恢复会话后复验 sidecar。** 用户已补充 RRSA 配置及既有令牌换证/真实挂载记录，“缺 IAM 配置”不再是当前阻塞结论。2026-11-20 千舟只读访问要求重新登录，尚未重新验证业务 sidecar 与轮转。历史自建 runv 的一致性问题不能直接推导到实际 rund；长 token 仅是测试窗口。
-- **native FD 的逐卷 SDK IO：根因已确认，客户端本地修复已验证，云上待复验。** 对照测试的两个旧 ACK 镜像仍有问题；用户提供源码后，已直接检查对应 commit。真正的指标链路使用 `fuse_opts.mountpoint`，该值在 FD 模式已改成设备路径；解析失败被忽略，空卷名产生根目录输出。此前关于空 g_mountpoint 的推测不是该指标链路的直接原因。客户端测试分支保留原始逻辑路径用于指标，libfuse 继续用 FD 路径，并拒绝非法指标路径。完整编译和 26 项相关单测通过；真实 FUSE/跨进程 SCM_RIGHTS 的内存 OSS HTTP 夹具中，旧客户端准确失败、修复版 FD 和 direct 两模式均通过，双卷计数分别为 6,656/14,336 字节且根目录无指标。该结果不是云上 OSS/RRSA 或新 SDK daemon recovery E2E；镜像仍待正常仓库访问恢复后上传和复验。没有复制根目录统计冒充逐卷归属，也没有引入额外客户端特权、chroot 或注入库。
+- **实际 rund RRSA：需恢复会话后复验 sidecar。** 用户已补充 RRSA 配置及既有令牌换证/真实挂载记录，“缺 IAM 配置”不再是当前阻塞结论。2026-11-20 已通过 CLI 恢复只读访问，并确认实际 RuntimeClass 的 handler 为 rund；现有 CSI 仍是原版本，尚未用新镜像重新验证业务 sidecar 与轮转。历史自建 runv 的一致性问题不能直接推导到实际 rund；长 token 仅是测试窗口。
+- **native FD 的逐卷 SDK IO：根因已确认，客户端本地修复已验证，云上待复验。** 对照测试的两个旧 ACK 镜像仍有问题；用户提供源码后，已直接检查对应 commit。真正的指标链路使用 `fuse_opts.mountpoint`，该值在 FD 模式已改成设备路径；解析失败被忽略，空卷名产生根目录输出。此前关于空 g_mountpoint 的推测不是该指标链路的直接原因。客户端测试分支保留原始逻辑路径用于指标，libfuse 继续用 FD 路径，并拒绝非法指标路径。完整编译和 26 项相关单测通过；真实 FUSE/跨进程 SCM_RIGHTS 的内存 OSS HTTP 夹具中，旧客户端准确失败、修复版 FD 和 direct 两模式均通过，双卷计数分别为 6,656/14,336 字节且根目录无指标。该结果不是云上 OSS/RRSA 或新 SDK daemon recovery E2E；测试镜像现已由源码流水线构建并可匿名完整拉取；最终镜像内的客户端也通过相同 FD/direct 双卷回归，云上真实 OSS/RRSA 与新 SDK daemon recovery 仍待复验。没有复制根目录统计冒充逐卷归属，也没有引入额外客户端特权、chroot 或注入库。
 - **不支持 recovery 的真实节点未测。** 当前仅一个支持能力的节点；能力探测/降级有集成测试，不冒充第二种内核 E2E。
 - **完整节点重启/永久断连、跨节点共享卷、全部客户端/架构没有穷举。** 已有进程/协议故障集测不能替代这些真实环境保证，不能据本轮报告宣称已覆盖。
 - **webhook 仅支持 Bound PVC。** WFFC/未绑定卷明确拒绝，不等待调度；无需求自动回退到任意路径。native OSS1/customfuse 直接挂载仍需特权 mountproxy，非特权承诺限定 FD-capable OSS2。
@@ -85,3 +85,12 @@ NodeUnpublish 发明确的卸载请求；desired 缺失不是卸载命令。强�
 最终回收在验证挂载清理后才销毁集群。自建集群、节点、镜像 namespace/仓库、专用网络连接、bucket、测试角色/策略、密钥对与专用交换机已删除，原有共享 VPC/镜像实例保留。独立查询确认节点角色、EIP、安全组、SLB、OIDC provider 与关联磁盘均不存在；私有回执保存在本地忽略目录。
 
 功能源码和文档已推送同一个 fork PR；功能及第一轮结果文档提交的 lint、增量覆盖率、拼写 CI 均通过。后续纯记录修正仍以 PR 当前 head 的检查为准。当前交付是有完整证据与明确缺口的 review 版本，不把上述客户端/实际运行时问题标记为生产验收通过。
+
+
+## 构建安全修复与最终镜像回归
+
+OSSFS2 Dockerfile 的 mountproxy 构建器由 Go 1.26.4 升级至官方 Go 1.26.11；CSI 的 `golang.org/x/net` 升级至 v0.62.0，并同步 vendor。新源码流水线的镜像构建、CVE 门禁及公开发布任务均成功，匿名完整拉取成功。直接读取镜像内两个 mountproxy 的 Go build info，确认工具链、依赖与预期 CSI 提交一致。
+
+构建期间发现 `RUN git clone` 同名分支会命中旧 Docker 层缓存；该次构建已取消，最终验收使用关闭缓存、确认重新执行 clone 的流水线结果。后续重用可变分支时必须失效 clone 缓存或使用不可变源码标识，不能仅凭流水线显示的分支名称确认版本。
+
+升级后 Linux proxy/filevolume 测试通过，两个 mountproxy 程序交叉编译通过，PR 的 lint、增量覆盖率与拼写检查通过。使用最终镜像中的 OSSFS2 再执行真实 FUSE 双卷回归：FD 模式通过跨进程 SCM_RIGHTS 传递，客户端 effective/bounding capabilities 均为空；FD 与普通 direct 模式的两个吞吐计数均分别为 6,656 和 14,336 字节，共享根目录无指标文件。后端为内存 OSS HTTP 夹具；此结果不替代真实 OSS、RRSA、kubelet 生命周期或新 SDK recovery 的集群验收。
