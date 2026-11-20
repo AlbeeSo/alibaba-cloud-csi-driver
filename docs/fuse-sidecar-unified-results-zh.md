@@ -125,3 +125,9 @@ OSSFS2 Dockerfile 的 mountproxy 构建器由 Go 1.26.4 升级至官方 Go 1.26.
 失败诊断还暴露 SDK stderr 中的临时 AccessKeyId 会进入状态/probe。新增共享诊断过滤器：在 stdout/stderr 分行完整识别后再发布，覆盖已知请求 Secret 值、常见 AK/JWT、带名 token/secret/password、HTTP authorization 等形式；错误状态在截断前再次过滤，保留卷和失败原因。未完成的行跨 Write/输出切换保持私有，超长单行明确省略，避免从截断边缘泄露部分凭据；正常多行错误仍按既有有限尾缓冲传递。切换输出目标不等待可能阻塞的日志 sink。子进程 EOF 刷新末行，关闭/超时仍按原进程组生命周期处理。
 
 该过滤器处理 mountproxy 收集并公开的诊断，不能替代任意自定义客户端自行写文件的日志策略，也不能识别任意无标签、未知格式的私密业务数据。增加了真实子进程无换行输出、分片凭据、输出切换、超长单行、协议错误截断和 race 回归。
+
+## 节点重启与 Pod 删除并发：kubelet 清理元数据
+
+隔离 x86_64 Linux VM（QEMU、Ubuntu 6.8.0-147、k3s v1.33.6）重启时，API 刚恢复会短暂保留旧 Ready/旧业务日志，验收必须等待 Node 上报新 boot ID、重启后新 IO 和实时读取，不能只查 Ready。首次夹具过早读取旧状态后请求删除，实际触发了 kubelet 的重建/终止并发：一卷 NodePublish 收到 terminating Pod，原实现返回 FailedPrecondition；kubelet 将其视作已结束的失败，删除 `vol_data.json`，随后 NewUnmounter 缺该文件，甚至无法发出 NodeUnpublish。此轮不计为回收通过；只在确认该 UID 无宿主机挂载后，为失败夹具恢复精确的 kubelet 元数据，以便继续独立重测。
+
+代码修正为 terminating Pod 返回 Aborted：仍拒绝开始新挂载，但把正在终止的卷保留为未确定完成，交给正常 NodeUnpublish。OSS guest/native 与 customfuse 共用该校验并保留状态码；身份/节点不匹配仍是 FailedPrecondition。新增覆盖实际 node wrapper 的回归，断言无控制文件创建、无额外 PVC 查询。依据是 Kubernetes v1.33 的 [CSI client 错误分类](https://github.com/kubernetes/kubernetes/blob/v1.33.6/pkg/volume/csi/csi_client.go)和 [mounter 失败清理](https://github.com/kubernetes/kubernetes/blob/v1.33.6/pkg/volume/csi/csi_mounter.go)；不是在 CSI 中重建或接管 kubelet 的元数据文件。修复后的真实重启/并发删除结果另行记录，不能把夹具手工恢复算为产品兜底。

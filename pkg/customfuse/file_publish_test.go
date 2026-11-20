@@ -129,3 +129,16 @@ func TestCustomFileConsumerValidationAndControllerSkip(t *testing.T) {
 	_, err = (&controllerServer{}).ControllerPublishVolume(context.Background(), &csi.ControllerPublishVolumeRequest{VolumeContext: map[string]string{filevolume.MountModeKey: "invalid"}})
 	require.Equal(t, codes.InvalidArgument, status.Code(err))
 }
+
+func TestTerminatingCustomSidecarPublishIsRetryableWithoutNewState(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CSI_FUSE_FILE_ROOT", root)
+	pod, req := customFileFixture(t)
+	pod.DeletionTimestamp = ptr.To(meta.Now())
+	client := fake.NewSimpleClientset(pod)
+	ns := &nodeServer{locks: utils.NewVolumeLocks(), rawMounter: mount.NewFakeMounter(nil), GenericNodeServer: common.GenericNodeServer{NodeID: "node"}}
+	_, err := common.WrapNodeServerWithMetricRecorder(ns, "customfuse", client).NodePublishVolume(t.Context(), req)
+	require.Equal(t, codes.Aborted, status.Code(err))
+	require.NoDirExists(t, filepath.Join(root, "uid"))
+	require.Len(t, client.Actions(), 1)
+}

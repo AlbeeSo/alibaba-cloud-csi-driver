@@ -189,7 +189,7 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		}
 		if consumer != nil {
 			if err := filevolume.ValidatePublishPod(pod, req, ns.nodeName); err != nil {
-				return nil, status.Error(codes.FailedPrecondition, err.Error())
+				return nil, err
 			}
 			return ns.publishFileVolume(ctx, req, opts, pod)
 		}

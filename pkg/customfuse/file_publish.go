@@ -49,7 +49,7 @@ func (ns *nodeServer) selectFileConsumer(ctx context.Context, req *csi.NodePubli
 		return nil, status.Errorf(codes.FailedPrecondition, "customfuse requires sidecar %s, not the OSS consumer", filevolume.CustomSidecarName)
 	}
 	if err := filevolume.ValidatePublishPod(pod, req, ns.NodeID); err != nil {
-		return nil, status.Error(codes.FailedPrecondition, err.Error())
+		return nil, err
 	}
 	return pod, nil
 }

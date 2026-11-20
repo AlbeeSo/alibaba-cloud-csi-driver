@@ -6,6 +6,8 @@ import (
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/kubernetes-sigs/alibaba-cloud-csi-driver/pkg/utils"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	core "k8s.io/api/core/v1"
 )
 
@@ -51,13 +53,16 @@ func RequireSidecar(attributes map[string]string) (bool, error) {
 // no container name or mutable control file can authorize another Pod's target.
 func ValidatePublishPod(pod *core.Pod, req *csi.NodePublishVolumeRequest, node string) error {
 	if pod == nil || string(pod.UID) == "" || string(pod.UID) != req.VolumeContext["csi.storage.k8s.io/pod.uid"] || pod.Name != req.VolumeContext[utils.PodNameKey] || pod.Namespace != req.VolumeContext[utils.PodNamespaceKey] {
-		return fmt.Errorf("sidecar requires matching PodInfo name, namespace and UID")
+		return status.Error(codes.FailedPrecondition, "sidecar requires matching PodInfo name, namespace and UID")
 	}
 	if node != "" && pod.Spec.NodeName != node {
-		return fmt.Errorf("sidecar Pod is not scheduled on this CSI node")
+		return status.Error(codes.FailedPrecondition, "sidecar Pod is not scheduled on this CSI node")
 	}
 	if pod.DeletionTimestamp != nil {
-		return fmt.Errorf("cannot publish a new mount for a terminating Pod")
+		// Kubelet can reconstruct a previously published volume during teardown.
+		// A final error removes vol_data.json and can prevent NewUnmounter from
+		// issuing NodeUnpublish. Keep progress uncertain until teardown completes.
+		return status.Error(codes.Aborted, "cannot publish a new mount for a terminating Pod; volume teardown is pending")
 	}
 	return nil
 }

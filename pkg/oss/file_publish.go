@@ -37,15 +37,8 @@ func (ns *nodeServer) podForDirectPublish(ctx context.Context, req *csi.NodePubl
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "resolve Pod for direct mount: %v", err)
 	}
-	uid := req.VolumeContext["csi.storage.k8s.io/pod.uid"]
-	if uid == "" || string(pod.UID) != uid || pod.Name != req.VolumeContext[utils.PodNameKey] || pod.Namespace != req.VolumeContext[utils.PodNamespaceKey] {
-		return nil, status.Error(codes.FailedPrecondition, "direct mount requires matching PodInfo name, namespace and UID")
-	}
-	if ns.nodeName != "" && pod.Spec.NodeName != ns.nodeName {
-		return nil, status.Error(codes.FailedPrecondition, "direct mount Pod is not scheduled on this CSI node")
-	}
-	if pod.DeletionTimestamp != nil {
-		return nil, status.Error(codes.FailedPrecondition, "cannot publish a new mount for a terminating Pod")
+	if err := filevolume.ValidatePublishPod(pod, req, ns.nodeName); err != nil {
+		return nil, err
 	}
 	return pod, nil
 }

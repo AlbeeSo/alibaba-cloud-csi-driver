@@ -167,6 +167,9 @@ func TestDirectPublishFailsClosedWithoutAdditionalQueries(t *testing.T) {
 			server := common.WrapNodeServerWithMetricRecorder(ns, "oss", client)
 			_, err := server.NodePublishVolume(context.Background(), fileRequest(t, 0, "ossfs2"))
 			want := codes.FailedPrecondition
+			if scenario == "terminating-pod" {
+				want = codes.Aborted
+			}
 			if scenario == "api-failure" {
 				want = codes.Unavailable
 			}
@@ -336,4 +339,21 @@ func fileQueryCounts(t *testing.T, client *fake.Clientset) (pods, claims int) {
 		}
 	}
 	return
+}
+
+func TestTerminatingNativeSidecarPublishIsRetryableWithoutNewState(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CSI_FUSE_FILE_ROOT", root)
+	pod := manualFilePod("runc", 1)
+	pod.DeletionTimestamp = ptr.To(metav1.Now())
+	req := fileRequest(t, 0, "ossfs2")
+	req.VolumeContext["runtimeclass"] = "runc"
+	req.VolumeContext[filevolume.MountModeKey] = "sidecar"
+	client := fake.NewSimpleClientset(pod)
+	ns := setupTestNodeServer(t, mount.NewFakeMounter(nil), false)
+	server := common.WrapNodeServerWithMetricRecorder(ns, "oss", client)
+	_, err := server.NodePublishVolume(t.Context(), req)
+	require.Equal(t, codes.Aborted, status.Code(err))
+	require.NoDirExists(t, filepath.Join(root, "pod-a"))
+	require.Len(t, client.Actions(), 1, "only the existing Pod lookup is needed")
 }
